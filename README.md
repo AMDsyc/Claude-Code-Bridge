@@ -341,7 +341,13 @@ MCP subprocess: run `/mcp` in that window and reconnect `bridge`.
 
 ## Licence
 
-MIT. See `LICENSE`.
+GNU Affero General Public License v3.0. The full text is in `LICENSE`.
+
+What that means in practice: you may use, study, change and share it, and if
+you change it you have to publish your changes under the same licence. The
+Affero part matters for a tool like this — running a modified version as a
+service other people reach over a network counts, so the source of what is
+running has to be available to them. It cannot be closed up and resold.
 
 ---
 

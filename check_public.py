@@ -27,7 +27,8 @@ Three named exceptions, named rather than general on purpose - a blanket
 "ignore this pattern" is how a scanner stops scanning:
 
   AUTHOR_LINE       the authorship line the owner asked for, and the
-                    copyright line of the licence
+                    copyright line of the licence and the AGPL
+                    notice at the head of every source file
   check_public.py   its own source, which by construction holds every
                     pattern it looks for
   placeholders      the generic forms the docs are supposed to use:
@@ -137,7 +138,8 @@ def exempt(line, kind, rel=""):
         # This file necessarily contains every pattern it searches for, and a
         # scanner that flags its own source is a scanner nobody runs twice.
         return True
-    if "Copyright (c) 2026 AMDsyc" in line:
+    if ("Copyright (C) 2026  AMDsyc" in line
+            or "Copyright (c) 2026 AMDsyc" in line):
         return True
     if AUTHOR_LINE in line:
         return True

@@ -107,6 +107,15 @@ is not a framework and it does not try to be one.
 
 ---
 
+## Licence
+
+GNU Affero General Public License v3.0 (AGPL-3.0). Free software: use it,
+change it, share it - and publish your changes under the same licence.
+Running a modified version as a network service counts as distribution, so
+the source of what is running stays available. It cannot be closed and resold.
+
+---
+
 ## Topics for GitHub
 
 ```

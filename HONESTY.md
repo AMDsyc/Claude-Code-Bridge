@@ -68,9 +68,11 @@ The rules do not replace the task. They say how to do it.
 ## The planner
 
 11. **Acceptance is yours, and you do it.** With your own eyes, not "the
-    executor reported". The executor does not accept its own work.
+    executor reported". The executor does not accept its own work. This
+    holds for `continue` too: a judgement on the substance, made from the
+    report, is the same acceptance by hearsay under another name.
     *Check:* the verdict names something you opened yourself — a file, a
-    number, the output of a command you ran.
+    number, the output of a command you ran. Only `wait` is free of it.
 
 12. **Check completely, not selectively.** Every point, every seam, from
     several sides. A number that adds up while the result is broken is an
@@ -163,10 +165,9 @@ and fire at the moment of the action:
 - **A verdict that accepts work** (`done`/`stop`) is not taken without a
   `Checked:` block naming paths that the bridge opens for itself. A path that
   is not there is refused by name. A refusal costs the report nothing: it
-  stays unanswered, and answering it twice is still impossible. `continue` and
-  `wait` are not gated — they accept nothing. Work with genuinely nothing to
-  open has a way out — `Checked: no artifacts — <reason>` — but every use is
-  counted and shown.
+  stays unanswered, and answering it twice is still impossible. Work with
+  genuinely nothing to open has a way out — `Checked: no artifacts —
+  <reason>` — but every use is counted and shown.
 - **A report that changed code** is not accepted without
   `Residence: file:function` — where the fix lives.
 - **A temporary solution** is declared as `Debt: <what is temporary> — <what

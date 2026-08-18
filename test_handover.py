@@ -1305,9 +1305,19 @@ _good3, _dead3 = daemon.artifact_paths("build.log", _here)
 check("a bare name that does not exist is ignored rather than held "
       "against the writer", (_good3, _dead3), ([], []))
 print("   the four verdicts: two accept work and are gated, two do not")
-for _v in ("continue", "wait"):
-    check("'%s' is never gated" % _v,
-          daemon.verdict_gate(_here, _v, "")[0], True)
+# This read "continue and wait are never gated". Only wait is now: continue
+# carries a judgement, and a judgement made from the report is acceptance by
+# hearsay. Changed deliberately - the case still asks which verdicts are free.
+check("'wait' is never gated - it judges nothing, it says a process runs",
+      daemon.verdict_gate(_here, "wait", "")[0], True)
+check("'continue' is, because it judges",
+      daemon.verdict_gate(_here, "continue", "looks fine")[0], False)
+check("and its refusal names why, not just that it failed",
+      "hearsay" in daemon.verdict_gate(_here, "continue", "looks fine")[1],
+      True)
+check("a continue with something real to open goes through",
+      daemon.verdict_gate(_here, "continue", "Checked: bridge/store.py")[0],
+      True)
 for _v in ("done", "stop"):
     _ok, _why, _kind = daemon.verdict_gate(_here, _v, "accepted, good")
     check("'%s' without a block is refused" % _v, _ok, False)

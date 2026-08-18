@@ -16,6 +16,11 @@ note you leave it, the event feed, the archive and its search. What is shared
 is the account: the five-hour plan limit belongs to you, not to a project, so
 the bridge watches it across all of them.
 
+**Status: active development.** The shape of this and the rules it enforces
+change as new ways around them turn up — most of what is here arrived that
+way. The panel, the config keys and the format of what the bridge writes into
+a project can change between versions; backward compatibility is not promised.
+
 ## Why two sessions
 
 A single session fills its window and the client compacts it. Compaction keeps
@@ -334,6 +339,28 @@ python verify_package.py <repo> <zip> <unpacked> bytes.txt
 It compares the sha256 of every file across the repository, the archive entry
 and the unpacked copy. Running the tests from an unpacked copy proves that
 copy works; only comparing bytes proves it is the code you reviewed.
+
+## What it does not do
+
+Written down because finding out afterwards is worse than reading it here.
+
+- **Windows first.** It was written on Windows — console windows, `taskkill`,
+  `SetConsoleCtrlHandler` — with POSIX fallbacks throughout. The POSIX paths
+  are the less travelled ones.
+- **The channel needs the research preview.** The planner receives reports
+  through an MCP channel that some accounts are not enabled for. When it does
+  not come up the bridge falls back on its own: the report is written to
+  `<project>/bridge-logs/.../inbox/` and sent to Telegram, and the human
+  answers with `/verdict …` from the chat. The loop keeps running; it just
+  stops being unattended.
+- **English only.** The panel, the messages and the rules are English. There
+  is no localisation and no plan stated for one.
+- **No tests over the panel itself.** The five suites cover the daemon, the
+  loop, the archive and the handover arithmetic. `panel.html` is checked only
+  by a handful of assertions about its structure — nothing drives it in a
+  browser.
+- **One machine.** Everything binds to `127.0.0.1`. There is no remote mode
+  and no multi-user story.
 
 ## When the bridge seems unreachable
 

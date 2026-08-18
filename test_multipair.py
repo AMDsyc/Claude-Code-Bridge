@@ -454,15 +454,25 @@ check("and the note went only to the pair it was addressed to",
       ("alpha's note" in said["alpha"], "alpha's note" in said["beta"]),
       (True, False))
 
+# The block is here because the gate now covers continue as well; this case
+# is about which executor gets which feedback, and a refusal before delivery
+# would test the gate over and over instead. A real path rather than the
+# named exit, deliberately: the exit is counted, and a later case measures
+# that counter.
+for _p in (A, B):
+    with open(os.path.join(_p, "seen.txt"), "w", encoding="utf-8") as _fh:
+        _fh.write("read by the planner" + chr(10))
 post("/verdict", {"project": B, "verdict": "continue",
-                  "feedback": "BETA-FEEDBACK"}, secret=True)
+                  "feedback": "Checked: seen.txt\nBETA-FEEDBACK"},
+     secret=True)
 tb.join(30)
 check("answering beta releases beta", tb.is_alive(), False)
 check("and leaves alpha waiting", ta.is_alive(), True)
 check("beta's executor was handed beta's feedback",
       "BETA-FEEDBACK" in json.dumps(OUT.get("beta")), True)
 post("/verdict", {"project": A, "verdict": "continue",
-                  "feedback": "ALPHA-FEEDBACK"}, secret=True)
+                  "feedback": "Checked: seen.txt\nALPHA-FEEDBACK"},
+     secret=True)
 ta.join(30)
 check("then alpha is released too", ta.is_alive(), False)
 check("with its own feedback and not beta's",
@@ -1458,10 +1468,18 @@ print("    continue and wait accept nothing - gating them would only make")
 print("    the loop expensive. The exit for work with nothing to open is")
 print("    allowed on purpose, because the alternative teaches a pair to")
 print("    invent a path; what it cannot be is quiet")
-for v in ("continue", "wait"):
-    r = post("/verdict", {"project": GPROJ, "verdict": v,
-                          "feedback": "ok"}, secret=True)
-    check("'%s' passes with no block at all" % v, r.get("ok"), True)
+# This used to read "continue and wait pass with no block". Only wait does
+# now: continue carries a judgement, and a judgement made on the executor's
+# word is acceptance by hearsay. Changed deliberately - the case still asks
+# what it always asked, which verdicts are free of the gate.
+r = post("/verdict", {"project": GPROJ, "verdict": "wait",
+                      "feedback": "ok"}, secret=True)
+check("'wait' passes with no block at all - it judges nothing",
+      r.get("ok"), True)
+r = post("/verdict", {"project": GPROJ, "verdict": "continue",
+                      "feedback": "ok"}, secret=True)
+check("'continue' no longer does", (r.get("ok"), r.get("refused")),
+      (False, True))
 r = post("/verdict", {"project": GPROJ, "verdict": "done",
                       "feedback": "Checked: no artifacts — nothing"},
          secret=True)
@@ -1509,8 +1527,17 @@ check("and one implementation answers both, so they cannot drift",
       "verdict_gate(" in inspect.getsource(daemon.handle_event), True)
 out2 = pre({"verdict": "done", "feedback": "Checked: run.log"})
 check("a proper block is not denied", out2.get("hook_output"), None)
+# This used to say "continue is never denied". It is denied now when it
+# judges without opening anything - the same rule the daemon applies, asked
+# one step earlier. What the case is for is unchanged: the hook says the same
+# thing the daemon would.
 out3 = pre({"verdict": "continue", "feedback": "one more round"})
-check("and continue is never denied", out3.get("hook_output"), None)
+check("a continue that judges without artefacts is denied here too",
+      ((out3.get("hook_output") or {}).get("hookSpecificOutput") or {})
+      .get("permissionDecision"), "deny")
+out4 = pre({"verdict": "wait", "feedback": "still running"})
+check("and wait is never denied - it judges nothing",
+      out4.get("hook_output"), None)
 print("   frames: the planner says whether a piece is visual - the bridge")
 print("   never guesses it from the words of the report")
 post("/task", {"project": GPROJ,
@@ -1527,7 +1554,8 @@ threading.Thread(
 check("a report with no frames reaches the planner headed so",
       until(lambda: any(body_of(d.get("content")).startswith("NO FRAMES")
                         for d in DELIVERED[(canon(GPROJ), "planner")])), True)
-post("/verdict", {"project": GPROJ, "verdict": "continue", "feedback": "?"},
+post("/verdict", {"project": GPROJ, "verdict": "continue", "feedback":
+                      "Checked: no artifacts - releasing the executor for the next step of this case"},
      secret=True)
 SHOT = os.path.join(GPROJ, "shot.png")
 with open(SHOT, "wb") as fh:
@@ -1542,7 +1570,8 @@ check("a report that does name a real image is not headed at all",
                         for d in DELIVERED[(canon(GPROJ), "planner")])), True)
 check("and the request is cleared once it has been met",
       (daemon.STATE.get("frames") or {}).get(canon(GPROJ)), None)
-post("/verdict", {"project": GPROJ, "verdict": "continue", "feedback": "ok"},
+post("/verdict", {"project": GPROJ, "verdict": "continue", "feedback":
+                      "Checked: no artifacts - releasing the executor for the next step of this case"},
      secret=True)
 
 print("\n24. a code change is not accepted until someone says where it lives")
@@ -1670,7 +1699,8 @@ _debt2 = open(os.path.join(DPROJ, "bridge-logs", "DEBT.md"),
               encoding="utf-8").read()
 check("the register shows it closed and by what",
       ("Open: **0**" in _debt2 and "config.json" in _debt2), True)
-post("/verdict", {"project": DPROJ, "verdict": "continue", "feedback": "ok"},
+post("/verdict", {"project": DPROJ, "verdict": "continue", "feedback":
+                      "Checked: no artifacts - releasing the executor for the next step of this case"},
      secret=True)
 check("released", until(lambda: DD2), True)
 
@@ -1713,7 +1743,8 @@ print("   line for every report ever made")
 _pend = daemon.PENDING.get(canon(RP)) or {}
 check("PENDING keeps the report without the envelope",
       "RULES OF WORK" in (_pend.get("content") or ""), False)
-post("/verdict", {"project": RP, "verdict": "continue", "feedback": "ok"},
+post("/verdict", {"project": RP, "verdict": "continue", "feedback":
+                      "Checked: no artifacts - releasing the executor for the next step of this case"},
      secret=True)
 print("   and the tiering holds on the real path: a window that has "
       "never been")
@@ -1735,7 +1766,90 @@ check("and the second one carries the reminder instead",
             not in (DELIVERED[(canon(RP), "executor")][-1].get("content")
                     or "")), True)
 
-print("\n27. this suite leaves nothing behind in anybody's real state")
+print("\n28. continue is a judgement too, and judgement needs an artefact")
+print("    Another pair found the gap by falling into it: their planner")
+print("    checked that a receipt EXISTED, then passed judgement on the")
+print("    substance from the report - in a continue, which the gate let")
+print("    through. A gate on the accepting verdicts only is a gate with a")
+print("    door beside it, and continue is where most judging happens.")
+print("    continue is also the MOST FREQUENT verdict, so this case exists")
+print("    mostly to prove a refusal cannot stall the loop")
+CPROJ = B
+CSID = "cont0001"
+register(CPROJ, "planner", "cplan001")
+register(CPROJ, "executor", CSID)
+post("/loop", {"action": "start", "project": CPROJ})
+with open(os.path.join(CPROJ, "run.log"), "w", encoding="utf-8") as fh:
+    fh.write("exit 0\n")
+CDONE = []
+threading.Thread(
+    target=lambda: CDONE.append(stop_hook(CPROJ, "executor", CSID,
+                                          "The first slice is in and reviewed against the reference frame; no code was moved for it and the pipeline was not touched at all.")),
+    daemon=True).start()
+check("the report is waiting", until(lambda: daemon.PENDING.get(canon(CPROJ))),
+      True)
+it0 = daemon.loop_state(CPROJ)[1].get("iteration", 0)
+r = post("/verdict", {"project": CPROJ, "verdict": "continue",
+                      "feedback": "looks right in substance, carry on"},
+         secret=True)
+check("a continue that judges without opening anything is refused",
+      (r.get("ok"), r.get("refused")), (False, True))
+check("and the refusal says why, not just that it failed - acceptance on "
+      "the executor word is what it names",
+      "hearsay" in (r.get("error") or ""), True)
+r = post("/verdict", {"project": CPROJ, "verdict": "continue",
+                      "feedback": "Checked: out/nowhere/proof.txt"},
+         secret=True)
+check("a path that is not there is refused by name",
+      "proof.txt" in (r.get("error") or ""), True)
+print("   the half that would matter if it were wrong: a refused continue")
+print("   must cost the loop nothing, or the most frequent verdict becomes")
+print("   the most expensive one")
+check("the report is untouched by two refusals",
+      bool(daemon.PENDING.get(canon(CPROJ))), True)
+check("the executor is still blocked", CDONE, [])
+check("and no iteration was burned",
+      daemon.loop_state(CPROJ)[1].get("iteration", 0), it0)
+r = post("/verdict", {"project": CPROJ, "verdict": "continue",
+                      "feedback": "Checked: run.log - read it, exit 0"},
+         secret=True)
+check("a proper continue goes straight through", r.get("ok"), True)
+check("and the executor is released", until(lambda: CDONE), True)
+print("   wait is the one verdict left free, because it judges nothing")
+CW = []
+threading.Thread(
+    target=lambda: CW.append(stop_hook(CPROJ, "executor", CSID,
+                                       "The build is still running: four of the nine targets are through, the slowest one is still going, and I will report again when it lands.")), daemon=True).start()
+check("a second report arrives",
+      until(lambda: daemon.PENDING.get(canon(CPROJ))), True)
+r = post("/verdict", {"project": CPROJ, "verdict": "wait",
+                      "feedback": "Understood, the build is still running - I will look at it when it lands rather than judging anything from the report on its own right now. "
+                                  "running, I will look when it lands"},
+     secret=True)
+check("wait passes with no block at all", r.get("ok"), True)
+check("released", until(lambda: CW), True)
+print("   and the named exit still works on a continue, still loudly")
+noart0 = (daemon.STATE.get("noart") or {}).get(canon(CPROJ), 0)
+CN = []
+threading.Thread(
+    target=lambda: CN.append(stop_hook(CPROJ, "executor", CSID,
+                                       "Answered the question about the order of acceptance and wrote the answer into the notes; nothing was built and nothing on disk changed.")),
+    daemon=True).start()
+check("a third report arrives",
+      until(lambda: daemon.PENDING.get(canon(CPROJ))), True)
+r = post("/verdict", {"project": CPROJ, "verdict": "continue",
+                      "feedback": "Checked: no artifacts - this was a question "
+                                  "about the order of work and nothing was "
+                                  "built to look at"}, secret=True)
+check("the named exit is accepted on a continue as well", r.get("ok"), True)
+check("and counted, so leaning on it leaves a column",
+      (daemon.STATE.get("noart") or {}).get(canon(CPROJ), 0), noart0 + 1)
+_jn = json.dumps(store.recent_events(60, project=canon(CPROJ)),
+                 ensure_ascii=False)
+check("with a warn line in the feed", "NO ARTEFACTS" in _jn, True)
+check("released", until(lambda: CN), True)
+
+print("\n29. this suite leaves nothing behind in anybody's real state")
 check("its data lives in the temp folder",
       os.environ["BRIDGE_DATA"].startswith(TMP), True)
 check("so does the client's, so no transcript lands in the real store",

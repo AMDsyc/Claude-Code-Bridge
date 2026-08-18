@@ -15,7 +15,8 @@ Three wordings; pick one.
    review loop, acceptance gates, context accounting and session rotation.
 
 3. Runs your projects in pairs of Claude Code sessions — one edits, one
-   judges — and replaces a session before its context runs out.
+   judges — and replaces a session before its context runs out. In active
+   development.
 
 ---
 
@@ -33,6 +34,15 @@ context stays small because it never does the work, so it can keep judging
 clearly for hours after a single session would have filled up. Everything
 binds to `127.0.0.1`, there are no dependencies beyond the Python standard
 library, and the only outbound call is an optional Telegram notification.
+
+---
+
+## Status
+
+In active development. The shape of it and the rules it enforces change as new
+ways around them are found — most of what is in here arrived that way. The
+panel, the config keys and the format of what the bridge writes into a project
+can change between versions, and backward compatibility is not promised.
 
 ---
 

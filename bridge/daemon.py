@@ -3972,21 +3972,35 @@ def verdict_gate(path, verdict, feedback):
     instruction, not as a complaint: it says exactly what is missing.
     """
     v = (verdict or "").lower()
-    if v not in ("done", "stop"):
+    # "wait" is the only verdict that judges nothing - it says a process is
+    # still running. Everything else carries an assessment, and an
+    # assessment made on the executor's word is acceptance by hearsay.
+    #
+    # This started with done and stop, and another pair found the gap by
+    # falling into it: their planner checked that a receipt EXISTED and then
+    # passed judgement on the substance from the report, in a "continue" -
+    # which the gate let through, because a gate on the accepting verdicts
+    # only is a gate with a door beside it. "continue" is where most of the
+    # judging actually happens.
+    if v == "wait" or v not in ("done", "stop", "continue"):
         return True, "", None
     text = feedback or ""
     low = text.lower()
     if not any(m in low for m in CHECKED_MARKS):
         return False, (
-            "This verdict accepts work, so it needs a Checked: block "
-            "saying what you opened yourself. Write the "
+            ("This verdict accepts work, so it needs a Checked: block "
+             if v in ("done", "stop") else
+             "This verdict passes judgement, so it needs a Checked: block ") + "saying what you opened yourself. Write the "
             "paths to the artefacts - a log, a folder of run output, a "
             "render, a file you looked at - and the bridge will check they "
             "exist. If this piece genuinely has nothing to open, write "
             "Checked: no artifacts - <reason> with a real reason (at "
             "least %d characters and %d words); every one of those is "
-            "logged and counted where the human can see it. 'continue' and "
-            "'wait' need none of this."
+            "logged and counted where the human can see it.\n\n"
+            "Only 'wait' is free of this, because it judges nothing - it "
+            "says a process is still running. Everything else carries an "
+            "assessment, and an assessment made on the executor's word is "
+            "acceptance by hearsay: it reads as review and is not one."
             % (NOART_MIN_CHARS, NOART_MIN_WORDS)), None
     # The report this verdict answers is the evidence for whether code
     # changed - not the verdict's own wording. A planner cannot talk its way
@@ -3994,7 +4008,7 @@ def verdict_gate(path, verdict, feedback):
     # be caught by it when the executor did no code at all.
     waiter = PENDING.get(norm(path)) or {}
     report = waiter.get("content") or ""
-    if report and touched_code(report) and not residence_ok(text):
+    if v in ("done", "stop") and report and touched_code(report)             and not residence_ok(text):
         return False, (
             "This report changed code, and accepting a code change takes one "
             "more line than Checked: - where the fix LIVES. Write "

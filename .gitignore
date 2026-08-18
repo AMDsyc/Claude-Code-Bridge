@@ -1,0 +1,26 @@
+# The bridge writes everything it learns into these. None of it is source,
+# and all of it is specific to one machine and one set of projects.
+data/
+bridge-logs/
+test-results/
+*.zip
+*.zip.*
+
+# Never published: the evidence half of the rules. It quotes private
+# messages and names closed projects.
+HONESTY_CASES.md
+
+# Working notes of the private repository.
+BRIDGE_HANDOFF*.md
+ANALYSIS-*.md
+PLAN-*.md
+RESTART.md
+
+# The stale nested snapshot that lives in the private tree.
+bridge/bridge/
+
+__pycache__/
+*.pyc
+.venv/
+.idea/
+.vscode/

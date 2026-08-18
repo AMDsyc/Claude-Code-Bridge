@@ -1,0 +1,1390 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bridge</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&display=swap');
+:root{
+  --bg:#141619; --panel:#1c1f25; --panel2:#22262d; --edge:#2b2f37;
+  --ink:#e6e4dc; --label:#8b8f98; --dim:#5d616b;
+  --sodium:#f0a63c; --verdigris:#43b8ae; --red:#e05252; --blue:#5b8dd9;
+  --mono:'IBM Plex Mono',Consolas,monospace;
+  --cond:'Barlow Condensed',Arial,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font-family:var(--mono);font-size:13px;display:flex;min-height:100vh}
+a{color:var(--verdigris)}
+/* rail */
+#rail{width:170px;min-width:170px;background:var(--panel);border-right:1px solid var(--edge);padding:18px 0;display:flex;flex-direction:column;gap:2px;position:sticky;top:0;height:100vh}
+#rail .logo{font-family:var(--cond);font-size:24px;letter-spacing:3px;color:var(--sodium);padding:0 20px 14px;text-transform:uppercase}
+#rail button{background:none;border:none;color:var(--label);font-family:var(--mono);font-size:13px;text-align:left;padding:9px 20px;cursor:pointer;border-left:3px solid transparent}
+#rail button:hover{color:var(--ink)}
+#rail button.on{color:var(--sodium);border-left-color:var(--sodium);background:rgba(240,166,60,.05)}
+#rail .foot{margin-top:auto;padding:12px 20px;color:var(--dim);font-size:11px;line-height:1.6}
+/* main */
+#main{flex:1;padding:26px 34px;max-width:1600px}
+h1{font-family:var(--cond);font-size:26px;letter-spacing:2px;text-transform:uppercase;color:var(--ink);margin-bottom:4px}
+.sub{color:var(--label);margin-bottom:22px;max-width:900px;line-height:1.55}
+h2{font-family:var(--cond);font-size:16px;letter-spacing:2px;text-transform:uppercase;color:var(--label);margin:26px 0 10px}
+.card{background:var(--panel);border:1px solid var(--edge);border-radius:6px;padding:16px 18px;margin-bottom:14px}
+.grid{display:grid;gap:14px}
+.g2{grid-template-columns:1fr 1fr}.g3{grid-template-columns:1fr 1fr 1fr}
+@media(max-width:1100px){.g2,.g3{grid-template-columns:1fr}}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.btn{background:var(--panel2);border:1px solid var(--edge);color:var(--ink);font-family:var(--mono);font-size:12px;padding:7px 14px;border-radius:4px;cursor:pointer}
+.btn:hover{border-color:var(--sodium);color:var(--sodium)}
+.btn.warn:hover{border-color:var(--red);color:var(--red)}
+.btn.big{font-size:13px;padding:10px 18px}
+.btn:disabled{opacity:.35;cursor:default}
+input[type=text],select,textarea{background:#101216;border:1px solid var(--edge);color:var(--ink);font-family:var(--mono);font-size:12px;padding:8px 10px;border-radius:4px;width:100%}
+input[type=range]{accent-color:var(--sodium)}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{font-family:var(--cond);font-size:13px;letter-spacing:1.5px;text-transform:uppercase;color:var(--dim);text-align:left;padding:6px 10px;border-bottom:1px solid var(--edge)}
+td{padding:8px 10px;border-bottom:1px solid #23262d;color:var(--ink);vertical-align:top}
+.lab{color:var(--label)}.dim{color:var(--dim)}.ok{color:var(--verdigris)}.amber{color:var(--sodium)}.bad{color:var(--red)}
+/* tally + alert */
+.tally{width:13px;height:13px;border-radius:50%;display:inline-block;box-shadow:0 0 10px currentColor}
+.alert{border-left:3px solid var(--sodium);background:rgba(240,166,60,.06);padding:12px 16px;border-radius:0 5px 5px 0;margin-bottom:14px;line-height:1.55}
+.alert.red{border-color:var(--red);background:rgba(224,82,82,.07)}
+.alert.teal{border-color:var(--verdigris);background:rgba(67,184,174,.06)}
+/* meters */
+.meter{position:relative;height:16px;background:#101216;border:1px solid var(--edge);border-radius:3px;overflow:visible;flex:1;min-width:140px}
+.meter .fill{position:absolute;left:0;top:0;bottom:0;border-radius:2px;background:repeating-linear-gradient(90deg,currentColor 0 6px,transparent 6px 8px);opacity:.9}
+.meter .tick{position:absolute;top:-4px;bottom:-4px;width:2px;background:#fff;opacity:.85}
+.meter .tickw{position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--red)}
+/* segmented meter: one segment per compaction to the bridge's wall. Used
+   where the distance has no total - the segments say how many cycles are
+   left without claiming to know how big the unmeasured ones are. */
+.segbar{display:flex;gap:3px;flex:1;min-width:140px}
+.segbar .seg{position:relative;height:16px;flex:1;background:#101216;border:1px solid var(--edge);border-radius:3px;overflow:hidden}
+.segbar .seg .fill{position:absolute;left:0;top:0;bottom:0;background:repeating-linear-gradient(90deg,currentColor 0 6px,transparent 6px 8px);opacity:.9}
+/* spent: behind us, and its size is not the question any more */
+.segbar .seg.spent{border-color:#2b2f36}
+.segbar .seg.spent .fill{color:var(--dim);opacity:.5;width:100%}
+/* future: hatched at a shallow angle and dim, because nothing here is
+   measured - it must not read as an empty cycle waiting to be filled */
+.segbar .seg.future{border-style:dashed;border-color:#2b2f36}
+.segbar .seg.future .hatch{position:absolute;inset:0;background:repeating-linear-gradient(135deg,#2b2f36 0 3px,transparent 3px 7px);opacity:.7}
+.gline{display:flex;align-items:center;gap:12px;margin:9px 0}
+.gline .name{width:150px;color:var(--label)}
+.gline .val{width:170px;text-align:right;color:var(--ink)}
+.chip{display:inline-flex;align-items:center;gap:7px;background:var(--panel2);border:1px solid var(--edge);border-radius:14px;padding:4px 11px;font-size:12px;margin:3px 4px 3px 0}
+.chip b{cursor:pointer;color:var(--dim)}.chip b:hover{color:var(--red)}
+.feed{max-height:340px;overflow:auto;font-size:12px}
+.feed div{padding:5px 0;border-bottom:1px solid #22252c}
+.feed .you{color:var(--sodium)}
+pre{background:#101216;border:1px solid var(--edge);border-radius:5px;padding:12px;font-size:11.5px;overflow:auto;color:var(--label);line-height:1.5}
+details{border:1px solid var(--edge);border-radius:5px;margin:8px 0;background:var(--panel2)}
+summary{padding:10px 14px;cursor:pointer;color:var(--ink)}
+details .inner{padding:4px 14px 14px;color:var(--label);line-height:1.6}
+.tag{font-size:10.5px;border:1px solid var(--edge);border-radius:3px;padding:2px 7px;color:var(--label);letter-spacing:.5px}
+.tag.heads{border-color:var(--sodium);color:var(--sodium)}
+.tag.build{border-color:var(--blue);color:var(--blue)}
+.win{display:none}.win.on{display:block}
+.kv{line-height:1.9}.kv span{color:var(--label)}
+.step{border:1px solid var(--edge);border-radius:6px;padding:14px 16px;margin-bottom:10px;background:var(--panel)}
+.step.locked{opacity:.45}
+.step .n{display:inline-block;width:22px;height:22px;border-radius:50%;background:var(--panel2);border:1px solid var(--edge);text-align:center;line-height:22px;margin-right:9px;color:var(--sodium)}
+.msgerr{color:var(--red);margin-top:8px;line-height:1.5}
+.msgok{color:var(--verdigris);margin-top:8px}
+.danger{border-left:3px solid var(--red);background:rgba(224,82,82,.07);padding:10px 14px;margin-top:10px;color:var(--ink);line-height:1.5;display:none}
+.sub{margin:-4px 0 8px 162px;font-size:11px;opacity:.72}
+.q{display:inline-block;width:13px;height:13px;line-height:13px;text-align:center;
+   border:1px solid var(--dim);border-radius:7px;font-size:10px;cursor:help;opacity:.7}
+.q:hover{opacity:1;border-color:var(--verdigris);color:var(--verdigris)}
+</style>
+</head>
+<body>
+<nav id="rail">
+  <div class="logo">Bridge</div>
+  <button data-w="panel" class="on">panel</button>
+  <button data-w="projects">projects</button>
+  <button data-w="launch">launch</button>
+  <button data-w="sessions">sessions</button>
+  <button data-w="resume">resume</button>
+  <button data-w="settings">settings</button>
+  <button data-w="telegram">telegram</button>
+  <button data-w="logs">logs</button>
+  <div class="foot">everything on 127.0.0.1<br>nothing leaves this machine<br>except telegram, if you turn it on</div>
+</nav>
+<main id="main">
+
+<!-- ============ PANEL ============ -->
+<section class="win on" id="w-panel">
+  <div class="row" style="justify-content:space-between">
+    <div class="row"><span class="tally" id="tally" style="color:var(--verdigris);background:currentColor"></span>
+      <h1 id="stateTitle" style="margin:0">running</h1></div>
+    <select id="projSel" style="width:280px"></select>
+  </div>
+  <div class="sub" id="stateSub">the loop is on; reports go to the planner, verdicts come back.</div>
+  <!-- One row per pair, and nothing below it changes: everything under this
+       is about the one project on screen. This says which OTHER pairs are up
+       without leaving it, which is the only thing three pairs need that one
+       never did. Deliberately not a set of tabs - tabs would mean drawing
+       the whole panel per project, and the sum of that is what makes a
+       screen unreadable. No scrolling either: three or four rows fit. -->
+  <div id="pairs" class="card" style="display:none;margin-bottom:14px"></div>
+  <div id="stateAlert"></div>
+  <div id="carrying"></div>
+  <div class="row" id="stateBtns" style="margin-bottom:18px"></div>
+  <div id="noteBox" class="card" style="display:none">
+    <div class="lab" style="margin-bottom:8px">a note while paused, for the project above - it lands in the log and in the next thing that project's planner reads</div>
+    <div class="row"><input type="text" id="noteInput" placeholder="e.g. drop the shader work, focus on the save bug">
+    <button class="btn" id="noteSend" style="width:110px">save note</button></div>
+  </div>
+
+  <div class="grid g2">
+    <div class="card">
+      <h2 style="margin-top:0">context</h2>
+      <div id="gauges"></div>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">plan limits</h2>
+      <div id="limits"></div>
+      <div class="kv" id="readouts" style="margin-top:12px"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between;align-items:baseline">
+      <h2 style="margin-top:0">activity</h2>
+      <!-- The daemon cuts the feed to 40 lines, so which project it is for
+           has to travel with the request - filtering here would be filtering
+           what survived somebody else's cut. -->
+      <div class="row" style="gap:6px">
+        <button class="btn" id="feedMine">this project</button>
+        <button class="btn" id="feedAll">all</button>
+      </div>
+    </div>
+    <div class="feed" id="feed"></div>
+  </div>
+  <div class="dim" id="footPaths"></div>
+</section>
+
+<!-- ============ PROJECTS ============ -->
+<section class="win" id="w-projects">
+  <h1>projects</h1>
+  <div class="sub">One bridge watches any number of projects. Watching means: a small hook goes into the project's own Claude settings and calls back here - no bridge code is copied into your repository. Below is everything Claude Code has ever been opened in on this machine.</div>
+  <div class="card">
+    <table id="projTable"><thead><tr><th>project</th><th>folder</th><th>sessions</th><th>last used</th><th>hooks</th><th></th></tr></thead><tbody></tbody></table>
+  </div>
+  <div class="card">
+    <h2 style="margin-top:0">add a folder that is not in the list</h2>
+    <div class="row"><input type="text" id="addPath" placeholder="C:\path\to\project">
+    <button class="btn" id="addBtn" style="width:160px">watch this folder</button></div>
+    <div id="addMsg"></div>
+  </div>
+  <div class="card kv">
+    <h2 style="margin-top:0">what lives where</h2>
+    <span>global (set once):</span> telegram bot + pairing, notification levels, default model chains<br>
+    <span>per project (each can differ):</span> folder, permission modes, session names, logs, handoffs, crash bundles<br>
+    <span>calibration:</span> learned per model x project - a ceiling measured on one project does not transfer to another
+  </div>
+</section>
+
+<!-- ============ LAUNCH ============ -->
+<section class="win" id="w-launch">
+  <h1>launch</h1>
+  <div class="sub">Both sessions of the selected project, set up together. A profile switches both at once. The command line at the bottom is exactly what will run - it updates with every click.</div>
+  <div class="row" style="margin-bottom:14px">
+    <span class="lab">profile</span><select id="profSel" style="width:200px"></select>
+    <span class="lab" style="margin-left:14px">project</span><span id="launchProj" class="amber"></span>
+  </div>
+  <div class="dim" id="modelsHint" style="margin:-6px 0 12px"></div>
+  <div class="grid g2">
+    <div class="card" id="cardExec">
+      <h2 style="margin-top:0">executor - does the work</h2>
+      <div class="lab">model chain - drops down the list when a limit runs out</div>
+      <div id="chainExec"></div>
+      <div class="row" style="margin-top:6px"><select id="addModelExec" style="width:170px"></select><button class="btn" data-add="executor">add</button></div>
+      <div class="lab" style="margin-top:12px">permission mode</div>
+      <select id="modeExec">
+        <option value="auto">auto - works alone, asks only for the risky things</option>
+        <option value="acceptEdits">acceptEdits - file edits allowed, commands ask</option>
+        <option value="dontAsk">dontAsk - allowed list runs silently, the rest is refused</option>
+        <option value="default">default - asks about everything</option>
+        <option value="bypassPermissions">bypassPermissions - asks nothing at all (dangerous)</option>
+      </select>
+      <label class="row" style="margin-top:10px"><input type="checkbox" id="adminExec"> <span>run as administrator (UAC will ask once)</span></label>
+      <label class="row" style="margin-top:6px"><input type="checkbox" id="autoRestart"> <span>restart a dead session automatically (two tries in 10 min, then it waits for you)</span></label>
+      <div class="danger" id="dangerStrip"></div>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">planner - reviews, lives in the app</h2>
+      <div class="lab">model chain</div>
+      <div id="chainPlan"></div>
+      <div class="row" style="margin-top:6px"><select id="addModelPlan" style="width:170px"></select><button class="btn" data-add="planner">add</button></div>
+      <div class="lab" style="margin-top:12px">permission mode</div>
+      <select id="modePlan">
+        <option value="plan">plan - read-only, reviews and answers only</option>
+        <option value="auto">auto - works alone, asks only for the risky things</option>
+        <option value="acceptEdits">acceptEdits - file edits allowed, commands ask</option>
+        <option value="dontAsk">dontAsk - allowed list runs silently, the rest is refused</option>
+        <option value="default">default - asks about everything</option>
+        <option value="bypassPermissions">bypassPermissions - asks nothing at all (dangerous)</option>
+      </select>
+      <label class="row" style="margin-top:10px"><input type="checkbox" id="adminPlan"> <span>run as administrator (UAC will ask once)</span></label>
+      <label class="row" style="margin-top:6px"><input type="checkbox" id="roPlan"> <span>never let the reviewer touch the project - denies its edit tools, its shell and the way out of plan mode, so work can only happen through the executor</span></label>
+      <div class="danger" id="dangerPlan"></div>
+      <div class="dim" style="margin-top:10px;line-height:1.5">plan keeps the reviewer unable to write, which is the point of having one - but the choice is yours. The verdict tool is pre-approved in every mode, so no mode makes the loop stop for a permission question.</div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="lab" style="margin-bottom:6px">command preview</div>
+    <pre id="cmdPreview"></pre>
+    <div class="row">
+      <button class="btn big" id="launchBoth">start both</button>
+      <button class="btn big" id="launchExec">start executor</button>
+      <button class="btn big" id="launchPlan">start planner</button>
+      <button class="btn big warn" id="stopBoth">stop both</button>
+      <button class="btn big" id="loopStart">start the loop</button>
+      <button class="btn" id="saveProf">save as profile</button>
+    </div>
+    <div id="launchMsg"></div>
+    <div class="dim" style="margin-top:10px;line-height:1.6">The bridge channel is pre-approved by name during setup, so sessions no longer ask "New MCP server found in this project: bridge". If a window still asks it once - a session started before the setup was applied - answer <b>1. Use this MCP server</b>: that approves this one server only. Option 2 would wave through every future MCP server in the project, a wider door than the bridge needs. The other one-time dialog, the full-screen warning about development channels, stays deliberately manual - choose "I am using this for local development". After that the planner shows up in the Claude app like any chat.</div>
+  </div>
+</section>
+
+<!-- ============ SESSIONS ============ -->
+<section class="win" id="w-sessions">
+  <h1>sessions</h1>
+  <div class="sub">Every Claude Code session the bridge can see, across all projects. The white tick on each bar is the learned ceiling for that model on that project; a bar past the tick in red is a miss - the estimate was high and has been lowered since. Cloud sessions and ordinary app chats never appear here: nothing exposes their fullness, so the bridge does not pretend to know it.</div>
+  <div class="card">
+    <h2 style="margin-top:0">windows the bridge opened</h2>
+    <div class="dim" style="margin-bottom:8px">Every window, newest first, with the reason it was opened. If one appears that you did not ask for, this says which part of the bridge did it.</div>
+    <table id="launchTable"><thead><tr><th>when</th><th>project</th><th>role</th><th>why</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div class="card">
+    <table id="sessTable"><thead><tr><th>session</th><th>project</th><th>model</th><th>context</th><th>state</th><th></th></tr></thead><tbody></tbody></table>
+    <div class="row" style="margin-top:10px">
+      <button class="btn" id="verifyBtn">verify archives</button><span id="verifyOut" class="dim"></span>
+    </div>
+  </div>
+  <div class="grid g2">
+    <div class="card">
+      <h2 style="margin-top:0">context rules</h2>
+      <div class="gline"><span class="name">draft handoff at</span><input type="range" id="thHandoff" min="50" max="95"><span class="val" id="thHandoffV"></span></div>
+      <div class="gline"><span class="name">wake me at</span><input type="range" id="thWarn" min="60" max="95"><span class="val" id="thWarnV"></span></div>
+      <div class="gline"><span class="name">rotate at</span><input type="range" id="thRotate" min="70" max="97"><span class="val" id="thRotateV"></span></div>
+      <div class="gline"><span class="name">hand over at</span><input type="range" id="thHandover" min="60" max="98"><span class="val" id="thHandoverV"></span></div>
+      <div class="dim" style="line-height:1.6;margin-bottom:6px">Percent of the distance to the wall, not of the context window. The wall is where a session actually breaks; it is measured the first time one does, and estimated just under the window until then.</div>
+      <div class="gline"><span class="name">compact at</span><input type="range" id="acPct" min="30" max="95"><span class="val" id="acPctV"></span></div>
+      <div class="dim" style="line-height:1.6;margin-bottom:6px">Percent of the context window at which the session compacts. The bridge passes this to every window it opens, so the point is known instead of discovered - Claude Code's own default has moved between versions and reports of it disagree. Lower compacts more often but summarises less each time; higher keeps more working memory but leaves less room for the summary itself.</div>
+      <div class="lab" style="margin-top:14px">when context runs out</div>
+      <select id="rotPolicy">
+        <option value="compact">let the session compact - rotate only if it hits the wall</option>
+        <option value="ceiling">rotate at the ceiling - never let it compact</option>
+      </select>
+      <div class="dim" style="margin-top:8px;line-height:1.6">Rotation opens a new window, and a new window means answering the development-channels dialog by hand - so for a run left alone overnight, compaction is the cheaper loss. Compaction shortens the session's own memory, but the handoff, INDEX.md and the transcript snapshots are on disk either way. Pick the ceiling only when you are sitting in front of the machine.</div>
+      <div class="dim" style="line-height:1.6;margin-top:8px">The handoff is rewritten after every finished turn regardless - the rungs above are the alarms, not the safety net.</div>
+      <div class="row" style="margin-top:8px"><button class="btn" id="saveThr">save rules</button><span id="thrMsg"></span></div>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">calibration - model x project</h2>
+      <div id="calibList" class="kv"></div>
+      <div class="dim" style="line-height:1.6;margin-top:8px">Down fast, up slow: a miss drops the ceiling at once and widens the reserve; ten clean iterations in a row nudge it one point up. Your own numbers in config always win - the bridge only reports disagreement, it never edits your settings.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ RESUME ============ -->
+<section class="win" id="w-resume">
+  <h1>resume</h1>
+  <div class="sub" id="resumeSub"></div>
+  <div id="resumeBody"></div>
+</section>
+
+<!-- ============ SETTINGS ============ -->
+<section class="win" id="w-settings">
+  <h1>settings</h1>
+  <div class="grid g2">
+    <div class="card">
+      <h2 style="margin-top:0">notifications</h2>
+      <div class="dim" style="margin-bottom:8px">click a value to cycle: sound - silent - log only. "log only" never reaches telegram.</div>
+      <table id="notifyTable"><tbody></tbody></table>
+      <div class="row" style="margin-top:8px">
+        <button class="btn" id="allSound">all sound</button>
+        <button class="btn" id="allSilent">all silent</button>
+        <span id="notifyMsg"></span>
+      </div>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">models</h2>
+      <table><tbody id="modelsRows"></tbody></table>
+      <div style="margin-top:10px">
+        <label class="row"><input type="checkbox" id="optAliases"> <span>prefer aliases over pinned IDs</span></label>
+        <label class="row"><input type="checkbox" id="optReread"> <span>re-read the list on every launch (background probe when older than a day; a probe costs a one-token -p call per model)</span></label>
+        <label class="row"><input type="checkbox" id="optBest"> <span>allow the best alias in chains</span></label>
+      </div>
+      <div class="row" style="margin-top:10px"><button class="btn" id="modelsRefresh">refresh now</button><span class="dim" id="probeState"></span></div>
+      <div class="dim" style="margin-top:8px;line-height:1.6">Two sources, both keyed by what actually served: every live session reports its exact model id for free, and refresh runs one tiny -p call per alias. Aliases follow the newest release on their own, so a model shipped tomorrow needs no change here; pin a full ID only to freeze behaviour.</div>
+      <div class="row" style="margin-top:8px"><input type="text" id="customModel" placeholder="pin a full model id" style="width:280px"><button class="btn" id="addCustomModel">add</button></div>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">stuck processes</h2>
+      <div class="kv">
+        suspicion threshold: <span class="amber">3x the usual time</span> of that same command (needs 5 recorded runs; before that, 15 min)<br>
+        order of escalation: evidence goes to the <span>executor</span> first, then the <span>planner</span>, then <span>you</span> with sound<br>
+        the bridge measures - the sessions decide. nothing is ever killed on a timer alone.
+      </div>
+      <div class="dim" style="margin-top:8px">Watched command patterns: godot, pytest, npm test, cargo build, make, gradle, dotnet build, plus anything Claude itself starts in the background.</div>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">logs on disk</h2>
+      <table id="diskTable"><thead><tr><th>project</th><th>on disk</th><th>oldest day</th></tr></thead><tbody></tbody></table>
+      <div class="row" style="margin-top:8px">
+        <button class="btn" id="archiveNow">archive now</button>
+        <span class="dim">rule: older than 7 days, or the project passes 2 GB</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ TELEGRAM ============ -->
+<section class="win" id="w-telegram">
+  <h1>telegram</h1>
+  <div class="sub">Four steps, each opens when the previous one is confirmed by the system - not by you clicking "I did it". The only thing that cannot be automated is creating the bot itself: Telegram only allows that by hand, through BotFather. Everything after that the bridge checks for you.</div>
+  <div id="tgSteps"></div>
+  <!-- The links live in ONE pinned message that is rewritten in place when a
+       session gets a new link. An edit is silent by design - no badge, no
+       sound, nothing to notice - which is what makes it safe to do on every
+       session start, and also what leaves you stuck if that message has been
+       unpinned, deleted or lost up the chat. This is the way back. Nothing
+       calls it on its own. -->
+  <div class="card">
+    <h2 style="margin-top:0">lost the pinned links?</h2>
+    <div class="dim" style="line-height:1.7">The links to open each session
+      from the phone live in one pinned message, quietly rewritten whenever a
+      session gets a new one - so it never announces itself. If it has been
+      unpinned or scrolled away, this sends it again as a new message and
+      pins that instead.</div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn" id="tgLinksBtn" style="width:250px">send the links again</button>
+      <span class="dim" id="tgLinksMsg"></span>
+    </div>
+  </div>
+  <!-- What every pair is handed at startup. Shown, not edited: the file is
+       on disk and any editor opens it, and a write path reachable from a
+       browser is not worth saving a double-click. -->
+  <div class="card">
+    <h2 style="margin-top:0">what every pair is told</h2>
+    <div class="dim" style="line-height:1.7">Handed to both halves of every
+      pair when a session starts, and again to the replacement after a
+      rotation. It is a file — edit it in any editor and the next session to
+      start gets the new text; no restart needed.</div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn" id="honestyBtn" style="width:190px">show it</button>
+      <span class="dim" id="honestyPath"></span>
+    </div>
+    <pre id="honestyText" style="display:none;white-space:pre-wrap;max-height:420px;overflow:auto;margin-top:10px"></pre>
+  </div>
+  <div class="card">
+    <h2 style="margin-top:0">rather not use telegram?</h2>
+    <div class="dim" style="line-height:1.7">The bridge works fully without it - you just lose the phone. Everything still lands in the activity feed and the logs. Desktop notifications, ntfy, e-mail and webhooks are on the roadmap as alternatives that need no account at all.</div>
+  </div>
+</section>
+
+<!-- ============ LOGS ============ -->
+<section class="win" id="w-logs">
+  <h1>logs</h1>
+  <div class="sub">Everything is written into the project itself: <span class="amber">bridge-logs/&lt;date&gt;/</span> - raw transcript copies, readable per-iteration dialogue, handoffs, events - plus <span class="amber">bridge-logs/INDEX.md</span>, one line per iteration, the map a new session reads instead of megabytes. The first line of your .gitignore keeps all of it out of the repository.</div>
+
+  <div class="card" style="margin-bottom:14px">
+    <h2 style="margin-top:0">ask the archive</h2>
+    <div class="dim" style="margin-bottom:8px">A separate Claude reads <span class="amber">bridge-logs/MAP.md</span>, opens the transcripts it points at, and answers - read-only, in its own headless run, with no part in the loop. It cites the files it drew from, and the answer is kept in <span class="amber">bridge-logs/extracts/</span>.</div>
+    <div class="row" style="gap:8px">
+      <input id="askQ" placeholder="when did we decide the wall is the fifth compaction?" style="flex:1" onkeydown="if(event.key==='Enter')askArchive()">
+      <button onclick="askArchive()" id="askBtn">search the archive</button>
+    </div>
+    <div id="askState" class="dim sub" style="margin-top:8px"></div>
+    <pre id="askOut" style="display:none;white-space:pre-wrap;max-height:420px;overflow:auto;margin-top:10px"></pre>
+  </div>
+
+  <div id="logsBody"></div>
+</section>
+
+<!-- Authorship, exactly as the owner asked for it. Outside <main> and
+     outside every card: the panel counts its cards in its own suite,
+     and a footer is not a section. -->
+<div style="max-width:1100px;margin:26px auto 18px;padding:0 18px;opacity:.45;font-size:12px">
+  "Claude Code Bridge" is made by AMDsyc and Claude, 2026
+</div>
+</main>
+<script>
+var D={}, CUR="", THRDIRTY=false;
+/* the feed, and only the feed, can be shown for every pair at once - it is
+   a list of lines, each one able to say whose it is. Everything else on the
+   panel is about one project by construction. */
+var FEEDALL=false;
+var RREASON={
+  reboot:"Power was lost or the machine restarted while work was in flight. Nothing was restarted on its own - the resume tab shows what every session was doing, which files changed after the last recorded turn, and what is safe to continue.",
+  killed:"The bridge was ended the hard way - the window was closed or the process was killed - while work was in flight. Nothing was restarted on its own; the resume tab has the picture.",
+  shutdown_mid_run:"The bridge was shut down normally, but a loop was still running at that moment. Check the resume tab before continuing."};
+function $(q){return document.querySelector(q)}
+function $$(q){return [].slice.call(document.querySelectorAll(q))}
+function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
+function post(u,b){return fetch(u,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b||{})}).then(function(r){return r.json()})}
+function fmtBytes(b){if(!b)return"0";var u=["B","KB","MB","GB"];var i=0;while(b>1024&&i<3){b/=1024;i++}return b.toFixed(i?1:0)+" "+u[i]}
+function forCur(sPath){
+  if(!CUR)return true;
+  var canon=(D.canon||{})[CUR]||CUR;
+  return sPath===CUR||sPath===canon;
+}
+// A role that is not one of the two the bridge runs is not drawn at all.
+// The flag alone was not enough: the record the channel makes never went
+// through touch_session, so it had no flag and slipped back onto the panel
+// as an "unknown" row with "no readings yet".
+function ours(s){var r=String((s&&s.role)||"").trim().toLowerCase();
+  return r==="executor"||r==="planner"}
+function mlabel(a){var e=((D.models_registry||{}).map||{})[String(a||"").toLowerCase()];return e?(e.display||e.id||""):""}
+function fmtReset(v){if(v==null||v==="")return"";var n=+v;if(n>1e9){var d=new Date(n*1000);return ("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2)}var s2=String(v);return s2.length>=16&&s2[4]==="-"?s2.slice(11,16):s2}
+function fmtTok(t){return t>=1e6?(t/1e6).toFixed(1)+"M":t>=1000?Math.round(t/1000)+"k":String(t||0)}
+
+$$("#rail button").forEach(function(b){b.onclick=function(){
+  $$("#rail button").forEach(function(x){x.classList.remove("on")});
+  $$(".win").forEach(function(x){x.classList.remove("on")});
+  b.classList.add("on"); $("#w-"+b.dataset.w).classList.add("on");
+  if(b.dataset.w==="projects")loadProjects();
+  if(b.dataset.w==="resume")loadResume();
+  if(b.dataset.w==="logs")loadLogs();
+  if(b.dataset.w==="settings")loadLogs();
+}});
+
+/* One segment per compaction between here and the bridge's wall.
+   spent    - compactions already done: filled, neutral, no longer a question
+   current  - this cycle, filled by how far through it the session is. That
+              ratio is measured (carried now vs the compaction point) and is
+              the same one the "to compaction" bar shows, at segment scale.
+   future   - hatched, because the cycles after this one have no measured
+              size. An empty segment would read as "room left"; a hatched one
+              reads as "not known", which is what it is.
+   Never red: reaching the end of a segment is a compaction, which is the
+   routine thing a session does, not an alarm (1.6.9). */
+function segbar(budget,done,frac,title){
+  var n=Math.max(1,budget||5), sp=Math.max(0,Math.min(n,done||0));
+  var f=Math.max(0,Math.min(1,frac==null?0:frac));
+  var col=f>=.95?"var(--sodium)":"var(--verdigris)";
+  var h='<div class="segbar" title="'+esc(title||"")+'">';
+  for(var i=0;i<n;i++){
+    if(i<sp){h+='<div class="seg spent"><div class="fill"></div></div>';}
+    else if(i===sp){h+='<div class="seg"><div class="fill" style="width:'+(f*100).toFixed(1)+'%;color:'+col+'"></div></div>';}
+    else{h+='<div class="seg future"><div class="hatch"></div></div>';}
+  }
+  return h+'</div>';
+}
+
+function meter(pct,ceiling,color,wallPct){
+  var f=Math.min(100,Math.max(0,pct||0));
+  var h='<div class="meter"><div class="fill" style="width:'+f+'%;color:'+color+'"></div>';
+  if(ceiling)h+='<div class="tick" style="left:'+ceiling+'%"></div>';
+  if(wallPct)h+='<div class="tickw" style="left:'+Math.min(99,wallPct)+'%"></div>';
+  return h+'</div>';
+}
+
+/* ---------- state machine of the main panel ---------- */
+var STATES={
+  running:{c:"var(--verdigris)",sub:"the loop is on; reports go to the planner, verdicts come back.",btns:[["pause","pause"],["stop the loop","stoploop"]]},
+  idle:{c:"var(--dim)",sub:"nothing is running. start the pair from the launch window, then start the loop.",btns:[["start the loop","startloop"],["open launch","golaunch"]]},
+  idleup:{c:"var(--verdigris)",sub:"both sessions are up and the loop is off. press start the loop first, then give the executor a task in its window - a turn that finishes before the loop is on gets no review.",btns:[["start the loop","startloop"],["open launch","golaunch"]]},
+  paused:{c:"var(--sodium)",sub:"paused - reports are held, nothing is lost. leave a note below if you want the planner to read something first.",btns:[["resume","resume"],["stop the loop","stoploop"]],note:true},
+  recovered:{c:"var(--sodium)",sub:"work was interrupted mid-run. nothing was started automatically - review the resume tab first.",btns:[["open resume","goresume"],["dismiss - all fine","ack"]],alert:"",red:true},
+  down:{c:"var(--red)",sub:"the bridge is fine, but a session window is gone. its transcript is intact - it can be restarted right where it stopped.",btns:[],alert:"",red:true},
+  waiting:{c:"var(--blue)",sub:"a long process is running - review and rotation hold until it finishes.",btns:[["pause","pause"]]},
+  needsyou:{c:"var(--sodium)",sub:"a session is waiting for your answer.",btns:[["pause","pause"]]}
+};
+/* Everything the main panel says is about ONE project: the one on screen.
+   A global anyLoop was rejected in 9 - with two projects, a loop on in one
+   made the panel claim LOOP ON while showing the other. The same read fed
+   the tally light, the subtitle and the buttons, so all four could disagree
+   with the project named above them. They are gathered once here, for CUR,
+   and everything is derived from this - agreeing by construction instead of
+   by being written to match.
+
+   What stays global is what is true of the bridge rather than of a project:
+   it was interrupted, or a plan limit paused it. Telegram's pinned line is
+   the daemon's status_headline() and stays global too - a pin has no
+   project on screen to be about. */
+function scopeOf(){
+  var S=D.state||{}, canon=(D.canon||{})[CUR]||CUR;
+  var live=Object.keys(S.sessions||{}).map(function(k){return S.sessions[k]})
+    .filter(function(s){return forCur(s.path)&&
+                         ["ended","died"].indexOf(s.state)<0});
+  var down={};
+  Object.keys(S.down||{}).forEach(function(k){
+    var p=k.slice(0,k.lastIndexOf("|"));
+    if(!CUR||p===canon||p===CUR)down[k]=S.down[k];
+  });
+  var lp=(S.loops||{})[canon]||(S.loops||{})[CUR]||{};
+  var aw=(S.awaiting||{})[canon]||(S.awaiting||{})[CUR]||null;
+  return {canon:canon, live:live, down:down, loop:!!lp.active,
+          stalled:!!(aw&&(aw.nudges||0)>=1&&lp.active),
+          needs:live.filter(function(s){return s.state==="needs you"}),
+          busy:live.filter(function(s){return s.state==="waiting on a process"})};
+}
+function stateOf(sc){
+  var m=D.state&&D.state.mode||"idle";
+  if(m!=="recovered"&&Object.keys(sc.down).length)return"down";
+  if(m==="running"){
+    if(sc.busy.length)return"waiting";
+    if(sc.needs.length)return"needsyou";
+    if(sc.loop)return"running";
+    return sc.live.length?"idleup":"idle";
+  }
+  return m in STATES?m:"idle";
+}
+/* The same sentence the daemon writes for Telegram, asked about one
+   project. Kept word for word so the two never read as different facts. */
+function headlineOf(sc){
+  var S=D.state||{};
+  if(S.mode==="recovered")return"interrupted - open the resume tab";
+  var keys=Object.keys(sc.down);
+  if(keys.length){
+    var roles={},giveup=false;
+    keys.forEach(function(k){roles[k.slice(k.lastIndexOf("|")+1)]=1;
+      if((sc.down[k]||{}).giveup)giveup=true});
+    return"session down - "+Object.keys(roles).sort().join(", ")+
+      (giveup?" (retries stopped)":"");
+  }
+  if(sc.stalled)return"loop stalled - the executor is not taking the verdict";
+  var tail=sc.live.length?(sc.loop?" - loop on":" - loop off"):"";
+  if(sc.needs.length){
+    var r={};sc.needs.forEach(function(s){r[s.role||"session"]=1});
+    return"waiting on you - "+Object.keys(r).sort().join(", ")+tail;
+  }
+  if(sc.busy.length)return"waiting on a process"+tail;
+  if(S.mode==="paused")return"paused"+(S.paused_by_limit?" (limit)":"");
+  if(!sc.live.length)return"idle - no sessions running";
+  if(sc.loop)return"running - loop on";
+  return"idle - sessions up, loop off";
+}
+/* The strip: one line per pair, and every number on a line belongs to the
+   pair named at the front of it. That is the whole rule the panel is built
+   on - 9 rejected a global read that claimed LOOP ON while showing another
+   project, and reading several projects at once is only allowed where each
+   one is labelled, which is exactly here.
+
+   Nothing is worked out locally: the daemon sends the same words it puts in
+   the pin (pairs_view), so the strip cannot disagree with either the pin or
+   the block below it. */
+function renderPairs(){
+  var box=$("#pairs"),rows=D.pairs||{};
+  var paths=Object.keys(rows).sort(function(a,b){
+    return rows[a].name<rows[b].name?-1:1});
+  if(paths.length<2){box.style.display="none";box.innerHTML="";return}
+  box.style.display="";
+  var canonCur=(D.canon||{})[CUR]||CUR;
+  box.innerHTML='<div class="lab" style="margin-bottom:8px">all pairs - '+
+    'click one to show it below</div>'+paths.map(function(p){
+    var r=rows[p],here=p===canonCur;
+    /* Life, not window fill. The strip answers "which pair is going to
+       need me next", and how close a session is to being replaced is that
+       answer; how full its window is resets at every compaction and says
+       only where it is inside one cycle. Fill stays in the hover, because
+       the two are different questions and neither stands in for the other.
+       A dash means nobody has reported enough to say - not zero. */
+    var halves=["executor","planner"].map(function(role){
+      var x=(r.roles||{})[role];
+      if(!x)return '<span class="dim">'+role[0]+' -</span>';
+      var life=x.life;
+      var tip=role+': '+(life==null?'life to the wall not known yet'
+        :Math.round(life)+'% of the way to being replaced, '+
+         (x.compacted||0)+' of '+(x.budget||5)+' compactions')+
+        (x.pct==null?'':'; window '+Math.round(x.pct)+'% full')+
+        (x.model?'; '+x.model:'');
+      return '<span title="'+esc(tip)+'"'+(life!=null&&life>=80?' class="bad"':'')+'>'+
+        role[0]+' '+(life==null?"-":Math.round(life)+"%")+'</span>';
+    }).join(" · ");
+    return '<div class="gline pairrow'+(here?" on":"")+'" data-pair="'+esc(p)+'"'+
+      ' style="cursor:pointer'+(here?";font-weight:600":"")+'">'+
+      '<span class="name">'+esc(r.mark||"")+' '+esc(r.name||"")+
+      (here?' <span class="dim">shown below</span>':'')+'</span>'+
+      '<span style="flex:1">'+halves+'</span>'+
+      '<span class="dim" style="flex:1;text-align:right">'+esc(r.state||"")+
+      (r.iteration?' · iteration '+r.iteration:'')+
+      (r.debt_open?' · <span class="bad" title="temporary solutions declared and still open - see bridge-logs/DEBT.md">debt '+r.debt_open+'</span>':'')+
+      '</span></div>';
+  }).join("");
+  $$("#pairs [data-pair]").forEach(function(el){el.onclick=function(){
+    var want=el.dataset.pair;
+    /* the selector and the config keep the path as it was typed; the strip
+       has the canonical one, so switch by matching rather than assigning a
+       spelling the rest of the panel would not recognise */
+    var typed=Object.keys((D.config||{}).projects||{}).filter(function(k){
+      return ((D.canon||{})[k]||k)===want})[0];
+    CUR=typed||want;renderPanel();tick()}});
+}
+
+function renderPanel(){
+  // Which project this render is about, decided BEFORE anything is drawn
+  // from it. It used to be defaulted further down, next to the dropdown -
+  // so on the first render after a page load CUR was still "", the loop
+  // lookup missed, and the subtitle said "the loop is OFF" underneath a
+  // headline that correctly said the loop was on. Both read the same
+  // payload; only one of them knew which project it was talking about.
+  var allProj=Object.keys((D.config||{}).projects||{});
+  if(!CUR&&allProj.length)CUR=allProj[0];
+  renderPairs();
+  // One read of that project, and everything below comes off it.
+  var sc=scopeOf();
+  var st=stateOf(sc),S=STATES[st];
+  $("#tally").style.color=S.c;$("#tally").style.background=S.c;
+  $("#stateTitle").textContent=headlineOf(sc);
+  var canonCur=sc.canon;
+  var liveN=sc.live.length;
+  var cap=(D.caps||{})[canonCur]||(D.caps||{})[CUR];
+  var off=(D.loop_off||{})[canonCur]||(D.loop_off||{})[CUR];
+  $("#stateSub").textContent=(liveN&&!sc.loop)
+    ? S.sub+"  ·  the loop is OFF"+(off?" since "+off.at.slice(11)+" - "+off.why:" - finished turns are not being reviewed")
+    : S.sub+(cap?"  ·  iteration "+cap.iteration:"");
+  var alertTxt=S.alert;
+  if(st==="recovered")alertTxt=RREASON[D.state.recovered_reason]||"Work was interrupted without a clean stop. The resume tab shows what every session was doing and what is safe to continue.";
+  if(st==="down"){
+    var parts=[];Object.keys(D.state.down||{}).forEach(function(k){
+      var a=k.split("|"),d=D.state.down[k];
+      parts.push(a[1]+" of "+(a[0].split(/[\\\/]/).pop())+(d.giveup?" - keeps dying right after start; open its window by hand and read the error it prints":" - the claude process (or its console host) died or was closed"))});
+    alertTxt=parts.join(". ")+".";
+  }
+  $("#stateAlert").innerHTML=alertTxt?'<div class="alert'+(S.red?" red":"")+'">'+esc(alertTxt)+'</div>':"";
+  var bt=$("#stateBtns");bt.innerHTML="";
+  var btns=(S.btns||[]).slice();
+  if(st==="down"){
+    Object.keys(D.state.down||{}).forEach(function(k){var a=k.split("|");
+      btns.push(["restart "+a[1],"restart|"+k])});
+    btns.push(["stop the loop","stoploop"]);
+  }
+  if(CUR&&!sc.loop&&st!=="down")btns.unshift(["start the loop","startloop"]);
+  if(CUR&&["idle","down"].indexOf(st)<0){
+    var liveRoles=[];
+    Object.keys(D.state.sessions||{}).forEach(function(k){
+      var x=D.state.sessions[k];
+      if(forCur(x.path)&&["ended","died"].indexOf(x.state)<0&&x.role&&liveRoles.indexOf(x.role)<0)liveRoles.push(x.role)});
+    var mine=liveRoles.filter(function(r){return r==="executor"||r==="planner"});
+    mine.sort().forEach(function(r){btns.push(["hand over "+r,"handover|"+r])});
+    if(mine.length>1)btns.push(["hand over both","handover|both"]);
+    btns.push(["test the link","selftest"]);
+  }
+  btns=btns.filter(function(b,i,a){return a.findIndex(function(x){return x[1]===b[1]})===i});
+  btns.forEach(function(b){var el=document.createElement("button");el.className="btn big";el.textContent=b[0];
+    el.onclick=function(){act(b[1])};bt.appendChild(el)});
+  /* What this pair is carrying, for the project on screen. Neither number
+     blocks anything - the whole point is that they are impossible to miss
+     without being in the way. */
+  var mine=(D.pairs||{})[canonCur]||{};
+  var carry=[];
+  if(mine.debt_open)carry.push('<b>'+mine.debt_open+'</b> temporary solution'+
+    (mine.debt_open===1?'':'s')+' still open - <code>bridge-logs/DEBT.md</code>');
+  if(mine.no_artifacts)carry.push('<b>'+mine.no_artifacts+'</b> piece'+
+    (mine.no_artifacts===1?'':'s')+' accepted with nothing to open');
+  $("#carrying").innerHTML=carry.length
+    ? '<div class="alert">'+carry.join(' &nbsp;·&nbsp; ')+'</div>' : "";
+  $("#noteBox").style.display=S.note?"":"none";
+
+  /* project selector */
+  var sel=$("#projSel"),paths=allProj;
+  if(sel.options.length!==paths.length){sel.innerHTML=paths.map(function(p){return '<option value="'+esc(p)+'">'+esc(p.split(/[\\\/]/).pop())+'</option>'}).join("")}
+  if(CUR)sel.value=CUR;   /* defaulted at the top, before anything read it */
+  $("#launchProj").textContent=CUR?CUR.split(/[\\\/]/).pop():"- pick one in projects -";
+
+  /* gauges */
+  var g="";var sessArr=Object.keys(D.state.sessions||{}).map(function(k){return D.state.sessions[k]});
+  sessArr.filter(function(s){return s.state!=="ended"&&forCur(s.path)}).forEach(function(s){
+    if(!ours(s))return;
+    var cal=calOf(s), pct=s.context_pct, wallPct=cal&&cal.wall_history_tokens&&s.window?cal.wall_history_tokens*100/s.window:null;
+    if(pct==null||pct>100){
+      g+='<div class="gline"><span class="name">'+esc(s.role||"session")+' <span class="dim">'+esc(s.model||"")+'</span></span>'+
+        '<span class="dim" style="flex:1">'+(s.context_tokens?'carrying '+fmtTok(s.context_tokens)+', window not known yet':'no readings yet')+'</span></div>';
+      return;
+    }
+    g+='<div class="gline"><span class="name">'+esc(s.role||"session")+' <span class="dim">'+esc(s.model||"")+'</span></span>'+
+      meter(pct,cal?cal.ceiling_pct:null,pct==null?"var(--dim)":pct>=(cal?cal.ceiling_pct:90)?"var(--red)":pct>=75?"var(--sodium)":"var(--verdigris)",wallPct)+
+      '<span class="val">'+(pct==null?"-":Math.round(pct)+"% · "+fmtTok(s.context_tokens)+" of "+fmtTok(s.window))+(s.stale?' <span class="dim">as of '+esc(s.stale)+'</span>':'')+'</span></div>';
+  });
+  var str=((D.state.strangers||{})[(D.canon||{})[CUR]||CUR])||{};
+  var nstr=Object.keys(str).length;
+  if(nstr)g+='<div class="gline"><span class="name dim">other windows</span>'+
+    '<span class="dim" style="flex:1">'+nstr+' other claude '+(nstr===1?'window is':'windows are')+
+    ' open in this folder. The bridge ignores '+(nstr===1?'it':'them')+' - no role, no plan, no handover - but '+
+    (nstr===1?'it spends':'they spend')+' the same plan limits.</span></div>';
+  var asd=(D.assessed||{})[(D.canon||{})[CUR]||CUR];
+  if(asd)g+='<div class="gline"><span class="name">last look <span class="dim">'+esc(asd.at||"")+'</span></span>'+
+    '<span class="dim" style="flex:1">saw '+esc(asd.saw||"")+' - '+esc(asd.did||"nothing")+'</span></div>';
+  /* The arithmetic behind the last handover, written down when it was taken -
+     of THIS project. The log is one list for the whole bridge, so taking its
+     newest row put another pair's numbers under these gauges, with nothing
+     saying they were not this pair's.
+
+     Rows written before the row carried a project are skipped rather than
+     shown as this project's: attribution is never guessed here, the same rule
+     the archive map follows. Skipped, but said out loud - a line that simply
+     vanished after an upgrade reads as something broken. It fixes itself at
+     the next handover. */
+  var hlAll=(D.state.handover_log||[]);
+  var hl=hlAll.filter(function(r){return r.path&&forCur(r.path)});
+  var hlOld=hlAll.filter(function(r){return !r.path}).length;
+  if(!hl.length&&hlOld){
+    g+='<div class="gline"><span class="name">last handover</span>'+
+      '<span class="dim" style="flex:1">'+hlOld+' recorded before handovers '+
+      'were written down against a project, so there is no telling which pair '+
+      (hlOld===1?'it belongs':'they belong')+' to - not shown here. The next '+
+      'handover of this project fills this in.</span></div>';
+  }
+  if(hl.length){
+    var h=hl[hl.length-1];
+    g+='<div class="gline"><span class="name">last handover <span class="dim">'+esc(h.at||"")+'</span></span>'+
+      '<span class="dim" style="flex:1">the '+esc(h.role||"")+': '+esc(h.why||"")+
+      ' · carrying '+fmtTok(h.used)+' of '+fmtTok(h.window)+
+      ' · compaction point '+(h.compact_at?fmtTok(h.compact_at):"not known")+
+      ' · floors so far '+((h.floors||[]).map(fmtTok).join(' → ')||'none measured')+
+      (h.floor_rise?' (climbing '+fmtTok(h.floor_rise)+' a cycle)':'')+
+      ' · cycle '+fmtTok(h.cycle)+' = '+(h.cycle_turns==null?'?':h.cycle_turns)+
+      ' turns at '+fmtTok(h.per_turn)+' a turn, margin '+(h.turns_of_margin||5)+
+      ' turns ('+fmtTok(h.margin)+')'+
+      ' · biggest recent turn '+fmtTok(h.worst_turn)+
+      ' · '+(h.compactions_done||0)+' compactions by that session</span></div>';
+  }
+  var plans=D.plans||{};
+  Object.keys(D.state.sessions||{}).forEach(function(k){
+    var s=D.state.sessions[k],p=plans[k];
+    if(!p||!forCur(s.path)||["ended","died"].indexOf(s.state)>=0)return;
+    if(!ours(s))return;
+    var col=p.do==="handover"?"var(--red)":p.do==="compacting"?"var(--sodium)":p.do==="unknown"?"var(--dim)":"var(--verdigris)";
+    g+='<div class="gline"><span class="name">'+esc(s.role||"session")+' <span class="dim">plan</span></span>'+
+      '<span style="flex:1;color:'+col+'">'+esc(p.do)+(p.compactions?' <span class="dim">('+p.compactions+' compacted)</span>':'')+'</span>'+
+      '<span class="dim" style="flex:3;text-align:right">'+esc(p.why||"")+'</span></div>';
+  });
+  var walls=D.walls||{};
+  Object.keys(D.state.sessions||{}).forEach(function(k){
+    var s=D.state.sessions[k],w=walls[k];
+    if(!w||!forCur(s.path)||["ended","died"].indexOf(s.state)>=0)return;
+    if(!ours(s))return;
+    var name=esc(s.role||"session");
+    if(!w.limit){
+      g+='<div class="gline"><span class="name">'+name+' <span class="dim">to its limit</span></span>'+
+        '<span class="dim" style="flex:1">not measured yet - the first compaction or context error on this model here will set it</span></div>';
+      return;
+    }
+    if(!w.window){
+      g+='<div class="gline"><span class="name">'+name+'</span>'+
+        '<span class="dim" style="flex:1">'+esc(w.why_blank||"window not known yet")+
+        (w.used?' - carrying '+fmtTok(w.used):'')+'</span></div>';
+      return;
+    }
+    var L0=(D.life||{})[k];
+
+    // Numbers first, in one scannable line each. The provenance is real and
+    // has to stay reachable, but it belongs behind a hover, not in three
+    // paragraphs under every bar - that made the panel unreadable and buried
+    // the figures it exists to show.
+    function why(txt){return '<span class="q" title="'+esc(txt)+'">?</span>'}
+
+    if(w.compact){
+      var toNext=Math.max(0,w.compact-w.used);
+      var cp=Math.min(100,w.used*100/w.compact);
+      g+='<div class="gline"><span class="name">'+name+' <span class="dim">to compaction</span></span>'+
+        meter(cp,null,cp>=95?"var(--sodium)":"var(--verdigris)")+
+        '<span class="val">'+fmtTok(toNext)+' left</span></div>'+
+        '<div class="dim sub">fires at '+fmtTok(w.compact)+' '+why(w.compact_source||"")+
+        (w.compact_due?' · <span class="warn">due at the end of this turn</span>':'')+
+        (w.stale_reading?' · <span class="bad">size is from before the last compaction — nothing decided from it</span>':'')+
+        '</div>';
+    }else{
+      g+='<div class="gline"><span class="name">'+name+' <span class="dim">to compaction</span></span>'+
+        '<span class="dim" style="flex:1">not known '+why(w.compact_source||"")+' — no bar, and nothing computed from it</span></div>';
+    }
+
+    if(L0&&L0.left!=null){
+      /* One segment per compaction to the wall, the same language the
+         unsized case has always used: the cycles already lived are filled,
+         the one running now fills as it goes, the rest are hatched. It was
+         a single bar of L0.pct, which is how much of what is LEFT has been
+         consumed - correct for "how far to the next compaction" and wrong
+         for what a person reads off a bar named "to the wall". Carried
+         size drops back to the floor at every compaction, so that bar sat
+         near empty on a session two compactions into five, which is two
+         fifths of the way to being replaced. The whole life is now on it,
+         and the distance in tokens stays on the right where it was. */
+      var det='the wall is the '+L0.budget+'th compaction, and this bar is the whole way there: '+
+        L0.done+' cycle(s) lived, this one '+Math.round((L0.life_frac||0)*100)+'% through, '+
+        L0.later_cycles+' to come. '+fmtTok(L0.rest_of_cycle)+
+        ' left in this cycle, then '+L0.later_cycles+' whole cycles of '+
+        (L0.floors&&L0.floors.length?'compaction point minus the floor. Floors so far: '+L0.floors.map(fmtTok).join(' → '):'unknown size - no floor measured yet')+
+        (L0.rise?'. The floor climbs '+fmtTok(L0.rise)+' a compaction, so each next cycle is shorter.':'')+
+        (L0.why_partial?' '+L0.why_partial:'');
+      g+='<div class="gline"><span class="name">'+name+' <span class="dim">to the wall</span></span>'+
+        segbar(L0.budget,L0.done,L0.life_frac,det)+
+        '<span class="val">'+(L0.life_pct!=null?Math.round(L0.life_pct)+'% · ':'')+
+        fmtTok(L0.left)+(L0.turns_left!=null?' · ~'+L0.turns_left+' turns':'')+'</span></div>'+
+        '<div class="dim sub">'+L0.done+'/'+L0.budget+' compactions · '+fmtTok(L0.rest_of_cycle)+
+        ' this cycle + '+L0.later_cycles+' more '+why(det)+
+        (L0.floors&&L0.floors.length?' · floor '+fmtTok(L0.floors[L0.floors.length-1]):'')+
+        (L0.rise?' (+'+fmtTok(L0.rise)+'/cycle)':'')+
+        (L0.estimated?' · <span class="warn">estimate</span>':'')+
+        '</div>';
+    }else if(L0&&L0.sizeable===false){
+      // No floor measured, so the cycles after this one have no size and the
+      // distance to the fifth compaction has no total. There is still a bar,
+      // because how far along it is IS knowable - it is just not one bar.
+      // One segment per compaction to the wall: the current one fills with
+      // measured progress through this cycle, the ones after it are hatched
+      // because their size is not measured. What must never happen again is
+      // a single bar at 92% computed from a total nobody has - that is what
+      // told Max a planner 64k short of its first, routine compaction was
+      // nearly dead.
+      var ord=L0.next_ordinal===1?'1st':L0.next_ordinal===2?'2nd':L0.next_ordinal===3?'3rd':L0.next_ordinal+'th';
+      // measured: carried now against the compaction point, the same ratio
+      // the "to compaction" bar above is drawn from
+      var cf=(w.compact&&w.used!=null)?(w.used/w.compact):null;
+      var segTitle='The wall is the '+L0.budget+'th compaction, so there is one segment for each. '+
+        (L0.done?L0.done+' behind, filled. ':'')+
+        'The segment filling now is this cycle: '+fmtTok(w.used)+' carried of '+fmtTok(w.compact)+
+        ' to the '+ord+' compaction - both measured. The hatched segments are the cycles after it: '+
+        'a cycle is the compaction point minus the floor it starts on, and no floor has been measured '+
+        'for this session yet, so their size is not known and neither is the total. '+
+        (L0.why_partial||'')+' The first compaction measures the floor and this becomes one bar.';
+      g+='<div class="gline"><span class="name">'+name+' <span class="dim">to the wall</span></span>'+
+        segbar(L0.budget,L0.done,cf,segTitle)+
+        '<span class="val dim">'+fmtTok(L0.rest_of_cycle)+' to the '+ord+'</span></div>'+
+        '<div class="dim sub">'+L0.done+'/'+L0.budget+' compactions · '+
+        fmtTok(L0.rest_of_cycle)+' to the '+ord+' compaction'+
+        (L0.rest_turns!=null?' (~'+L0.rest_turns+' turns)':'')+
+        ' + '+L0.later_cycles+' more cycles, <span class="amber">not sizeable yet</span> '+
+        why(segTitle)+' · the next one is routine, not the wall</div>';
+    }else if(L0&&L0.why_blank){
+      g+='<div class="gline"><span class="name">'+name+' <span class="dim">to the wall</span></span>'+
+        '<span class="dim" style="flex:1">'+L0.done+'/'+L0.budget+' compactions · not computable '+why(L0.why_blank)+'</span></div>';
+    }
+
+    var cw,cwd;
+    if(w.wall_measured){
+      cw=fmtTok(w.wall)+' measured'; cwd='A session on this model and project actually broke at that size. '+fmtTok(w.room_to_wall)+' to it.';
+    }else if(w.wall_low){
+      cw=fmtTok(w.wall_low)+'–'+fmtTok(w.wall)+' est';
+      cwd='Neither end measured here. '+fmtTok(w.wall)+' = window minus the 33k reserve, which is the 200k-window figure. '+
+          fmtTok(w.wall_low)+' = window minus the ~23% reported for 1M windows. '+fmtTok(w.room_to_wall_low)+' to the near end, '+
+          fmtTok(w.room_to_wall)+' to the far one. The first "Conversation too long" here replaces both with a measurement.';
+    }else{
+      cw=fmtTok(w.wall)+' est'; cwd=(w.wall_source||"")+'. '+fmtTok(w.room_to_wall)+' to it.';
+    }
+    if(w.interception_unknown)cwd+=' Whether a compaction fires first is unknowable for this window, so nothing is decided from it.';
+    g+='<div class="dim sub" style="margin-bottom:10px">context wall '+cw+' '+why(cwd)+
+       (w.worst_turn?' · biggest turn '+fmtTok(w.worst_turn):'')+'</div>';
+  });
+  $("#gauges").innerHTML=g||'<div class="dim">no live sessions for this project - the bars fill when the pair is up. a fresh session shows "-" until its first call.</div>';
+
+  /* limits */
+  var lim=D.state.limits||{},L="";
+  function limline(nm,e,extra){if(!e||e.pct==null)return"";return '<div class="gline"><span class="name">'+nm+'</span>'+meter(e.pct,null,e.pct>=90?"var(--red)":e.pct>=75?"var(--sodium)":"var(--verdigris)")+'<span class="val">'+Math.round(e.pct)+"%"+(e.resets?" · resets "+esc(fmtReset(e.resets)):"")+'</span></div>'}
+  var th=D.state.telegram_health;
+  if(th&&th.ok===false)
+    L+='<div class="gline"><span class="name bad">telegram</span><span class="bad" style="flex:1">not answering since '+esc(th.at||"")+' — '+esc(th.why||"")+(th.code?' ('+th.code+')':'')+'. '+(/unauthor|forbidden|token|not found|40[14]/i.test(th.why||"")?'The token is rejected — set it again in the telegram tab.':'This is the connection to api.telegram.org, not the token — it retries by itself.')+'</span></div>';
+  L+=limline("five hours",lim.five_hour);L+=limline("week - all",lim.weekly);
+  Object.keys(lim.extra||{}).forEach(function(k){L+=limline(k,lim.extra[k])});
+  $("#limits").innerHTML=L||'<div class="dim">limit gauges appear with the first status readings from a live session (Claude Code v1.2.80+).</div>';
+
+  var costs=(D.state.fh_costs||[]),fh=lim.five_hour&&lim.five_hour.pct;
+  var enough=costs.length&&fh!=null?Math.floor((100-fh)/(costs.reduce(function(a,b){return a+b},0)/costs.length)):null;
+  var exec=sessArr.filter(function(s){return s.role==="executor"&&forCur(s.path)})[0];
+  var perIter=exec&&exec.turn_costs&&exec.turn_costs.length?fmtTok(exec.turn_costs[exec.turn_costs.length-1]):"-";
+  var cal2=exec?calOf(exec):null;
+  $("#readouts").innerHTML=
+    '<span>last iteration cost:</span> '+perIter+' tokens<br>'+
+    '<span>enough for about:</span> '+(enough==null?"-":enough+" more iterations")+'<br>'+
+    '<span>ceiling:</span> '+(cal2?cal2.ceiling_pct+"% · "+esc(cal2.how||""):"-")+'<br>'+
+    '<span>misses:</span> '+(cal2?cal2.misses||0:0);
+
+  /* feed */
+  /* the daemon already hands these over newest first, and already cut them
+     for whichever project was asked for. In "all" a line says which pair it
+     belongs to, because a mixed feed with unlabelled lines is the same
+     mistake as an unlabelled headline; a line with no project is about the
+     bridge itself and carries no name because it has none. */
+  $("#feedMine").className="btn"+(FEEDALL?"":" on");
+  $("#feedAll").className="btn"+(FEEDALL?" on":"");
+  var pairsBy=D.pairs||{};
+  $("#feed").innerHTML=(D.events||[]).map(function(e){
+    var who="";
+    if(FEEDALL&&e.path&&pairsBy[e.path])
+      who='<span class="dim">'+esc(pairsBy[e.path].mark||"")+' '+
+          esc(pairsBy[e.path].name||"")+'</span>  ';
+    return '<div class="'+(e.kind==="command"?"you":"")+'"><span class="dim">'+esc((e.at||"").slice(11))+'</span>  '+who+esc(e.text||"")+'</div>'}).join("");
+  $("#footPaths").textContent="logs: <project>\\bridge-logs\\   ·   crashes: bridge\\crashes\\";
+}
+function calOf(s){
+  var cal=D.calibration||{},key=((s.model||"?").toLowerCase())+"|"+(s.path||"?");
+  return cal[key];
+}
+function act(a){
+  if(a.indexOf("handover|")===0&&CUR){
+    var who=a.slice(9);
+    var body={project:CUR,reason:"asked for from the panel"};
+    if(who!=="both")body.role=who;
+    var txt=who==="both"
+      ? "Hand over both sessions now?\n\nBoth windows are replaced. Two new ones open and each needs the development-channels dialog answered once (press 1); after that the pair picks the work up from the handoff on its own."
+      : "Hand over the "+who+" now?\n\nThat window is replaced; the other one keeps working untouched. One new window opens and needs the development-channels dialog answered once (press 1).";
+    if(!confirm(txt))return;
+    post("/handover",body);setTimeout(tick,600);return}
+  if(a==="selftest"&&CUR){
+    post("/selftest",{project:CUR}).then(function(r){
+      var s=(r.steps||[]).map(function(x){
+        return (x.ok?"ok   ":"FAIL ")+x.name+(x.detail?"  —  "+x.detail:"")}).join("\n");
+      alert("BRIDGE LINK TEST\n\n"+s+"\n\n"+(r.verdict||""))});
+    return}
+  if(a.indexOf("restart|")===0){var k=a.slice(8).split("|");post("/session",{action:"restart",project:k[0],role:k[1]}).then(function(){setTimeout(tick,400)});return}
+  if(a==="startloop"&&CUR){post("/loop",{action:"start",project:CUR});setTimeout(tick,300);return}
+  if(a==="pause")post("/cmd",{cmd:"pause"});
+  else if(a==="resume")post("/cmd",{cmd:"resume"});
+  else if(a==="ack")post("/cmd",{cmd:"ack_recovery"});
+  else if(a==="stoploop"&&CUR)post("/loop",{action:"stop",project:CUR});
+  else if(a==="golaunch")$$("#rail button")[2].click();
+  else if(a==="goresume")$$("#rail button")[4].click();
+  setTimeout(tick,300);
+}
+$("#projSel").onchange=function(){CUR=this.value;renderPanel();tick()};
+/* No new endpoint for either of these: which project the feed is for is a
+   parameter of the read the panel already does every 2.5s. */
+$("#feedMine").onclick=function(){FEEDALL=false;tick()};
+$("#feedAll").onclick=function(){FEEDALL=true;tick()};
+/* The note belongs to a project, so the panel says which one: the one it is
+   showing. Sent without a project it would be refused the moment there is
+   more than one, and this box is the only way to leave a note from here. */
+$("#noteSend").onclick=function(){
+  if(!CUR){$("#noteInput").value="";return}
+  post("/cmd",{cmd:"note",text:$("#noteInput").value,project:CUR});$("#noteInput").value=""};
+
+/* ---------- projects ---------- */
+function loadProjects(){
+  fetch("/projects").then(function(r){return r.json()}).then(function(d){
+    var tb=$("#projTable tbody");tb.innerHTML="";
+    (d.projects||[]).forEach(function(p){
+      var watched=((D.config||{}).projects||{})[p.path]!=null;
+      var tr=document.createElement("tr");
+      tr.innerHTML='<td>'+esc(p.name)+'</td><td class="dim">'+esc(p.path)+'</td><td>'+(p.sessions||0)+'</td><td class="dim">'+esc(p.last_used||"")+'</td>'+
+        '<td>'+(watched?'<span class="ok">watching</span>':'<span class="dim">-</span>')+'</td>'+
+        '<td>'+(watched?'<button class="btn" data-open="'+esc(p.path)+'">open</button> <button class="btn" data-watch="'+esc(p.path)+'">re-apply setup</button> <button class="btn warn" data-unwatch="'+esc(p.path)+'">stop watching</button>':'<button class="btn" data-watch="'+esc(p.path)+'">watch this one</button>')+'</td>';
+      tb.appendChild(tr);
+    });
+    $$("#projTable [data-watch]").forEach(function(b){b.onclick=function(){
+      post("/add-project",{path:b.dataset.watch}).then(function(r){
+        $("#addMsg").innerHTML=r.ok?'<div class="msgok">Hooks are in (your old hooks stayed; backup saved as settings.json.before-bridge). Watching.</div>':'<div class="msgerr">'+esc(r.error)+'</div>';
+        tick().then(loadProjects);});
+    }});
+    $$("#projTable [data-open]").forEach(function(b){b.onclick=function(){CUR=b.dataset.open;$$("#rail button")[0].click();renderPanel()}});
+    $$("#projTable [data-unwatch]").forEach(function(b){b.onclick=function(){
+      var pth=b.dataset.unwatch;
+      if(!confirm("Stop watching "+pth+"?\n\nThe bridge takes out its own hooks, status line, channel entry and the verdict permission. Your own settings, the bridge-logs folder and the .gitignore line stay."))return;
+      post("/remove-project",{path:pth}).then(function(r){
+        $("#addMsg").innerHTML=r.ok?'<div class="msgok">Stopped watching. Removed: '+esc((r.removed||[]).join(", ")||"nothing was left to remove")+'.</div>':'<div class="msgerr">'+esc(r.error)+'</div>';
+        if(CUR===pth)CUR="";
+        tick().then(loadProjects);});
+    }});
+  });
+}
+$("#addBtn").onclick=function(){post("/add-project",{path:$("#addPath").value}).then(function(r){
+  $("#addMsg").innerHTML=r.ok?'<div class="msgok">Watching '+esc(r.path)+'.</div>':'<div class="msgerr">'+esc(r.error)+'</div>';tick().then(loadProjects);})};
+
+/* ---------- launch ---------- */
+var CHAINS={executor:["opus","sonnet"],planner:["fable","opus"]},MODE={executor:"auto",planner:"plan",admin:false,adminPlan:false};
+function projConf(){var pc=((D.config||{}).projects||{})[CUR]||{};return pc}
+function renderLaunch(){
+  var pc=projConf(); if(pc.chains)CHAINS=JSON.parse(JSON.stringify(pc.chains));
+  $("#autoRestart").checked=!!pc.auto_restart_dead_sessions;
+  if(pc.modes){
+    if(pc.modes.executor){MODE.executor=pc.modes.executor;$("#modeExec").value=pc.modes.executor}
+    if(pc.modes.planner){MODE.planner=pc.modes.planner;$("#modePlan").value=pc.modes.planner}
+  }
+  $("#adminExec").checked=!!MODE.admin; $("#adminPlan").checked=!!MODE.adminPlan;
+  MODE.roPlan = pc.readonly_planner!==false;
+  $("#roPlan").checked=MODE.roPlan;
+  ["executor","planner"].forEach(function(role){
+    var host=$(role==="executor"?"#chainExec":"#chainPlan");host.innerHTML="";
+    (CHAINS[role]||[]).forEach(function(m,i){
+      var c=document.createElement("span");c.className="chip";
+      var lb=mlabel(m);
+      var tail=lb?' <span class="dim">· '+esc(lb)+'</span>':(D.model_probe_running?' <span class="dim">· checking…</span>':' <span class="dim">· ?</span>');
+      c.innerHTML=esc(m)+tail+' <b data-r="'+role+'" data-i="'+i+'">x</b>';host.appendChild(c)});
+    var sel=$(role==="executor"?"#addModelExec":"#addModelPlan");
+    sel.innerHTML=(D.models||[]).map(function(m){var lb=mlabel(m);return '<option value="'+esc(m)+'">'+esc(m)+(lb?" — "+esc(lb):"")+'</option>'}).join("");
+  });
+  $$("#w-launch .chip b").forEach(function(b){b.onclick=function(){
+    CHAINS[b.dataset.r].splice(+b.dataset.i,1);renderLaunch()}});
+  var unknown=[].concat(CHAINS.executor||[],CHAINS.planner||[]).filter(function(m){return !mlabel(m)});
+  var errs=(D.models_registry||{}).last_errors||{};
+  var hint="";
+  if(D.model_probe_running)hint="checking model versions - a one-token call per alias; labels fill in as answers land";
+  else if(Object.keys(errs).length){var k=Object.keys(errs)[0];hint='could not verify versions: '+k+' - '+errs[k]+'. Check that plain "claude" works in a terminal, then refresh in settings.'}
+  else if(unknown.length&&!window._probeKicked){window._probeKicked=true;post("/models/refresh",{});hint="checking model versions...";}
+  else if(unknown.length)hint="versions unknown for: "+unknown.join(", ")+" - refresh in settings";
+  $("#modelsHint").textContent=hint;
+  var profs=D.profiles||{};var ps=$("#profSel");
+  ps.innerHTML=Object.keys(profs).map(function(n){return '<option>'+esc(n)+'</option>'}).join("");
+  preview();
+}
+$$("[data-add]").forEach(function(b){b.onclick=function(){
+  var role=b.dataset.add,sel=$(role==="executor"?"#addModelExec":"#addModelPlan");
+  if(sel.value&&CHAINS[role].indexOf(sel.value)<0)CHAINS[role].push(sel.value);renderLaunch()}});
+$("#modeExec").onchange=function(){MODE.executor=this.value;preview()};
+$("#adminExec").onchange=function(){MODE.admin=this.checked;preview()};
+$("#modePlan").onchange=function(){MODE.planner=this.value;preview()};
+$("#roPlan").onchange=function(){
+  MODE.roPlan=this.checked;preview();
+  if(!CUR)return;
+  var pr=((D.config||{}).projects||{});pr[CUR]=pr[CUR]||{};
+  pr[CUR].readonly_planner=this.checked;post("/config",{projects:pr}).then(tick);
+};
+$("#adminPlan").onchange=function(){MODE.adminPlan=this.checked;preview()};
+$("#autoRestart").onchange=function(){
+  if(!CUR)return;
+  var pr=((D.config||{}).projects||{});pr[CUR]=pr[CUR]||{};
+  pr[CUR].auto_restart_dead_sessions=this.checked;
+  post("/config",{projects:pr}).then(tick);
+};
+function danger(mode,adm,who){
+  if(adm&&mode==="bypassPermissions")return "Administrator AND no permission checks: one wrong command can touch anything on this machine, silently, with admin rights. Use only when you truly need it and watch the window.";
+  if(mode==="bypassPermissions")return "No permission checks at all: the "+who+" will run any command without asking. Fine in a disposable folder; risky next to things you care about.";
+  if(adm)return "Administrator: UAC will ask once at start; everything the "+who+" runs inherits admin rights.";
+  if(who==="planner"&&mode!=="plan"&&!MODE.roPlan)return "This reviewer can change files itself, and outside plan mode its shell can too. It will be judging work it may have touched - worth remembering when you read its verdicts.";
+  return "";
+}
+function preview(){
+  var m=MODE.executor,adm=MODE.admin;
+  var s1=$("#dangerStrip"),d1=danger(m,adm,"executor");
+  s1.style.display=d1?"block":"none";s1.textContent=d1;
+  var mp=MODE.planner,admp=MODE.adminPlan;
+  var s2=$("#dangerPlan"),d2=danger(mp,admp,"planner");
+  s2.style.display=d2?"block":"none";s2.textContent=d2;
+  var ex="claude --permission-mode "+m+" --remote-control --dangerously-load-development-channels server:bridge"+((CHAINS.executor||[])[0]?" --model "+CHAINS.executor[0]:"");
+  var pl="claude --permission-mode "+mp+" --remote-control --dangerously-load-development-channels server:bridge"+((CHAINS.planner||[])[0]?" --model "+CHAINS.planner[0]:"")+(MODE.roPlan?" --disallowedTools Edit,Write,NotebookEdit,Bash,PowerShell,ExitPlanMode":"");
+  $("#cmdPreview").textContent="executor  ("+(adm?"Start-Process -Verb RunAs, minimised window":"minimised window")+")\n  "+ex+"\n\nplanner   ("+(admp?"Start-Process -Verb RunAs, minimised window":"minimised window")+", shows up in the Claude app)\n  "+pl;
+}
+function saveChains(){var pr=((D.config||{}).projects||{});pr[CUR]=pr[CUR]||{};pr[CUR].chains=CHAINS;
+  pr[CUR].modes={executor:MODE.executor,planner:MODE.planner};
+  pr[CUR].readonly_planner=MODE.roPlan!==false;return post("/config",{projects:pr})}
+function launchRole(role){
+  if(!CUR){$("#launchMsg").innerHTML='<div class="msgerr">Pick a project first (projects window).</div>';return}
+  saveChains().then(function(){return post("/session",{action:"launch",project:CUR,role:role,model:(CHAINS[role]||[])[0]||null,mode:role==="executor"?MODE.executor:MODE.planner})})
+  .then(function(r){$("#launchMsg").innerHTML=r.ok?'<div class="msgok">'+role+' window is up (pid '+r.pid+'), minimised on your taskbar.</div>':'<div class="msgerr">'+esc(r.error)+'</div>'});
+}
+$("#launchExec").onclick=function(){launchRole("executor")};
+$("#launchPlan").onclick=function(){launchRole("planner")};
+$("#launchBoth").onclick=function(){launchRole("executor");setTimeout(function(){launchRole("planner")},1200)};
+$("#loopStart").onclick=function(){
+  if(!CUR){$("#launchMsg").innerHTML='<div class="msgerr">Pick a project first.</div>';return}
+  post("/loop",{action:"start",project:CUR,reset:true}).then(function(){
+    $("#launchMsg").innerHTML='<div class="msgok">The loop is on. Now give the executor a task in its window.</div>';tick()})};
+$("#stopBoth").onclick=function(){post("/session",{action:"stop",project:CUR,role:"executor"});post("/session",{action:"stop",project:CUR,role:"planner"});$("#launchMsg").innerHTML='<div class="msgok">Both stop signals sent.</div>'};
+$("#saveProf").onclick=function(){
+  var name=prompt("profile name","my profile");if(!name)return;
+  var profs=D.profiles||{};profs[name]={chains:CHAINS,executor_mode:MODE.executor,admin:MODE.admin};
+  post("/config",{profiles_ignored:1}); /* profiles are read-only via /state; store under project config */
+  var pr=((D.config||{}).projects||{});pr[CUR]=pr[CUR]||{};pr[CUR].profile=name;pr[CUR].chains=CHAINS;
+  post("/config",{projects:pr}).then(function(){$("#launchMsg").innerHTML='<div class="msgok">Saved on this project.</div>'});
+};
+$("#profSel").onchange=function(){
+  var p=(D.profiles||{})[this.value];if(!p)return;
+  if(p.chains)CHAINS=JSON.parse(JSON.stringify(p.chains));
+  if(p.executor_mode){MODE.executor=p.executor_mode;$("#modeExec").value=p.executor_mode}
+  if(p.planner_mode){MODE.planner=p.planner_mode;$("#modePlan").value=p.planner_mode}
+  renderLaunch();
+};
+
+/* ---------- sessions ---------- */
+function renderSessions(){
+  var tb=$("#sessTable tbody");tb.innerHTML="";
+  Object.keys(D.state.sessions||{}).forEach(function(k){
+    var s=D.state.sessions[k],cal=calOf(s),pct=s.context_pct;
+    var over=cal&&pct!=null&&pct>cal.ceiling_pct;
+    var tr=document.createElement("tr");
+    tr.innerHTML='<td>'+esc(s.role||k)+'<div class="dim">'+esc((s.session_id||"").slice(0,8))+'</div></td>'+
+      '<td class="dim">'+esc(s.project||"")+'</td><td>'+esc(s.model||"-")+'</td>'+
+      '<td style="min-width:220px">'+meter(pct,cal?cal.ceiling_pct:null,pct==null?"var(--dim)":over?"var(--red)":"var(--verdigris)")+
+      '<span class="dim">'+(pct==null?"-":Math.round(pct)+"% live")+(over?' <span class="bad">past the tick - a miss</span>':"")+'</span></td>'+
+      '<td class="'+(s.state==="died"?"bad":"")+'">'+esc(s.state||"")+'</td>'+
+      '<td>'+(s.state==="died"?'<button class="btn" data-restart="'+esc(s.path||"")+'|'+esc(s.role||"")+'">restart where it stopped</button>':s.state!=="ended"?'<button class="btn" data-hand="'+esc(s.path||"")+'|'+esc(s.role||"")+'">hand over</button> <button class="btn warn" data-kill="'+esc(s.path||"")+'|'+esc(s.role||"")+'">stop</button>':'<span class="dim">rotated out</span>')+'</td>';
+    tb.appendChild(tr);
+  });
+  $$("#sessTable [data-kill]").forEach(function(b){b.onclick=function(){
+    var a=b.dataset.kill.split("|");post("/session",{action:"stop",project:a[0],role:a[1]}).then(tick)}});
+  $$("#sessTable [data-restart]").forEach(function(b){b.onclick=function(){
+    var a=b.dataset.restart.split("|");post("/session",{action:"restart",project:a[0],role:a[1]}).then(tick)}});
+  $$("#sessTable [data-hand]").forEach(function(b){b.onclick=function(){
+    var a=b.dataset.hand.split("|");
+    if(!confirm("Hand over the "+a[1]+" of "+a[0].split(/[\\\/]/).pop()+"?\n\nThat window is replaced and the other one keeps working. The new window needs the development-channels dialog answered once."))return;
+    post("/handover",{project:a[0],role:a[1],reason:"asked for from the sessions list"}).then(function(){setTimeout(tick,600)})}});
+  var th=D.config.thresholds||{};
+  if(!THRDIRTY){
+    $("#thHandoff").value=th.handoff_at||75;$("#thWarn").value=th.warn_at||85;$("#thRotate").value=th.rotate_at||90;
+    $("#thHandover").value=th.handover_at||90;
+  }
+  $("#thHandoverV").textContent=$("#thHandover").value+"%";
+  if(!window._acTouched){
+    var pcy=((D.config||{}).projects||{})[CUR]||{};
+    $("#acPct").value=pcy.autocompact_pct||80;
+  }
+  $("#acPctV").textContent=$("#acPct").value+"%";
+  if(!window._polTouched){
+    var pcx=((D.config||{}).projects||{})[CUR]||{};
+    $("#rotPolicy").value=pcx.rotate_policy||"compact";
+  }
+  $("#thHandoffV").textContent=$("#thHandoff").value+"%";
+  $("#thWarnV").textContent=$("#thWarn").value+"%";
+  $("#thRotateV").textContent=$("#thRotate").value+"%";
+  var lt=$("#launchTable tbody");
+  if(lt){
+    var lg=(D.state.launch_log||[]).slice().reverse();
+    lt.innerHTML=lg.length?lg.map(function(r){
+      return '<tr><td class="dim">'+esc(r.at||"")+'</td><td>'+esc(r.project||"")+'</td><td>'+esc(r.role||"")+'</td><td>'+esc(r.why||"")+'</td></tr>'}).join("")
+      :'<tr><td colspan="4" class="dim">no windows opened since the bridge last started</td></tr>';
+  }
+  var cl="";
+  Object.keys(D.calibration||{}).forEach(function(k){var c=D.calibration[k];
+    cl+='<div><span>'+esc(k.split("|")[0])+' on '+esc((k.split("|")[1]||"").split(/[\\\/]/).pop())+':</span> ceiling '+c.ceiling_pct+'% · misses '+(c.misses||0)+' · '+esc(c.how||"")+(c.wall_history_tokens?' · <span class="bad">wall seen at '+fmtTok(c.wall_history_tokens)+'</span>':"")+'</div>'});
+  $("#calibList").innerHTML=cl||'<div class="dim">fills in after the first live readings.</div>';
+}
+["thHandoff","thWarn","thRotate","thHandover"].forEach(function(id){$("#"+id).oninput=function(){THRDIRTY=true;
+  $("#"+id+"V").textContent=this.value+"%"}});
+$("#acPct").oninput=function(){window._acTouched=true;$("#acPctV").textContent=this.value+"%"};
+$("#acPct").onchange=function(){
+  if(!CUR){window._acTouched=false;return}
+  var pr=((D.config||{}).projects||{});pr[CUR]=pr[CUR]||{};
+  pr[CUR].autocompact_pct=+this.value;
+  post("/config",{projects:pr}).then(function(){window._acTouched=false;tick()});
+};
+$("#rotPolicy").onchange=function(){
+  window._polTouched=true;
+  if(!CUR){window._polTouched=false;return}
+  var pr=((D.config||{}).projects||{});pr[CUR]=pr[CUR]||{};
+  pr[CUR].rotate_policy=this.value;
+  post("/config",{projects:pr}).then(function(){window._polTouched=false;tick()});
+};
+$("#saveThr").onclick=function(){
+  var th=D.config.thresholds||{};
+  th.handoff_at=+$("#thHandoff").value;th.warn_at=+$("#thWarn").value;th.rotate_at=+$("#thRotate").value;
+  th.handover_at=+$("#thHandover").value;
+  post("/config",{thresholds:th}).then(function(){THRDIRTY=false;$("#thrMsg").innerHTML='<span class="msgok">saved</span>'})};
+$("#verifyBtn").onclick=function(){
+  var out=$("#verifyOut");out.textContent="checking...";
+  var proj=Object.keys((D.config||{}).projects||{});var parts=[];var left=proj.length;
+  if(!left){out.textContent="no watched projects yet";return}
+  proj.forEach(function(p){post("/verify-archives",{project:p}).then(function(r){
+    var v=r.result||{};parts.push(p.split(/[\\\/]/).pop()+": "+v.rotations+" rotations, "+v.handoffs_ok+" handoffs complete, "+v.transcripts_ok+" transcripts intact"+(v.problems&&v.problems.length?" - "+v.problems.join("; "):""));
+    if(!--left)out.textContent=parts.join("  ·  ")})});
+};
+
+/* ---------- resume ---------- */
+function loadResume(){
+  fetch("/resume-report").then(function(r){return r.json()}).then(function(d){
+    var runNote=d.running?'<div class="dim" style="margin-bottom:10px">'+d.running+' claude process'+(d.running>1?'es are':' is')+' running on this machine. Sessions this bridge can see as alive are skipped below; anything it cannot account for is yours to check.</div>':'';
+    $("#resumeSub").innerHTML=runNote+(d.recovered?
+      '<div class="alert red">'+esc(RREASON[d.reason]||"The bridge did not stop cleanly last time. Nothing has been restarted on its own.")+' Below - what every session was doing and what changed on disk after the last save point.</div>':
+      'Nothing looks interrupted right now. This tab fills after a power cut or a hard stop; here is the same reconciliation on the current state, for reference.');
+    var host=$("#resumeBody");host.innerHTML="";
+    (d.report||[]).forEach(function(g){
+      var card=document.createElement("div");card.className="card";
+      var h='<div class="row" style="justify-content:space-between"><h2 style="margin:0">'+esc(g.name)+'</h2>'+
+        '<div class="row"><button class="btn" data-res="'+esc(g.path)+'">continue this project</button>'+
+        '<button class="btn warn" data-drop="'+esc(g.path)+'">throw away the unfinished part</button></div></div>';
+      g.sessions.forEach(function(s){
+        h+='<details><summary>'+esc(s.role||"session")+' · '+esc(s.model||"-")+' · '+(s.pct==null?"-":Math.round(s.pct)+"%")+(s.live?' <span class="ok">running now</span>':'')+
+           ' <span class="tag '+(s.tag==="needs a heads-up"?"heads":s.tag==="a build was running"?"build":"")+'">'+esc(s.tag)+'</span></summary><div class="inner">'+
+           'last thing it said: '+esc(s.last_turn||"(nothing recorded)")+'<br>'+
+           (s.inflight&&s.inflight.length?'was in the middle of: '+esc(s.inflight.join(", "))+' - the answer never came back<br>':"")+
+           (s.live?'<div class="dim" style="margin-top:8px">This one is still running, so continuing would only open a second window on top of it. Nothing to do here.</div>'
+                  :'<button class="btn" style="margin-top:8px" data-res1="'+esc(g.path)+'|'+esc(s.role||"")+'">start only this session</button>')+'</div></details>';
+      });
+      if(g.changes.length){
+        h+='<div class="lab" style="margin-top:10px">files changed after the last save point (git):</div><pre>'+esc(g.changes.join("\n"))+'</pre>';
+      }
+      h+='<div class="dim">The pair works together - the loop will not move until both sessions are up.</div>';
+      card.innerHTML=h;host.appendChild(card);
+    });
+    $$("#resumeBody [data-res]").forEach(function(b){b.onclick=function(){
+      post("/resume",{project:b.dataset.res,force:!!($("#resForce")&&$("#resForce").checked)}).then(function(r){
+      if(!r.ok){alert(r.error);return}
+      var m=[];
+      if(r.started&&r.started.length)m.push("Started: "+r.started.join(", ")+".");
+      if(r.skipped&&r.skipped.length)m.push("Left alone because it never stopped: "+r.skipped.join(", ")+".");
+      if(!m.length)m.push("Nothing to start - everything is already running.");
+      alert(m.join("\n"));tick();})}});
+    $$("#resumeBody [data-res1]").forEach(function(b){b.onclick=function(){var a=b.dataset.res1.split("|");
+      post("/resume",{project:a[0],scope:"session",role:a[1],force:!!($("#resForce")&&$("#resForce").checked)})
+        .then(function(r){if(!r.ok)alert(r.error);tick();})}});
+    $$("#resumeBody [data-drop]").forEach(function(b){b.onclick=function(){if(confirm("Discard uncommitted changes in this project? git checkout -- . cannot be undone."))post("/rollback",{})}});
+    if(d.recovered){var ack=document.createElement("button");ack.className="btn big";ack.textContent="all sorted - back to normal";ack.onclick=function(){post("/cmd",{cmd:"ack_recovery"}).then(tick)};$("#resumeBody").appendChild(ack)}
+  });
+}
+
+/* ---------- settings ---------- */
+var NOTIFY_LABELS={iteration_done:"iteration finished",verdict_changes:"verdict asks for changes",model_dropped:"model dropped down the chain",waiting_process:"waiting on a process",process_stuck:"process looks stuck",needs_you:"a session needs your answer",rotation_name:"rotation / naming a new session",limit_low:"a limit is nearly spent",crash:"the bridge itself broke",session_died:"a session window died",session_start:"session started",session_end:"session ended"};
+function renderSettings(){
+  var nv=D.config.notify||{},tb=$("#notifyTable tbody");tb.innerHTML="";
+  Object.keys(NOTIFY_LABELS).forEach(function(k){
+    var v=nv[k]||"silent";
+    var tr=document.createElement("tr");
+    tr.innerHTML='<td>'+NOTIFY_LABELS[k]+'</td><td style="width:110px"><button class="btn" data-nk="'+k+'">'+v+'</button></td>';
+    tb.appendChild(tr);
+  });
+  $$("#notifyTable [data-nk]").forEach(function(b){b.onclick=function(){
+    var order=["sound","silent","log"];var nv=D.config.notify||{};
+    var cur=nv[b.dataset.nk]||"silent";nv[b.dataset.nk]=order[(order.indexOf(cur)+1)%3];
+    post("/config",{notify:nv}).then(tick)}});
+  var reg=D.models_registry||{},mp=reg.map||{},subs=reg.subs||[];
+  var seen=Object.keys(mp).length;
+  var lastSub=subs.length?subs[subs.length-1]:null;
+  var rows='<tr><td class="lab">resolved now</td><td>'+(seen?seen+' · from live sessions and probes':'0 · fills from the first live session')+'</td></tr>'+
+    '<tr><td class="lab">last probe</td><td>'+esc(reg.last_probe||"never - refresh below or start any session")+'</td></tr>'+
+    '<tr><td class="lab">substitutions seen</td><td>'+(subs.length?subs.length+' · '+esc(lastSub.from)+' → '+esc(lastSub.to)+', '+esc((lastSub.at||"").slice(5,10)):'none')+'</td></tr>';
+  Object.keys(mp).sort().forEach(function(a){rows+='<tr><td class="lab">'+esc(a)+'</td><td>'+esc(mp[a].display||mp[a].id)+' <span class="dim">('+esc(mp[a].via||"")+', '+esc((mp[a].seen||"").slice(5))+')</span></td></tr>'});
+  $("#modelsRows").innerHTML=rows;
+  var op=reg.opts||{};
+  if(!window._optsTouched){
+    $("#optAliases").checked=op.prefer_aliases!==false;
+    $("#optReread").checked=op.reread_on_launch!==false;
+    $("#optBest").checked=!!op.allow_best;
+  }
+  $("#probeState").textContent=D.model_probe_running?"probing... a line per model lands in activity when done":"";
+}
+$("#allSound").onclick=function(){var nv={};Object.keys(NOTIFY_LABELS).forEach(function(k){nv[k]="sound"});post("/config",{notify:nv}).then(tick)};
+$("#allSilent").onclick=function(){var nv={};Object.keys(NOTIFY_LABELS).forEach(function(k){nv[k]="silent"});post("/config",{notify:nv}).then(tick)};
+["optAliases","optReread","optBest"].forEach(function(id){$("#"+id).onchange=function(){
+  window._optsTouched=true;
+  post("/models/options",{prefer_aliases:$("#optAliases").checked,reread_on_launch:$("#optReread").checked,allow_best:$("#optBest").checked}).then(function(){window._optsTouched=false;tick()})}});
+$("#modelsRefresh").onclick=function(){post("/models/refresh",{}).then(function(r){$("#probeState").textContent=r.ok?"probing...":"a probe is already running";tick()})};
+$("#addCustomModel").onclick=function(){
+  var v=$("#customModel").value.trim();if(!v)return;
+  var cm=(D.config.custom_models||[]);cm.push(v);
+  post("/config",{custom_models:cm}).then(tick);$("#customModel").value="";
+};
+$("#archiveNow").onclick=function(){post("/archive-now",{}).then(function(r){alert("Packed "+r.packed+" day folder(s).")})};
+
+/* ---------- telegram ---------- */
+function renderTelegram(){
+  var tg=(D.config||{}).telegram||{},host=$("#tgSteps");
+  var keepToken=$("#tgToken")?$("#tgToken").value:"";
+  var s1=true,s2=tg.token_set,s3=tg.connected;
+  host.innerHTML=
+  step(1,true,"make the bot","Open Telegram, find <b>@BotFather</b>, send <b>/newbot</b>. First question is the display name - anything, it does not need to be unique. Second is the username: 5-32 characters, latin letters, digits and underscores only, it must <b>start with a letter</b> and <b>end in bot</b>, and it must be free across all of Telegram - short obvious ones are all taken, so add something of yours: my_endless_bridge_bot, spacejunk_loop_bot. Two traps: if a name is taken, send the next try as a <b>new message</b> - bots never see edits of old ones; and a name starting with a digit is rejected. BotFather answers with the token - one long line with a colon in the middle. That is the only manual part; Telegram does not let programs create bots.")+
+  step(2,s1,"paste the token",'<div class="row"><input type="password" id="tgToken" placeholder="123456789:AA..." style="max-width:420px" autocomplete="off"><button class="btn" id="tgEye" title="show / hide">show</button><button class="btn" id="tgTokenBtn">check</button></div><div id="tgTokenMsg">'+(s2?'<div class="msgok">Token accepted.</div>':"")+'</div>')+
+  step(3,s2,"say hello","Open your bot and send it any word. The first message is the pairing - no codes to copy. Everyone else who ever writes to the bot is dropped silently.<div class='row' style='margin-top:8px'><button class='btn' id='tgPairBtn'>I sent it - check</button></div><div id='tgPairMsg'>"+(s3?'<div class="msgok">Paired.</div>':"")+"</div>")+
+  step(4,s3,"test both ways","<div class='row'><button class='btn' id='tgTestBtn'>send the test message</button></div><div id='tgTestMsg'></div><div class='dim' style='margin-top:8px'>A message with a button arrives on your phone; tap the button and you are done. From then on: /pause /resume /status /note, plus the pinned message that keeps updating in place.<br><br>This is a one-time setup: the token and the pairing live in the bridge's own config, outside any project, and survive restarts. Re-issued the token for the same bot? Step 2 only. A brand-new bot means a new chat, so steps 2 and 3. Step 4 is just a check.</div>");
+  function step(n,open,title,body){return '<div class="step'+(open?"":" locked")+'"><span class="n">'+n+'</span><b>'+title+'</b><div class="inner" style="margin-top:8px">'+body+'</div></div>'}
+  if($("#tgToken")&&keepToken)$("#tgToken").value=keepToken;
+  if($("#tgToken")&&s2&&!keepToken)$("#tgToken").placeholder="•••••••• saved — press show";
+  if($("#tgEye"))$("#tgEye").onclick=function(){
+    var inp=$("#tgToken");
+    if(inp.type==="password"){
+      if(!inp.value&&(((D.config||{}).telegram)||{}).token_set){
+        post("/telegram/reveal",{}).then(function(r){inp.value=r.token||"";inp.type="text";$("#tgEye").textContent="hide"});
+        return;
+      }
+      inp.type="text";$("#tgEye").textContent="hide";
+    }else{inp.type="password";$("#tgEye").textContent="show"}
+  };
+  if($("#tgTokenBtn"))$("#tgTokenBtn").onclick=function(){post("/telegram/token",{token:$("#tgToken").value}).then(function(r){
+    $("#tgTokenMsg").innerHTML=r.ok?'<div class="msgok">This is @'+esc(r.username)+'. Token saved outside any project folder.</div>':'<div class="msgerr">'+esc(r.error)+'</div>';if(r.ok)tick().then(renderTelegram)})};
+  if($("#tgPairBtn"))$("#tgPairBtn").onclick=function(){post("/telegram/pair",{}).then(function(r){
+    $("#tgPairMsg").innerHTML=r.ok?'<div class="msgok">Paired with '+esc(r.who||"you")+'. Only this chat is ever listened to.</div>':'<div class="msgerr">'+esc(r.error)+'</div>';if(r.ok)tick().then(renderTelegram)})};
+  if($("#tgTestBtn"))$("#tgTestBtn").onclick=function(){post("/telegram/test",{}).then(function(){$("#tgTestMsg").innerHTML='<div class="msgok">Sent - check the phone.</div>'})};
+  if($("#honestyBtn"))$("#honestyBtn").onclick=function(){
+    var box=$("#honestyText");
+    if(box.style.display!=="none"){box.style.display="none";this.textContent="show it";return}
+    var b=this;
+    fetch("/honesty").then(function(r){return r.json()}).then(function(d){
+      box.textContent=d.text||"the file is not there - pairs are getting nothing";
+      box.style.display="";b.textContent="hide";
+      $("#honestyPath").textContent=d.path||""})};
+  /* force: a person asked for it. Everything automatic edits in place. */
+  if($("#tgLinksBtn"))$("#tgLinksBtn").onclick=function(){
+    $("#tgLinksMsg").textContent="sending...";
+    post("/links/push",{force:true}).then(function(r){
+      $("#tgLinksMsg").textContent=r&&r.sent
+        ? "sent and pinned - look at the top of the chat"
+        : "no links to send yet: no session has reported one"})};
+}
+
+/* ---------- logs ---------- */
+function loadLogs(){
+  fetch("/logs-view").then(function(r){return r.json()}).then(function(d){
+    var tb=$("#diskTable tbody");tb.innerHTML="";
+    (d.disk||[]).forEach(function(r0){tb.innerHTML+='<tr><td>'+esc(r0.project)+'</td><td>'+fmtBytes(r0.bytes)+'</td><td class="dim">'+esc(r0.oldest)+'</td></tr>'});
+    var host=$("#logsBody");host.innerHTML="";
+    Object.keys(d.index||{}).forEach(function(p){
+      var card=document.createElement("div");card.className="card";
+      var idx=(d.index[p]||[]).join("\n");
+      card.innerHTML='<h2 style="margin-top:0">'+esc(p.split(/[\\\/]/).pop())+'</h2>'+
+        '<div class="lab">INDEX.md - one line per iteration</div><pre>'+esc(idx||"(no iterations yet)")+'</pre>'+
+        '<div class="lab">current handoff</div><pre>'+esc(d.handoff[p]||"(written after the first finished turn of an active loop)")+'</pre>';
+      host.appendChild(card);
+    });
+    if(!Object.keys(d.index||{}).length)$("#logsBody").innerHTML='<div class="card dim">Watch a project first - its logs appear here and in the folder itself.</div>';
+  });
+}
+
+/* ---------- ask the archive ----------
+   The run takes minutes, so the button starts it and the panel polls the
+   same endpoint by run id. Nothing here waits on a request. */
+var ASKING=null;
+function askState(txt,cls){$("#askState").innerHTML='<span class="'+(cls||"dim")+'">'+esc(txt)+'</span>'}
+function askArchive(){
+  var q=($("#askQ").value||"").trim();
+  if(!q){askState("Type a question first.","amber");return}
+  if(ASKING){askState("A search is already running - one at a time.","amber");return}
+  $("#askBtn").disabled=true;
+  $("#askOut").style.display="none";
+  askState("starting...");
+  post("/archive-search",{question:q,project:CUR}).then(function(r){
+    if(!r.ok){$("#askBtn").disabled=false;askState(r.error||"the bridge refused it","bad");return}
+    ASKING=r.run_id;
+    askState("reading the archive... (this takes a few minutes)");
+    pollAsk();
+  }).catch(function(e){$("#askBtn").disabled=false;askState("could not reach the bridge: "+e,"bad")});
+}
+function pollAsk(){
+  if(!ASKING)return;
+  post("/archive-search",{run_id:ASKING}).then(function(r){
+    var run=r.run;
+    if(!run){ASKING=null;$("#askBtn").disabled=false;askState("the run was lost","bad");return}
+    if(run.state==="running"){
+      askState("reading the archive... "+Math.round((Date.now()/1000)-run.started)+"s");
+      setTimeout(pollAsk,3000);return;
+    }
+    ASKING=null;$("#askBtn").disabled=false;
+    if(run.state==="failed"){
+      askState("failed: "+(run.error||"no reason given"),"bad");
+      return;
+    }
+    askState("answered in "+Math.round(run.seconds)+"s"+
+             (run.cited&&run.cited.length?" from "+run.cited.length+" file(s)":"")+
+             (run.extract?" · saved to "+run.extract:""),"ok");
+    $("#askOut").textContent=run.answer||"";
+    $("#askOut").style.display="block";
+  }).catch(function(){setTimeout(pollAsk,5000)});
+}
+
+/* ---------- poll ---------- */
+function tick(){
+  /* The feed is cut to 40 rows by the daemon, so it has to be told which
+     project it is being read for BEFORE the cut - one journal carries every
+     project, and trimming first would let a busy pair push a quiet one out
+     of its own feed entirely. Everything else in /state is already keyed by
+     project and filtered here.
+     Step 7 adds the "this project / all" switch; until then the feed simply
+     follows the project on screen, and CUR being empty means no filter,
+     which is the old behaviour. */
+  var url="/state"+((CUR&&!FEEDALL)?"?project="+encodeURIComponent(CUR):"");
+  return fetch(url).then(function(r){return r.json()}).then(function(d){
+    D=d; D.config=d.config||{}; renderPanel();renderSessions();renderSettings();
+    var tg=(D.config||{}).telegram||{};
+    var fp=String(!!tg.token_set)+"|"+String(!!tg.connected);
+    if(window._tgFp!==fp){window._tgFp=fp;renderTelegram()}
+    if($("#w-launch").classList.contains("on")&&!window._launchTouched){renderLaunch()}
+  }).catch(function(){});
+}
+window._launchTouched=false;
+$("#w-launch").addEventListener("input",function(){window._launchTouched=true});
+$$("#rail button")[2].addEventListener("click",function(){window._launchTouched=false;renderLaunch()});
+tick();setInterval(tick,2500);
+</script>
+</body>
+</html>

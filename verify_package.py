@@ -1,0 +1,126 @@
+# -*- coding: utf-8 -*-
+"""Is what ships the same bytes as what was tested?
+
+Running the suites from an unpacked copy proves the copy WORKS. It does not
+prove the copy is the code that was reviewed: a file could be stale, a build
+could have picked up a different tree, a zip entry could have been written
+twice. This compares sha256 of every one of the 23 files across all three
+places - repository, archive entry, unpacked file - and a package that does
+not match on all three is not delivered, it is a failed build.
+
+Usage:  python verify_package.py <repo> <zip> <unpacked> [out.txt]
+Exit 0 only when every file matches in all three places.
+"""
+import hashlib
+import io
+import os
+import sys
+import zipfile
+
+# This file is IN the list, and on purpose: a package whose recipient cannot
+# check it is a weaker package. It is not a diagnostic like probe_context.py -
+# it is the recipe's own proof, and it travels with what it proves.
+FILES = ["bridge.bat", "add-project.bat", "README.md", "LICENSE",
+         "HONESTY.md",
+         # The evidence half ships with the package - the suites read it and
+         # a pair's own history is part of the product. It is a different
+         # question from the PUBLIC repository, where it must never go: it
+         # quotes private messages and names closed projects.
+         "HONESTY_CASES.md", "verify_package.py", "test_cases.py",
+         "test_handover.py", "test_archive.py", "test_search.py",
+         "test_wall_handover.py", "test_multipair.py",
+         "bridge/__init__.py", "bridge/archive.py", "bridge/channel.py",
+         "bridge/daemon.py", "bridge/discover.py", "bridge/hook.py",
+         "bridge/install.py", "bridge/models.py", "bridge/panel.html",
+         "bridge/remote.py", "bridge/sessions.py", "bridge/statusline.py",
+         "bridge/store.py", "bridge/telegram.py"]
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def read(path):
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def compare(repo, zpath, unpacked):
+    rows, bad = [], []
+    with zipfile.ZipFile(zpath) as z:
+        names = z.namelist()
+        for rel in FILES:
+            got = {}
+            try:
+                got["repo"] = sha(read(os.path.join(repo, rel)))
+            except Exception as exc:
+                got["repo"] = "MISSING (%s)" % exc.__class__.__name__
+            try:
+                got["zip"] = sha(z.read(rel))
+            except Exception:
+                got["zip"] = "MISSING"
+            try:
+                got["unpacked"] = sha(read(os.path.join(unpacked, rel)))
+            except Exception:
+                got["unpacked"] = "MISSING"
+            same = got["repo"] == got["zip"] == got["unpacked"]
+            rows.append((rel, got, same))
+            if not same:
+                bad.append(rel)
+    extra = sorted(set(names) - set(FILES))
+    return rows, bad, extra, names
+
+
+def main():
+    # Rewrapping stdout belongs HERE, not at import time. At module
+    # level it replaces the wrapper of whoever imported this file, and
+    # everything they had already buffered goes out with the old one -
+    # which is exactly what happened: a suite that exec'd this lost
+    # three cases' worth of output and still printed "all cases pass".
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8",
+                                  errors="replace")
+    if len(sys.argv) < 4:
+        print(__doc__)
+        return 2
+    repo, zpath, unpacked = sys.argv[1], sys.argv[2], sys.argv[3]
+    rows, bad, extra, names = compare(repo, zpath, unpacked)
+    out = []
+    out.append("package byte-for-byte check")
+    out.append("repo     : %s" % os.path.abspath(repo))
+    out.append("archive  : %s" % os.path.abspath(zpath))
+    out.append("unpacked : %s" % os.path.abspath(unpacked))
+    out.append("")
+    out.append("%-28s %-16s %s" % ("file", "sha256 (first 16)", "verdict"))
+    out.append("-" * 64)
+    for rel, got, same in rows:
+        out.append("%-28s %-16s %s"
+                   % (rel, got["repo"][:16], "same in all three" if same
+                      else "MISMATCH repo=%s zip=%s unpacked=%s"
+                           % (got["repo"][:12], got["zip"][:12],
+                              got["unpacked"][:12])))
+    out.append("")
+    out.append("files listed   : %d" % len(FILES))
+    out.append("entries in zip : %d" % len(names))
+    out.append("unexpected     : %s" % (", ".join(extra) if extra else "none"))
+    out.append("nested copy    : %s"
+               % (", ".join(n for n in names if n.startswith("bridge/bridge"))
+                  or "none - the stale bridge/bridge/bridge never packaged"))
+    out.append("")
+    ok = not bad and not extra and len(names) == len(FILES)
+    out.append("RESULT: %s" % (("all %d files identical in repository, "
+                                "archive and unpacked copy" % len(FILES))
+                               if ok else
+                               "NOT DELIVERED - %s" %
+                               (("mismatched: " + ", ".join(bad)) if bad
+                                else "the archive holds entries that are not "
+                                     "on the list")))
+    text = "\n".join(out)
+    print(text)
+    if len(sys.argv) > 4:
+        with open(sys.argv[4], "w", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

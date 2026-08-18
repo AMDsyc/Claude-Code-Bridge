@@ -85,6 +85,12 @@ What it writes into the project:
 - `.claude/settings.json` — the bridge's hooks and its status line
 - `.mcp.json` — the `bridge` channel server
 - approvals for `mcp__bridge__verdict` and `mcp__bridge__task`
+- two environment entries: `PYTHONPATH`, pointing at the bridge, and
+  `PYTHONSAFEPATH=1`. The second keeps the working directory off `sys.path`:
+  the hooks run as `python -m bridge.hook`, and with `-m` Python puts the
+  current directory *first*, so a second copy of this package in whatever
+  folder the session is sitting in would shadow the installed one. On Python
+  3.9 and 3.10 the variable is ignored and the behaviour is what it was.
 
 Then start the pair from the panel. Two Claude Code windows come up, one per
 role.

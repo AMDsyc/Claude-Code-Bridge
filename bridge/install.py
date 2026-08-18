@@ -218,6 +218,24 @@ def install(project, role=None, python=None, statusline=True):
     # it here gets it removed.
     env.pop("BRIDGE_ROLE", None)
     env["PYTHONPATH"] = ROOT
+    # And keep the CURRENT DIRECTORY off sys.path.
+    #
+    # The hooks are spawned as `python -m bridge.hook`, and with -m Python
+    # puts the working directory FIRST on sys.path - ahead of PYTHONPATH. So
+    # any folder the session happens to be sitting in that contains a
+    # `bridge/` package shadows the installed one, and the hook that runs is
+    # that copy. Measured, not supposed: with PYTHONPATH pointing at the real
+    # bridge, `import bridge.hook` from a folder holding a second copy loaded
+    # the second copy, and left its __pycache__ there.
+    #
+    # It happened here because a public copy of this project was assembled in
+    # a subfolder of a watched project. Nothing was harmed - the two copies
+    # were identical - but the class of problem is: the bridge would silently
+    # run code that is not the code that was installed.
+    #
+    # PYTHONSAFEPATH is 3.11+; on 3.9 and 3.10 it is ignored, which leaves
+    # exactly today's behaviour rather than breaking anything.
+    env["PYTHONSAFEPATH"] = "1"
 
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(cfg, fh, ensure_ascii=False, indent=2)
@@ -283,6 +301,9 @@ def uninstall(project):
             if env.get("PYTHONPATH") == ROOT:
                 env.pop("PYTHONPATH", None)
                 removed.append("PYTHONPATH")
+            if env.get("PYTHONSAFEPATH") == "1":
+                env.pop("PYTHONSAFEPATH", None)
+                removed.append("PYTHONSAFEPATH")
             env.pop("BRIDGE_ROLE", None)
             if env:
                 cfg["env"] = env

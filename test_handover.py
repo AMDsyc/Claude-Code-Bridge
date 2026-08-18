@@ -1364,6 +1364,19 @@ check("the bridge hook is there after install",
       any(h.get("args") == ["-m", "bridge.hook"] for h in _pre), True)
 check("and the project's own hook was kept, not overwritten",
       any(h.get("command") == "their-own-thing" for h in _pre), True)
+print("   and the current directory is kept off sys.path, so a second copy")
+print("   of this package sitting in whatever folder the session happens to")
+print("   be in cannot shadow the installed one. Measured: with -m, Python")
+print("   puts cwd FIRST, ahead of PYTHONPATH - a public copy assembled in a")
+print("   subfolder of a watched project was the hook that actually ran")
+with open(_settings, encoding="utf-8") as fh:
+    _env = (_json.load(fh).get("env") or {})
+check("the installer writes PYTHONPATH at the bridge",
+      _env.get("PYTHONPATH", "").endswith("bridge"), True)
+check("and PYTHONSAFEPATH, which is what keeps cwd out of it",
+      _env.get("PYTHONSAFEPATH"), "1")
+check("the role is never written here - it belongs to a window",
+      "BRIDGE_ROLE" in _env, False)
 _install.uninstall(_proj)
 with open(_settings, encoding="utf-8") as fh:
     _cfg2 = _json.load(fh)
@@ -1373,6 +1386,10 @@ check("uninstall takes the bridge hook out by identity",
       any(h.get("args") == ["-m", "bridge.hook"] for h in _pre2), False)
 check("and leaves theirs alone",
       any(h.get("command") == "their-own-thing" for h in _pre2), True)
+with open(_settings, encoding="utf-8") as fh:
+    _env2 = (_json.load(fh).get("env") or {})
+check("uninstall takes both env keys back out, by value",
+      ("PYTHONPATH" in _env2, "PYTHONSAFEPATH" in _env2), (False, False))
 
 print("\n49. a quote in the canon is confirmed by the ORIGINAL, never by our")
 print("    own retelling of it")

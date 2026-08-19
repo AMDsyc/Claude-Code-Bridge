@@ -20,7 +20,7 @@
 Running the suites from an unpacked copy proves the copy WORKS. It does not
 prove the copy is the code that was reviewed: a file could be stale, a build
 could have picked up a different tree, a zip entry could have been written
-twice. This compares sha256 of every one of the 27 files across all three
+twice. This compares sha256 of every one of the 28 files across all three
 places - repository, archive entry, unpacked file - and a package that does
 not match on all three is not delivered, it is a failed build.
 
@@ -54,7 +54,8 @@ FILES = ["bridge.bat", "add-project.bat",
          "source/bridgecore/channel.py", "source/bridgecore/daemon.py",
          "source/bridgecore/discover.py", "source/bridgecore/hook.py",
          "source/bridgecore/install.py", "source/bridgecore/models.py",
-         "source/bridgecore/panel.html", "source/bridgecore/remote.py",
+         "source/bridgecore/panel.html", "source/bridgecore/relayout.py",
+         "source/bridgecore/remote.py",
          "source/bridgecore/sessions.py", "source/bridgecore/statusline.py",
          "source/bridgecore/store.py", "source/bridgecore/telegram.py"]
 

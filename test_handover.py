@@ -1527,7 +1527,7 @@ check("it checks every file the package snippet lists, itself included - "
       "a package its recipient cannot verify is a weaker package",
       (len(_ns["FILES"]), "source/verify_package.py" in _ns["FILES"],
        "source/HONESTY_CASES.md" in _ns["FILES"],
-       "source/LICENSE" in _ns["FILES"]), (27, True, True, True))
+       "source/LICENSE" in _ns["FILES"]), (28, True, True, True))
 _repo = os.path.join(TMP, "pkgrepo")
 _unp = os.path.join(TMP, "pkgunp")
 for _rel in _ns["FILES"]:
@@ -1542,7 +1542,7 @@ with _zf.ZipFile(_zip, "w") as z:
         z.write(os.path.join(_repo, _rel), _rel)
 _rows, _bad, _extra, _names = _ns["compare"](_repo, _zip, _unp)
 check("a package built from the tested tree matches everywhere",
-      (_bad, _extra, len(_names)), ([], [], 27))
+      (_bad, _extra, len(_names)), ([], [], 28))
 _tampered = os.path.join(TMP, "tampered.zip")
 with _zf.ZipFile(_tampered, "w") as z:
     for _rel in _ns["FILES"]:
@@ -2016,7 +2016,20 @@ print("   ('..ridge.zip') rather than corrupt, so it survived several")
 print("   passes of proof-reading and reached check_public.py, which is in")
 print("   the package AND in the public repository. Nine of them, found on")
 print("   2026-08-19 by scanning bytes rather than by reading")
-_ctl = {0x00, 0x07, 0x08, 0x0B, 0x0C, 0x0D, 0x1A, 0x1B}
+# 0x0D is deliberately NOT on this list by itself: CRLF is an ordinary line
+# ending and .bat files require it. A LONE carriage return is the damage -
+# that is what a heredoc turns backslash-r into - so it is looked for
+# separately, as a CR that no LF follows.
+_ctl = {0x00, 0x07, 0x08, 0x0B, 0x0C, 0x1A, 0x1B}
+
+
+def _wounds(data):
+    hit = sorted({c for c in _ctl if bytes([c]) in data})
+    if data.replace(b"\r\n", b"").count(b"\r"):
+        hit.append(0x0D)
+    return hit
+
+
 _root = os.path.dirname(os.path.abspath(__file__))
 _wounded = []
 for _dirp, _dirs, _files in os.walk(_root):
@@ -2030,7 +2043,7 @@ for _dirp, _dirs, _files in os.walk(_root):
             _b = open(_full, "rb").read()
         except OSError:
             continue
-        _hit = sorted({c for c in _ctl if bytes([c]) in _b})
+        _hit = _wounds(_b)
         if _hit:
             _wounded.append((os.path.relpath(_full, _root),
                              ["0x%02X" % c for c in _hit]))
@@ -2043,11 +2056,126 @@ with open(_probe, "wb") as _fh:
     _fh.write("the package line read `..".encode("utf-8")
               + bytes([0x08]) + "ridge.zip`\n".encode("utf-8"))
 check("a file with one backspace byte in it is caught",
-      any(bytes([c]) in open(_probe, "rb").read() for c in _ctl), True)
+      _wounds(open(_probe, "rb").read()), [0x08])
+check("a lone carriage return is caught too - the other half of the same "
+      "accident", _wounds(b"E:" + chr(92).encode() + b"Bridge\rreleases"),
+      [0x0D])
+check("but ordinary CRLF is not, because .bat files are written that way",
+      _wounds(b"@echo off\r\ncd source\r\n"), [])
 check("and a clean file of the same text is not",
-      any(bytes([c]) in ("the package line read `.." + chr(92)
-                         + "bridge.zip`\n").encode("utf-8") for c in _ctl),
-      False)
+      _wounds(("the package line read `.." + chr(92)
+               + "bridge.zip`\n").encode("utf-8")), [])
+
+print("\n56. the rebuild finishes itself, and picks the right config")
+print("   The owner was left a finish-layout.bat to run between stopping")
+print("   and starting the bridge. He tripped on it - restarted the old")
+print("   bridge instead, which left a second data/ inside the package")
+print("   folder holding a config with one project instead of four. So the")
+print("   step is gone: bridge.bat calls this before every start, and it is")
+print("   silent when there is nothing to move")
+from bridgecore import relayout                            # noqa: E402
+_rb = os.path.join(TMP, "relayout")
+_old = os.path.join(_rb, "bridge")
+_pkg = os.path.join(_old, "bridge")
+_new = os.path.join(_rb, "source")
+os.makedirs(os.path.join(_old, "data", "logs", "2026-08-01"))
+os.makedirs(os.path.join(_old, "data", "backups"))
+os.makedirs(os.path.join(_pkg, "data", "logs", "2026-08-19"))
+os.makedirs(os.path.join(_new, "bridgecore"))
+_full = {"projects": {"a": {}, "b": {}, "c": {}, "d": {}},
+         "telegram": {"token": "t", "chat_id": "1"},
+         "pair_marks": {"a": "blue"}}
+_trim = {"projects": {"a": {}}, "telegram": {"token": "t"}}
+_json.dump(_full, open(os.path.join(_old, "data", "config.json"), "w",
+                       encoding="utf-8"))
+_json.dump(_trim, open(os.path.join(_pkg, "data", "config.json"), "w",
+                       encoding="utf-8"))
+for _n in ("state.json", "calibration.json", "models.json",
+           "profiles.json"):
+    _json.dump({"from": "full"},
+               open(os.path.join(_old, "data", _n), "w", encoding="utf-8"))
+    _json.dump({"from": "trimmed"},
+               open(os.path.join(_pkg, "data", _n), "w", encoding="utf-8"))
+open(os.path.join(_pkg, "data", "logs", "2026-08-19", "events.jsonl"), "w",
+     encoding="utf-8").write("only in the losing folder\n")
+open(os.path.join(_old, "data", "logs", "2026-08-01", "events.jsonl"), "w",
+     encoding="utf-8").write("in the winning folder\n")
+
+print("   the config is chosen by CONTENT, never by where it sits - a rule")
+print("   about paths would pick the wrong file the next time the accident")
+print("   takes a different shape")
+check("more projects beats fewer",
+      relayout.score_config(os.path.join(_old, "data", "config.json")) >
+      relayout.score_config(os.path.join(_pkg, "data", "config.json")), True)
+_win, _lose = relayout.pick_config(
+    [os.path.join(_pkg, "data", "config.json"),      # the trimmed one FIRST,
+     os.path.join(_old, "data", "config.json")])     # so order cannot decide
+check("the full one wins whatever order it is offered in",
+      os.path.relpath(_win, _rb).replace(chr(92), "/"),
+      "bridge/data/config.json")
+check("and the other is named as a loser, not discarded", len(_lose), 1)
+check("an unreadable config loses to anything readable",
+      relayout.score_config(os.path.join(_rb, "no-such.json")), (-1, 0, 0, 0))
+
+_out = []
+_r = relayout.migrate(_rb, out=_out.append)
+check("it moved", _r["moved"], True)
+check("taking the config with four projects", _r["projects"], 4)
+check("and it says which, out loud, so a person can see it",
+      any("4 projects in it" in ln for ln in _out), True)
+check("the old tree is gone", os.path.isdir(_old), False)
+_data = os.path.join(_new, "data")
+check("the config that landed is the full one",
+      len(_json.load(open(os.path.join(_data, "config.json"),
+                          encoding="utf-8"))["projects"]), 4)
+check("the state that travelled with it is the full one too",
+      _json.load(open(os.path.join(_data, "state.json"),
+                      encoding="utf-8")), {"from": "full"})
+check("journals from BOTH folders survived - one is evidence, and losing "
+      "it because it sat in the folder that lost a vote is the worst "
+      "outcome here",
+      sorted(os.listdir(os.path.join(_data, "logs"))),
+      ["2026-08-01", "2026-08-19"])
+check("the config that was not used is kept, not deleted",
+      any(f.startswith("config-not-used")
+          for f in os.listdir(os.path.join(_rb, "releases"))), True)
+check("and the whole old layout was zipped before anything moved",
+      any(f.endswith("-relayout.zip")
+          for f in os.listdir(os.path.join(_rb, "releases"))), True)
+
+print("   and again: a rebuild that only works once breaks the second time")
+print("   somebody starts the bridge")
+_r2 = relayout.migrate(_rb, out=lambda _m: None)
+check("a second run has nothing to do", _r2["moved"], False)
+check("and says so rather than pretending it worked", _r2["why"],
+      "nothing to move")
+check("the config is untouched by the second run",
+      len(_json.load(open(os.path.join(_data, "config.json"),
+                          encoding="utf-8"))["projects"]), 4)
+check("pending() is what bridge.bat asks, and it now says no",
+      relayout.pending(_rb), False)
+
+print("   it refuses rather than guesses when there is nowhere to move to")
+_lonely = os.path.join(TMP, "lonely")
+os.makedirs(os.path.join(_lonely, "bridge", "data"))
+_r3 = relayout.migrate(_lonely, out=lambda _m: None)
+check("no source folder means no move", _r3["moved"], False)
+check("and the old tree is still there, untouched",
+      os.path.isdir(os.path.join(_lonely, "bridge")), True)
+
+print("   the launcher calls it, so there is no step for anyone to take")
+_bat = os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(daemon.__file__))), "..", "bridge.bat")
+_bat = os.path.normpath(_bat)
+if os.path.exists(_bat):
+    _txt = open(_bat, encoding="utf-8", errors="replace").read()
+    check("bridge.bat runs relayout before the daemon",
+          "-m bridgecore.relayout" in _txt
+          and _txt.index("-m bridgecore.relayout")
+          < _txt.index("-m bridgecore.daemon"), True)
+    check("and there is no finish-layout.bat left to run",
+          os.path.exists(os.path.join(os.path.dirname(_bat),
+                                      "finish-layout.bat")), False)
 
 print("\n" + ("-" * 60))
 if FAILED:

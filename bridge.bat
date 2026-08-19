@@ -25,6 +25,12 @@ if not defined PY goto nopython
 %PY% -c "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)"
 if errorlevel 1 goto oldpython
 
+:: Finish the 2026-08-19 folder rebuild if it is still half done. Silent
+:: when there is nothing to move, which is every start after the first.
+:: Here, and not in a file somebody has to remember to run: at this point
+:: the daemon is not running, so the files are free.
+%PY% -m bridgecore.relayout
+
 echo   Python: %PY%
 echo   Starting. Your browser will open when it is ready.
 echo   Keep this window open. Close it, or press Ctrl+C, to stop.

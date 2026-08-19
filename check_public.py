@@ -57,7 +57,7 @@ AUTHOR_LINE = '"Claude Code Bridge" is made by AMDsyc and Claude, 2026'
 # nothing in it is searchable by these rules, and it carries co_filename -
 # the ABSOLUTE path of the source on the machine that compiled it. Measured,
 # not assumed: bridge/__pycache__/hook.cpython-312.pyc held
-# "<drive>:\...\Bridge Gitridge\hook.py". Running the suites inside the
+# "<drive>:\...\Bridge Git\bridge\hook.py". Running the suites inside the
 # folder is what creates them.
 #
 # So the rule is presence, not content. Anything whose extension is not on

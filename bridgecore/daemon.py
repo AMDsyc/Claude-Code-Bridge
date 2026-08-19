@@ -244,7 +244,7 @@ PATH_KEYED = ("loops", "inflight", "awaiting", "loop_off", "loop_off_told",
               "paused", "note", "idle_spin", "noart", "frames", "debt",
               "unanswered", "checks")
 PAIR_KEYED = ("pids", "down", "launches", "last_session", "channels",
-              "autostart_tried", "autostart_told")
+              "autostart_tried", "autostart_told", "stopfail", "stop_seen")
 
 
 def migrate_keys():
@@ -1698,6 +1698,7 @@ def assess(path):
     is never mistaken for a question.
     """
     expire_handover(path)
+    check_lost_turn(path)
     sit = situation(path)
     ex = sit["roles"]["executor"]
     pl = sit["roles"]["planner"]
@@ -4130,6 +4131,204 @@ def note_no_artifacts(path, project, reason):
     return n
 
 
+# ---- what actually failed -------------------------------------------------
+#
+# The client sends StopFailure when a turn ends in an error. The bridge read
+# event["error_type"] and, when that was missing, wrote "unknown". Measured
+# across every journal this bridge has kept: 319 StopFailure events between
+# 2026-07-28 and 2026-08-19, and 319 of them say "unknown". A field that has
+# never once been populated is not the field the client fills in.
+#
+# The reason does exist and the client does record it - in the session
+# transcript, as a record with isApiErrorMessage true whose text begins
+# "API Error:". On 2026-08-19, 21 of that day's 22 StopFailure events match
+# such a record to the second: "Connection closed mid-response", "The
+# response stopped arriving", "529 Overloaded",
+# "UNKNOWN_CERTIFICATE_VERIFICATION_ERROR". So the reason was on disk the
+# whole time, one file away from the code that wrote "unknown".
+#
+# Three places, in this order: any plausible key in the payload, then the
+# transcript, then an honest "the client did not say" - with the raw payload
+# written beside it, because the only way to learn the real field name is to
+# keep one and look.
+
+ERROR_KEYS = ("error_type", "error", "error_message", "errorType", "reason",
+              "failure", "failure_reason", "message", "detail", "subtype",
+              "result", "status", "cause")
+
+# How far back in the transcript a matching error may sit. Generous, because
+# the hook fires after the client has written the record, not before.
+STOPFAIL_LOOKBACK = 300
+
+
+def _payload_reason(event):
+    """Any plausible key, whatever the client happens to call it."""
+    skip = {"hook_event_name", "session_id", "transcript_path", "cwd",
+            "project_dir", "role", "permission_mode"}
+    for key in ERROR_KEYS:
+        v = event.get(key)
+        if isinstance(v, str) and v.strip() and key not in skip:
+            return " ".join(v.split())[:300], key
+        if isinstance(v, dict):
+            for inner in ("message", "type", "reason", "text"):
+                iv = v.get(inner)
+                if isinstance(iv, str) and iv.strip():
+                    return " ".join(iv.split())[:300], "%s.%s" % (key, inner)
+    return None, None
+
+
+def _tail_lines(path, kb=256):
+    """The last few hundred KB of a file, as lines.
+
+    Transcripts run to hundreds of megabytes - one on this machine is 443 MB
+    - so this never reads the whole thing. The first line of the window is
+    dropped because the seek almost certainly landed inside one.
+    """
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - kb * 1024))
+            data = fh.read()
+    except OSError:
+        return []
+    lines = data.decode("utf-8", "replace").splitlines()
+    return lines[1:] if size > kb * 1024 else lines
+
+
+def _transcript_reason(event, path):
+    """The client's own words for what went wrong, from its transcript."""
+    tp = event.get("transcript_path")
+    if not tp or not os.path.exists(tp):
+        tp = sessions.transcript_of(event.get("session_id"), path)
+    if not tp or not os.path.exists(tp):
+        return None, None
+    now = time.time()
+    for ln in reversed(_tail_lines(tp)):
+        if "isApiErrorMessage" not in ln:
+            continue
+        try:
+            r = json.loads(ln)
+        except ValueError:
+            continue
+        if not r.get("isApiErrorMessage"):
+            continue
+        stamp = r.get("timestamp") or ""
+        try:
+            when = time.mktime(time.strptime(stamp[:19], "%Y-%m-%dT%H:%M:%S"))
+            when -= time.timezone if not time.daylight else time.altzone
+            if now - when > STOPFAIL_LOOKBACK:
+                return None, None
+        except (ValueError, OverflowError):
+            pass
+        msg = r.get("message") or {}
+        content = msg.get("content")
+        text = content if isinstance(content, str) else (
+            (content[0] or {}).get("text", "") if content else "")
+        text = " ".join(str(text).split())
+        if text:
+            return text[:300], "transcript"
+    return None, None
+
+
+def keep_stopfail_payload(event, path, role):
+    """Write the raw payload where a person can open it.
+
+    Nothing kept these before, which is why this defect could not be
+    diagnosed from the bridge's own records: the journal held the conclusion
+    ("unknown") and threw away the evidence. One file per event, so the next
+    one can be read rather than reasoned about.
+    """
+    if not path or not os.path.isdir(path):
+        return None
+    try:
+        folder = os.path.join(path, "bridge-logs",
+                              time.strftime("%Y-%m-%d"), "stopfailure")
+        os.makedirs(folder, exist_ok=True)
+        name = "%s-%s.json" % (time.strftime("%H%M%S"), role or "session")
+        full = os.path.join(folder, name)
+        with open(full, "w", encoding="utf-8") as fh:
+            json.dump(event, fh, ensure_ascii=False, indent=2, default=str)
+        return full
+    except (OSError, TypeError, ValueError):
+        # Edge path: keeping evidence must never be what breaks a hook.
+        return None
+
+
+def stopfail_reason(event, path, role):
+    """(what to show, where it came from, where the raw payload was kept)."""
+    kept = keep_stopfail_payload(event, path, role)
+    reason, where = _payload_reason(event)
+    if not reason:
+        reason, where = _transcript_reason(event, path)
+    if not reason:
+        reason = ("the client reported no reason"
+                  + (" - the raw payload is in %s" % kept if kept else ""))
+        where = "nothing"
+    return reason, where, kept
+
+
+def note_stopfail(path, role, reason, kept):
+    """Remember that a turn died, so a turn that never comes back is seen."""
+    key = "%s|%s" % (norm(path), role)
+    with _lock:
+        STATE.setdefault("stopfail", {})[key] = {
+            "at": time.time(), "reason": reason, "kept": kept,
+            "role": role, "told": False}
+        save_state()
+
+
+def note_stop_seen(path, role):
+    """A turn that did finish. What tells the check below there was one."""
+    with _lock:
+        STATE.setdefault("stop_seen", {})["%s|%s" % (norm(path), role)] = \
+            time.time()
+        save_state()
+
+
+def check_lost_turn(path):
+    """A turn that ended in an error and never came back.
+
+    Measured on 2026-08-19: of 22 StopFailure events, 18 were followed by no
+    report at all - no Stop hook, so no report, so no verdict, so nothing
+    woke the executor. The session went to "idle at the prompt" about a
+    minute later and the pair simply stood there. The bridge saw the error
+    and said so; what it did not say was that the loop had stopped.
+    """
+    grace = float(CFG.get("thresholds", {}).get("stopfail_grace", 150))
+    now = time.time()
+    with _lock:
+        fails = dict(STATE.get("stopfail") or {})
+        seen = dict(STATE.get("stop_seen") or {})
+    for key, rec in fails.items():
+        if rec.get("told") or not key.startswith(norm(path) + "|"):
+            continue
+        if now - rec.get("at", 0) < grace:
+            continue
+        role = rec.get("role") or key.rsplit("|", 1)[-1]
+        if seen.get(key, 0) > rec.get("at", 0):
+            with _lock:                       # the turn came back after all
+                STATE["stopfail"].pop(key, None)
+                save_state()
+            continue
+        with _lock:
+            STATE["stopfail"][key]["told"] = True
+            save_state()
+        name = project_name(path)
+        store.journal("turn_lost",
+                      "%s / %s: the turn ended with an error and no report "
+                      "followed within %ds, so this pair is not waiting for "
+                      "anything - it is stopped. Reason given: %s"
+                      % (name, role, int(grace), rec.get("reason") or "-"),
+                      name, role, "warn", project_dir=path)
+        notify("crash",
+               "%s: the %s's turn died (%s) and no report came back. The "
+               "pair is idle, not working - send it a task, or press "
+               "'hand over %s' if the window is unresponsive."
+               % (name, role, brief(rec.get("reason") or "no reason given",
+                                    140), role),
+               path=path)
+
 # ---- the planner runs it, because the planner cannot ----------------------
 #
 # Rule 11 says acceptance is the planner's and it does it itself. The planner
@@ -4711,6 +4910,7 @@ def handle_event(event):
         note_stranger(path, event.get("session_id"))
 
     if name == "Stop":
+        note_stop_seen(path, role)
         with _lock:
             hist = (STATE.get("compactions") or {}).get(
                 "%s|%s" % (norm(path), role))
@@ -4893,10 +5093,18 @@ def handle_event(event):
         text = "%s / %s needs you: %s" % (project, role, msg_n)
 
     elif name == "StopFailure":
-        etype = (event.get("error_type") or "unknown").lower()
+        reason, where, kept = stopfail_reason(event, path, role)
+        note_stopfail(path, role, reason, kept)
+        # The classification below reads a short lowercase word; the reason
+        # is a sentence written for a person. Both, because they answer
+        # different questions - "which handling does this need" and "what
+        # went wrong".
+        etype = (event.get("error_type") or reason or "").lower()
         sess = touch_session(event, state="error")
         ref = sess if sess.get("model") else best_session(path, role)
-        text = "%s / %s stopped with an error: %s" % (project, role, etype)
+        text = ("%s / %s stopped with an error: %s%s"
+                % (project, role, reason,
+                   "" if where in ("nothing", None) else " [%s]" % where))
         model = (ref.get("model") or "?").lower()
         if "invalid" in etype or "context" in etype:
             store.calib_update(model, path,

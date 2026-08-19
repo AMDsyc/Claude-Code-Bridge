@@ -144,6 +144,12 @@ DEFAULT_CONFIG = {
         # of silence, and that night would have stopped after three
         # reports instead of thirty-two.
         "silence_limit": 3,
+        # How long after a turn died in an error the bridge waits for a
+        # report before saying the turn was lost. 150s: on 2026-08-19 the
+        # sessions that did come back had done so within about a minute
+        # (the client's own "idle at the prompt" notification lands at ~60s),
+        # and 18 of 22 never came back at all.
+        "stopfail_grace": 150,
     },
     "retention": {"days": 7, "size_gb": 2, "archive_on_rotate": False},
     # The archive search agent: a headless one-off that reads the archive

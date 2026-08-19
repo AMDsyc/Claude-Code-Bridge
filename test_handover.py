@@ -1875,6 +1875,180 @@ check("'wait' is free of all of it", daemon.verdict_gate(_cpn, "wait", "")[0],
       True)
 daemon.PENDING.pop(_cpn, None)
 
+print("\n54. 'stopped with an error: unknown' - 319 times out of 319")
+print("   Every StopFailure this bridge has ever journalled, from")
+print("   2026-07-28 to 2026-08-19, says 'unknown'. A field that has never")
+print("   once been populated is not the field the client fills in. The")
+print("   reason was on disk the whole time, one file away: the client")
+print("   writes it into the transcript as an isApiErrorMessage record")
+_sf = os.path.join(TMP, "sfproj")
+os.makedirs(_sf, exist_ok=True)
+_sfn = daemon.norm(_sf)
+daemon.CFG.setdefault("projects", {})[_sf] = {}
+daemon.CFG.setdefault("thresholds", {})["stopfail_grace"] = 150
+daemon.STATE.pop("stopfail", None)
+daemon.STATE.pop("stop_seen", None)
+
+print("   first: a reason under whatever name the client happens to use")
+_r, _w, _k = daemon.stopfail_reason(
+    {"hook_event_name": "StopFailure", "error": "rate limit reached"},
+    _sf, "executor")
+check("a plausible key is read even though it is not error_type",
+      (_r, _w), ("rate limit reached", "error"))
+_r, _w, _k = daemon.stopfail_reason(
+    {"hook_event_name": "StopFailure",
+     "failure": {"message": "context window exceeded"}}, _sf, "executor")
+check("and one nested a level down", (_r, _w),
+      ("context window exceeded", "failure.message"))
+
+print("   second: the transcript, which is where it really lives today.")
+print("   The fixture repeats the shape of a real record read off this")
+print("   machine - message.content is a LIST of blocks, and the text is")
+print("   verbatim from 2026-08-19")
+_tp = os.path.join(TMP, "sf-transcript.jsonl")
+_real = {"type": "assistant", "isApiErrorMessage": True,
+         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S",
+                                    time.gmtime(time.time())) + ".000Z",
+         "message": {"role": "assistant", "content": [
+             {"type": "text",
+              "text": "API Error: Connection closed mid-response. The "
+                      "response above may be incomplete."}]}}
+with open(_tp, "w", encoding="utf-8") as _fh:
+    for _i in range(50):                       # a tail, not a whole file
+        _fh.write(_json.dumps({"type": "assistant", "n": _i}) + "\n")
+    _fh.write(_json.dumps(_real) + "\n")
+_r, _w, _k = daemon.stopfail_reason(
+    {"hook_event_name": "StopFailure", "transcript_path": _tp}, _sf,
+    "executor")
+check("the client's own words are recovered from the transcript",
+      (_r, _w),
+      ("API Error: Connection closed mid-response. The response above may "
+       "be incomplete.", "transcript"))
+
+print("   an error too old to be this turn's is not borrowed")
+_old = dict(_real)
+_old["timestamp"] = time.strftime(
+    "%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - 3600)) + ".000Z"
+_tp2 = os.path.join(TMP, "sf-old.jsonl")
+with open(_tp2, "w", encoding="utf-8") as _fh:
+    _fh.write(_json.dumps(_old) + "\n")
+_r, _w, _k = daemon.stopfail_reason(
+    {"hook_event_name": "StopFailure", "transcript_path": _tp2}, _sf,
+    "executor")
+check("an hour-old API error is not passed off as this failure",
+      _w, "nothing")
+
+print("   third: say so plainly, and keep the payload so the next one can")
+print("   be read rather than reasoned about - nothing kept them before,")
+print("   which is exactly why this could not be diagnosed from the")
+print("   bridge's own records")
+_ev = {"hook_event_name": "StopFailure", "session_id": "abc123",
+       "cwd": _sf, "something_new": "a field nobody has seen yet"}
+_r, _w, _k = daemon.stopfail_reason(_ev, _sf, "planner")
+check("it admits it rather than inventing a word", "reported no reason"
+      in _r, True)
+check("the raw payload was written to disk", bool(_k) and os.path.isfile(_k),
+      True)
+check("and it is the whole payload, unedited",
+      _json.load(open(_k, encoding="utf-8")).get("something_new"),
+      "a field nobody has seen yet")
+check("the reason points the reader at it", _k in _r, True)
+check("kept beside the project, under bridge-logs",
+      _k.startswith(os.path.join(_sf, "bridge-logs")), True)
+
+print("   and the word 'unknown' is gone from the line a person reads")
+check("the daemon no longer has a default of 'unknown' for this",
+      'or "unknown").lower()' in inspect.getsource(daemon.handle_event),
+      False)
+
+print("   the second half, and the larger one: a turn that died and never")
+print("   came back. On 2026-08-19, of 22 StopFailure events, 18 were")
+print("   followed by NO report at all - no Stop hook, so no report, so no")
+print("   verdict, so nothing woke the executor. The session went to 'idle")
+print("   at the prompt' a minute later and the pair simply stood there")
+_told = []
+_real_notify, daemon.notify = daemon.notify, \
+    lambda kind, text, **kw: _told.append((kind, text))
+try:
+    daemon.note_stopfail(_sf, "executor", "API Error: Connection closed "
+                                          "mid-response.", None)
+    daemon.check_lost_turn(_sf)
+    check("nothing is said while the turn might still come back", _told, [])
+    daemon.STATE["stopfail"]["%s|executor" % _sfn]["at"] = time.time() - 200
+    daemon.check_lost_turn(_sf)
+    check("after the grace, the human is told once", len(_told), 1)
+    check("and told what it means - the pair is stopped, not working",
+          "idle, not working" in _told[0][1], True)
+    check("with the reason in it, not 'unknown'",
+          "Connection closed" in _told[0][1], True)
+    daemon.check_lost_turn(_sf)
+    check("and not told again on every pass", len(_told), 1)
+
+    print("   a turn that DID come back is not reported as lost")
+    _told[:] = []
+    daemon.STATE.pop("stopfail", None)
+    daemon.note_stopfail(_sf, "planner", "whatever", None)
+    daemon.STATE["stopfail"]["%s|planner" % _sfn]["at"] = time.time() - 200
+    daemon.note_stop_seen(_sf, "planner")
+    daemon.check_lost_turn(_sf)
+    check("a Stop after the failure clears it silently", _told, [])
+    check("and the record is dropped rather than left to nag",
+          "%s|planner" % _sfn in (daemon.STATE.get("stopfail") or {}), False)
+finally:
+    daemon.notify = _real_notify
+
+print("   and nothing on this path may raise: keeping evidence must never")
+print("   be what breaks a hook")
+check("an unwritable project directory costs the payload, not the event",
+      daemon.keep_stopfail_payload({"a": 1}, os.path.join(TMP, "no-such"),
+                                   "executor"), None)
+check("and a payload that will not serialise is caught too",
+      daemon.keep_stopfail_payload({"f": object()}, _sf, "executor") is not
+      None, True)
+daemon.STATE.pop("stopfail", None)
+daemon.STATE.pop("stop_seen", None)
+
+print("\n55. no invisible damage in anything that ships")
+print("   Writing a Windows path through a shell heredoc turns the two")
+print("   characters backslash-b into ONE byte, 0x08, and backslash-r into")
+print("   a real newline. Both are invisible: the text reads merely wrong")
+print("   ('..ridge.zip') rather than corrupt, so it survived several")
+print("   passes of proof-reading and reached check_public.py, which is in")
+print("   the package AND in the public repository. Nine of them, found on")
+print("   2026-08-19 by scanning bytes rather than by reading")
+_ctl = {0x00, 0x07, 0x08, 0x0B, 0x0C, 0x0D, 0x1A, 0x1B}
+_root = os.path.dirname(os.path.abspath(__file__))
+_wounded = []
+for _dirp, _dirs, _files in os.walk(_root):
+    _dirs[:] = [d for d in _dirs
+                if d not in ("__pycache__", ".git", "data", "bridge-logs")]
+    for _fn in _files:
+        if not _fn.endswith((".py", ".md", ".bat", ".html", ".json")):
+            continue
+        _full = os.path.join(_dirp, _fn)
+        try:
+            _b = open(_full, "rb").read()
+        except OSError:
+            continue
+        _hit = sorted({c for c in _ctl if bytes([c]) in _b})
+        if _hit:
+            _wounded.append((os.path.relpath(_full, _root),
+                             ["0x%02X" % c for c in _hit]))
+check("nothing in this tree carries a control byte - a path that lost its "
+      "backslash to a shell is a broken path however plausible it reads",
+      _wounded, [])
+print("   and the check can fail: a planted 0x08 is found")
+_probe = os.path.join(TMP, "wounded.md")
+with open(_probe, "wb") as _fh:
+    _fh.write("the package line read `..".encode("utf-8")
+              + bytes([0x08]) + "ridge.zip`\n".encode("utf-8"))
+check("a file with one backspace byte in it is caught",
+      any(bytes([c]) in open(_probe, "rb").read() for c in _ctl), True)
+check("and a clean file of the same text is not",
+      any(bytes([c]) in ("the package line read `.." + chr(92)
+                         + "bridge.zip`\n").encode("utf-8") for c in _ctl),
+      False)
+
 print("\n" + ("-" * 60))
 if FAILED:
     print("FAILED: %d" % len(FAILED))

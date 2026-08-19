@@ -1806,6 +1806,13 @@ check("the result carries an exit code per line",
       all(isinstance(row["exit"], int) for row in _r["rows"]), True)
 check("and a folder that exists, so the human can read the whole output",
       os.path.isdir(_r["dir"]), True)
+# The artefacts belong to the project that was checked. Asserted because the
+# first cut keyed them to this source tree instead, so running this very
+# suite from a copy wrote a real folder beside that copy - outside TMP, where
+# a suite has no business writing at all.
+check("written beside the project that was checked, and inside this run's "
+      "temp directory - a suite that writes outside TMP is the defect",
+      _r["dir"].lower().startswith(_cp.lower()), True)
 check("it ran in a COPY, not in the tree it is checking",
       all(daemon.ROOT.lower() not in (cwd or "").lower()
           for _n, _h, _d, cwd in _ran), True)

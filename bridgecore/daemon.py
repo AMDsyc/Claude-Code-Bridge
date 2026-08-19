@@ -4308,8 +4308,14 @@ def run_check(path, suite=None):
         return {"ok": False, "refused": True, "why": why}
 
     stamp = time.strftime("%Y-%m-%d_%H%M%S")
-    artefacts = os.path.join(os.path.dirname(ROOT), "test-results",
-                             "%s-planner-check" % stamp)
+    # Beside the project that was checked, not beside this source tree. For
+    # the bridge's own project those are the same folder, which is why the
+    # first version got away with dirname(ROOT) - until case 53 ran from a
+    # copy of the tree somewhere else and wrote a real artefacts folder next
+    # to that copy, outside the suite's temp directory. A suite that writes
+    # outside TMP is the defect; keying the location to the project fixes it
+    # and is what several pairs at once would need anyway.
+    artefacts = os.path.join(path, "test-results", "%s-planner-check" % stamp)
     rows, tmp = [], None
     try:
         os.makedirs(artefacts, exist_ok=True)

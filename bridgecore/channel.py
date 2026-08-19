@@ -62,7 +62,7 @@ back. The split is not ceremony - the executor's context fills with tool
 output and gets rotated out; yours stays small, so you can keep reviewing
 clearly for hours and carry the intent across those rotations.
 
-Two tools:
+Four tools:
 - task: hand the executor something to do. Use it whenever work needs doing,
   including when the human types a request straight to you. Restate it as
   concrete instructions, send it, and tell the human it is on its way. Doing
@@ -87,7 +87,28 @@ Two tools:
   blocked, and you call verdict again with the block filled in. Where the
   piece genuinely has nothing openable, Checked: no artifacts - <reason>
   is accepted, logged loudly and counted where the human sees it.
-  continue and wait are not gated: they accept nothing.
+
+  continue is gated too, and for the same reason: it carries a judgement,
+  and a judgement made from the words of a report is acceptance by hearsay
+  under another name. Only wait is free of the Checked: block - it judges
+  nothing, it says a process is still running.
+- check: run this project's acceptance yourself. The bridge copies the
+  sources somewhere isolated, runs the suites, py_compile and the package
+  byte check there, and hands you back the exit codes and where the output
+  was written. It changes nothing and it never touches the live project.
+
+  Call it before accepting any report that changed code. On projects that
+  say which checks accept their code, done and stop are REFUSED without a
+  successful run that finished AFTER the report arrived - an older run says
+  nothing about the work in front of you, and the bridge compares the two
+  times. If the check fails, do not accept: send it back with continue and
+  what broke.
+
+  This exists because you cannot run anything. Bash, PowerShell and every
+  edit tool are denied to you by design, so without this tool "I verified
+  the fix" could only ever mean "I read that it was fixed". It takes no
+  command and never will: only the name of one suite, and an unknown name
+  is refused.
 
 How full anybody's context is, and what to do about it, is not your work.
 The bridge measures both halves - the window, where compaction fires, how
@@ -358,6 +379,32 @@ TOOLS = [{
         },
         "required": ["action"],
     },
+}, {
+    "name": "check",
+    "description": ("Run this project's own acceptance yourself - the bridge "
+                    "does it for you, in an isolated copy, and hands you the "
+                    "raw exit codes. Call it BEFORE accepting any report that "
+                    "changed code: 'done' and 'stop' are refused without a "
+                    "successful run made after the report arrived. You cannot "
+                    "run anything in your own window, which is exactly why "
+                    "this exists - without it 'I verified it' can only mean "
+                    "'I read that it was verified'."),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "suite": {"type": "string",
+                      "description":
+                          "Optional. The NAME of one suite to run instead of "
+                          "all of them, when you want a cheap answer about "
+                          "one area: handover, archive, search, "
+                          "wall_handover, multipair, cases. A name that does "
+                          "not exist is refused. Leave it out for the whole "
+                          "acceptance - every suite, py_compile, and the "
+                          "package byte check - which is what the gate on "
+                          "'done' asks for. There is no way to pass a "
+                          "command here, by design."},
+        },
+    },
 }]
 
 
@@ -427,6 +474,40 @@ def handle_request(msg):
                         % (act, (out or {}).get("error") or "no reason given"))
             return {"jsonrpc": "2.0", "id": mid,
                     "result": {"content": [{"type": "text", "text": text}]}}
+        if params.get("name") == "check":
+            args = params.get("arguments") or {}
+            suite = args.get("suite")
+            # A whole acceptance run is minutes, not seconds. The timeout is
+            # the daemon's own limit plus room, because giving up early here
+            # would report a passing run as unreachable.
+            out = post_daemon("/check", {"project": PROJECT,
+                                         "suite": suite}, timeout=1500)
+            if not out:
+                text = ("no answer from the bridge, so the check did NOT "
+                        "run. Nothing was verified - do not accept anything "
+                        "on the strength of this call.")
+            elif out.get("refused"):
+                text = "the check was not run: %s" % out.get("why")
+            else:
+                rows = out.get("rows") or []
+                lines = ["%s  exit=%s" % (r.get("what"), r.get("exit"))
+                         + ("".join("\n      " + t for t in (r.get("tail")
+                                                             or []))
+                            if r.get("exit") else "")
+                         for r in rows]
+                text = ("%s\n\n%s\n\nartefacts: %s\n\n%s"
+                        % ("CHECK PASSED" if out.get("ok")
+                           else "CHECK FAILED",
+                           "\n".join(lines) or "nothing ran",
+                           out.get("dir") or "-",
+                           "You may now accept work this run covers."
+                           if out.get("ok") else
+                           "Do not accept this. Send it back with 'continue' "
+                           "and what broke - the full output is in the "
+                           "folder above."))
+            return {"jsonrpc": "2.0", "id": mid,
+                    "result": {"content": [{"type": "text", "text": text}],
+                               "isError": not (out or {}).get("ok")}}
         if params.get("name") == "task":
             args = params.get("arguments") or {}
             # The text under whatever name it arrived. The schema says

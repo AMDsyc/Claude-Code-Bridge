@@ -23,14 +23,19 @@ limits, stuck-process tracking, Telegram, the panel.
 Runs on 127.0.0.1 only. Start with bridge.bat or python -m bridgecore.daemon.
 """
 
+import glob
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 import traceback
+import zipfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -237,7 +242,7 @@ norm = store.norm
 PATH_KEYED = ("loops", "inflight", "awaiting", "loop_off", "loop_off_told",
               "seed", "planner_seed", "handover", "last_feedback",
               "paused", "note", "idle_spin", "noart", "frames", "debt",
-              "unanswered")
+              "unanswered", "checks")
 PAIR_KEYED = ("pids", "down", "launches", "last_session", "channels",
               "autostart_tried", "autostart_told")
 
@@ -4012,7 +4017,8 @@ def verdict_gate(path, verdict, feedback):
     # be caught by it when the executor did no code at all.
     waiter = PENDING.get(norm(path)) or {}
     report = waiter.get("content") or ""
-    if v in ("done", "stop") and report and touched_code(report)             and not residence_ok(text):
+    if (v in ("done", "stop") and report and touched_code(report)
+            and not residence_ok(text)):
         return False, (
             "This report changed code, and accepting a code change takes one "
             "more line than Checked: - where the fix LIVES. Write "
@@ -4027,6 +4033,39 @@ def verdict_gate(path, verdict, feedback):
             "throwaway probe, a one-off measurement - then it is not "
             "something to accept with 'done': say so in the feedback and "
             "answer 'continue'."), None
+    # And the planner must have RUN it, not read it. Only where the project
+    # says which checks accept its code - see check_kinds() for why that is
+    # not every project.
+    if (v in ("done", "stop") and report and touched_code(report)
+            and check_kinds(path)):
+        rec = (STATE.get("checks") or {}).get(norm(path)) or {}
+        made = waiter.get("made") or 0
+        if not rec:
+            return False, (
+                "This report changed code and you have not run the check. "
+                "Call the check tool - the bridge runs the suites itself, in "
+                "a copy, and hands you the exit codes - and then answer.\n\n"
+                "Reading a report is not checking it. You cannot run "
+                "anything in your own window by design, which is exactly why "
+                "this exists: without it 'I verified the fix' can only ever "
+                "mean 'I read that it was fixed'."), None
+        if not rec.get("ok"):
+            broke = ", ".join("%s (exit %d)" % (r["what"], r["exit"])
+                              for r in rec.get("rows", [])
+                              if r.get("exit"))
+            return False, (
+                "The last check FAILED, so this cannot be accepted: %s. The "
+                "output is in %s. Send it back to the executor with "
+                "'continue' and what broke, or run check again if you "
+                "believe it was a stale tree."
+                % (broke or "see the run", rec.get("dir") or "test-results")), None
+        if rec.get("at", 0) < made:
+            return False, (
+                "Your last check ran BEFORE this report was made, so it says "
+                "nothing about the work you are accepting. It finished at "
+                "%s; the report arrived at %s. Run check again, then answer."
+                % (time.strftime("%H:%M:%S", time.localtime(rec.get("at", 0))),
+                   time.strftime("%H:%M:%S", time.localtime(made)))), None
     tail = ""
     for mark in CHECKED_MARKS:
         i = low.find(mark)
@@ -4089,6 +4128,234 @@ def note_no_artifacts(path, project, reason):
            "%d for this project)" % (project, brief(reason, 200), n),
            path=path)
     return n
+
+
+# ---- the planner runs it, because the planner cannot ----------------------
+#
+# Rule 11 says acceptance is the planner's and it does it itself. The planner
+# cannot: disallow_for() denies it Bash, PowerShell, Write and every edit
+# tool, and a deny beats every mode. So "I checked it" has always meant "I
+# read the report carefully" - which is the acceptance by hearsay the verdict
+# gate exists to refuse, wearing the words of a real check.
+#
+# The bridge runs it instead. Two things about the shape of this, both
+# deliberate:
+#
+#   - check takes NO command. The actions are the ones written here and
+#     nothing else. A tool that runs what it is handed would be a way for the
+#     planner to run anything at all, which is exactly what its permission
+#     set exists to prevent - a gate with the door left open beside it.
+#   - It runs in a copy, with its own BRIDGE_DATA and CLAUDE_CONFIG_DIR and
+#     BRIDGE_NO_HOOKS=1. It reads the sources and writes nowhere near the
+#     live tree. The package it verifies is built inside that copy, not taken
+#     from releases/ - otherwise every edit made since the last build would
+#     fail the check for a reason that has nothing to do with the work.
+
+CHECK_SUITES = ("handover", "archive", "search", "wall_handover",
+                "multipair", "cases")
+CHECK_TIMEOUT = 1200
+CHECK_RUNNING = {}
+_check_lock = threading.Lock()
+
+
+def check_kinds(path):
+    """Which kinds of check this project's own code is accepted by.
+
+    Empty for almost every project, and deliberately so: the suites in this
+    folder test THIS bridge. Running them over a report about somebody's
+    shader proves nothing about the shader, and a gate demanding them would
+    block that pair for ever on evidence that could never become relevant.
+
+    A project earns the requirement by naming it in config.json:
+
+        "projects": {"<path>": {"checks": ["suites"]}}
+
+    "suites" is the only kind implemented. The list is a vocabulary the
+    daemon matches against, never anything executed as text.
+    """
+    projects = CFG.get("projects") or {}
+    p = projects.get(path)
+    if p is None:
+        for k, v in projects.items():
+            if norm(k) == norm(path):
+                p = v
+                break
+    kinds = (p or {}).get("checks")
+    if kinds is None:
+        # The bridge's own project needs no setting: these suites ARE its
+        # acceptance, and saying so in config.json would only be a second
+        # place for the same fact - and one a running daemon rewrites from
+        # memory, so it could not be set without stopping first.
+        return ["suites"] if norm(path) == norm(os.path.dirname(ROOT)) else []
+    return [k for k in kinds if k == "suites"]
+
+
+def _check_copy(dst):
+    """An isolated copy of the working tree: sources only.
+
+    data/ is left behind on purpose. It is the live state, the suites make
+    their own in a temp folder, and copying it would put a real state.json
+    where a test run can write to it.
+    """
+    src = ROOT
+    skip = {"data", "__pycache__", ".git", "bridge-logs", "public"}
+    os.makedirs(dst, exist_ok=True)
+    for name in os.listdir(src):
+        if name in skip:
+            continue
+        s, d = os.path.join(src, name), os.path.join(dst, name)
+        if os.path.isdir(s):
+            shutil.copytree(s, d, ignore=shutil.ignore_patterns(
+                "__pycache__", "*.pyc"))
+        else:
+            shutil.copy2(s, d)
+    # The launchers live one level up and are on the package list.
+    for name in ("bridge.bat", "add-project.bat"):
+        s = os.path.join(os.path.dirname(src), name)
+        if os.path.exists(s):
+            shutil.copy2(s, os.path.join(os.path.dirname(dst), name))
+
+
+def _check_env(tmp):
+    env = dict(os.environ)
+    env["BRIDGE_DATA"] = os.path.join(tmp, "_data")
+    env["CLAUDE_CONFIG_DIR"] = os.path.join(tmp, "_claude")
+    # Without this a suite that spawns anything fires the watched project's
+    # hooks and takes a seat in the panel as a session nobody launched.
+    env["BRIDGE_NO_HOOKS"] = "1"
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    for k in ("BRIDGE_ROLE", "BRIDGE_PORT"):
+        env.pop(k, None)
+    return env
+
+
+def _run_one(cmd, cwd, env, out_path):
+    """Run one command, keep all of what it said, return (code, tail)."""
+    try:
+        r = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=CHECK_TIMEOUT)
+        text, code = (r.stdout or "") + (r.stderr or ""), r.returncode
+    except subprocess.TimeoutExpired:
+        text, code = "timed out after %ds" % CHECK_TIMEOUT, 124
+    except Exception as exc:                                  # noqa: BLE001
+        text, code = "%s: %s" % (exc.__class__.__name__, exc), 125
+    try:
+        with open(out_path, "w", encoding="utf-8") as fh:
+            fh.write(text + "\nEXIT=%d\n" % code)
+    except OSError:
+        pass
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    return code, lines[-3:]
+
+
+def _check_package(work, env, artefacts):
+    """Build the package from the copy and verify it byte for byte.
+
+    Built here rather than taken from releases/: the question this answers is
+    whether THIS tree can produce a matching package, and a package built
+    last week cannot answer it.
+    """
+    root = os.path.dirname(work)
+    vp = os.path.join(work, "verify_package.py")
+    if not os.path.exists(vp):
+        return 1, ["verify_package.py is not in the tree"]
+    ns = {}
+    try:
+        exec(compile(open(vp, encoding="utf-8").read(), vp, "exec"), ns)
+        files = ns["FILES"]
+    except Exception as exc:                                  # noqa: BLE001
+        return 1, ["could not read the package list: %s" % exc]
+    missing = [f for f in files if not os.path.isfile(os.path.join(root, f))]
+    if missing:
+        return 1, ["missing from the tree: %s" % ", ".join(missing[:5])]
+    zpath = os.path.join(root, "check.zip")
+    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
+        for f in files:
+            z.write(os.path.join(root, f), f)
+    unp = os.path.join(root, "_unpacked")
+    with zipfile.ZipFile(zpath) as z:
+        z.extractall(unp)
+    return _run_one([sys.executable, "verify_package.py", root, zpath, unp],
+                    work, env, os.path.join(artefacts, "bytes.txt"))
+
+
+def check_seat(path):
+    """One run at a time per project. Returns (ok, why)."""
+    with _check_lock:
+        started = CHECK_RUNNING.get(norm(path))
+        if started and time.time() - started < CHECK_TIMEOUT * 2:
+            return False, ("a check for this project has been running for "
+                           "%ds already - wait for that one rather than "
+                           "starting a second"
+                           % int(time.time() - started))
+        CHECK_RUNNING[norm(path)] = time.time()
+    return True, ""
+
+
+def run_check(path, suite=None):
+    """Run the acceptance for this project's own code. Returns a dict."""
+    path = norm(path)
+    project = project_name(path)
+    if suite is not None and suite not in CHECK_SUITES:
+        return {"ok": False, "refused": True,
+                "why": ("there is no suite called %r. The ones that exist "
+                        "are: %s. Leave the argument out to run all of them."
+                        % (suite, ", ".join(CHECK_SUITES)))}
+    seated, why = check_seat(path)
+    if not seated:
+        return {"ok": False, "refused": True, "why": why}
+
+    stamp = time.strftime("%Y-%m-%d_%H%M%S")
+    artefacts = os.path.join(os.path.dirname(ROOT), "test-results",
+                             "%s-planner-check" % stamp)
+    rows, tmp = [], None
+    try:
+        os.makedirs(artefacts, exist_ok=True)
+        tmp = tempfile.mkdtemp(prefix="bridge-check-")
+        work = os.path.join(tmp, os.path.basename(ROOT))
+        _check_copy(work)
+        env = _check_env(tmp)
+
+        code, tail = _run_one(
+            [sys.executable, "-m", "py_compile"]
+            + sorted(glob.glob(os.path.join(work, "bridgecore", "*.py")))
+            + sorted(glob.glob(os.path.join(work, "*.py"))),
+            work, env, os.path.join(artefacts, "py_compile.txt"))
+        rows.append({"what": "py_compile", "exit": code, "tail": tail})
+
+        for name in ([suite] if suite else list(CHECK_SUITES)):
+            code, tail = _run_one(
+                [sys.executable, "test_%s.py" % name], work, env,
+                os.path.join(artefacts, "%s.txt" % name))
+            rows.append({"what": "test_%s.py" % name, "exit": code,
+                         "tail": tail})
+
+        if not suite:
+            code, tail = _check_package(work, env, artefacts)
+            rows.append({"what": "verify_package", "exit": code,
+                         "tail": tail})
+    finally:
+        with _check_lock:
+            CHECK_RUNNING.pop(path, None)
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    ok = all(r["exit"] == 0 for r in rows)
+    record = {"at": time.time(), "ok": ok, "rows": rows, "dir": artefacts,
+              "suite": suite or "all"}
+    with _lock:
+        STATE.setdefault("checks", {})[path] = record
+        save_state()
+    store.journal("planner_check",
+                  "check %s: %s"
+                  % ("passed" if ok else "FAILED",
+                     ", ".join("%s=%d" % (r["what"], r["exit"])
+                               for r in rows)),
+                  project, "planner", "log" if ok else "warn",
+                  project_dir=path)
+    return {"ok": ok, "rows": rows, "dir": artefacts, "suite": suite or "all"}
 
 
 # ---- silence is not consent ----------------------------------------------
@@ -4252,7 +4519,7 @@ def run_review(event, path, lp, msg, project, role):
     meta = {"kind": "report", "report": str(n)}
 
     waiter = {"event": threading.Event(), "verdict": None, "feedback": "",
-              "content": content, "meta": meta}
+              "content": content, "meta": meta, "made": time.time()}
     PENDING[path] = waiter
 
     sent, why = deliver_ex(path, "planner", content, meta)
@@ -4895,7 +5162,17 @@ def handle_event(event):
                 "the bridge tool 'verdict': continue with what to fix, done "
                 "to accept, wait if a long process is still running. There "
                 "is no need to leave plan mode; nothing you do requires "
-                "it.\n\n" + PLANNER_CONTEXT_RULE)
+                "it.\n\n"
+                "Before you accept a report that changed code, call the "
+                "bridge tool 'check'. The bridge runs this project's own "
+                "acceptance for you - in an isolated copy, touching nothing "
+                "live - and hands back the exit codes. This is not a "
+                "courtesy: where a project names the checks its code is "
+                "accepted by, 'done' and 'stop' are refused unless a check "
+                "passed AFTER the report arrived. It exists because you "
+                "cannot run anything yourself, so without it 'I verified it' "
+                "could only mean 'I read that it was verified'.\n\n"
+                + PLANNER_CONTEXT_RULE)
         if seed:
             parts.append("You continue a rotated session (%s). Handoff:\n\n%s"
                          % (seed.get("reason", ""), seed.get("handoff", "")))
@@ -6576,6 +6853,27 @@ class Handler(BaseHTTPRequestHandler):
                                         "why": None if sent else why})
             if p.startswith("/selftest"):
                 return self._send(200, selftest(norm(body.get("project"))))
+            if p.startswith("/check"):
+                # The planner's own run. Secret-guarded like /verdict and
+                # /task, because it acts: it spawns processes and writes a
+                # folder of artefacts. It takes a project and, optionally,
+                # the NAME of one suite - never a command, and an unknown
+                # name is refused rather than passed through.
+                if self.headers.get("X-Bridge-Secret") != SECRET:
+                    return self._send(403, {"error": "bad secret"})
+                path = norm(body.get("project"))
+                if not path:
+                    return self._send(200, {
+                        "ok": False, "refused": True,
+                        "why": "no project named, and there is no fallback - "
+                               "guessing would run a check for somebody "
+                               "else's pair"})
+                suite = body.get("suite") or None
+                if suite is not None:
+                    suite = str(suite).strip().lower()
+                    suite = suite[5:] if suite.startswith("test_") else suite
+                    suite = suite[:-3] if suite.endswith(".py") else suite
+                return self._send(200, run_check(path, suite))
             if p.startswith("/loop"):
                 return self._send(200, handle_loop(body))
             if p.startswith("/session"):

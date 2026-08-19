@@ -608,7 +608,8 @@ def _blocks_result(name, args, replies):
 
 for tool, args in (("verdict", {"verdict": "done"}),
                    ("task", {"instructions": "do a thing"}),
-                   ("loop", {"action": "start"})):
+                   ("loop", {"action": "start"}),
+                   ("check", {"suite": "archive"})):
     blocks = _blocks(tool, args, {"ok": True, "delivered": True})
     check("%s returns exactly one block" % tool, len(blocks), 1)
     check("%s block is a valid content type" % tool,
@@ -616,8 +617,17 @@ for tool, args in (("verdict", {"verdict": "done"}),
     check("%s block carries text" % tool,
           all(isinstance(b.get("text"), str) and b["text"] for b in blocks),
           True)
+# Counted against what the module actually declares, not against a list
+# written out here: the hardcoded triple broke the moment a fourth tool was
+# added, which is a suite failing on its own bookkeeping rather than on the
+# thing it was asked to watch. This still fails on a schema written twice,
+# or on a tool declared without one.
+import bridgecore.channel as _ch                            # noqa: E402
 check("a schema appears once per declared tool and nowhere else",
-      csrc.count("inputSchema"), len(["verdict", "task", "loop"]))
+      csrc.count("inputSchema"), len(_ch.TOOLS))
+check("and the planner has the four tools it is told about",
+      sorted(x["name"] for x in _ch.TOOLS),
+      ["check", "loop", "task", "verdict"])
 
 print("\n35. one definition of carried context, whatever reads it")
 print("    the transcript path used to add output_tokens while the status")
@@ -1721,6 +1731,142 @@ check("run_review distinguishes answered from unanswered",
       'answered = waiter["verdict"] is not None' in _src, True)
 check("and calls the counter on the unanswered branch",
       "note_silence(path, project, n)" in _src, True)
+
+print("\n53. the planner runs the check, because the planner cannot run")
+print("   anything. Bash, PowerShell and every edit tool are denied to it")
+print("   by disallow_for, so 'I verified the fix' could only ever mean")
+print("   'I read that it was fixed' - a rule about behaviour with no")
+print("   mechanism under it, which is the shape of defect this project")
+print("   keeps finding in itself")
+_cp = os.path.join(TMP, "checkproj")
+os.makedirs(os.path.join(_cp, "bridgecore"), exist_ok=True)
+# A real file, because the Checked: block below is opened for real by the
+# older half of the same gate. Using a path that does not exist would fail
+# these cases for a reason that has nothing to do with what they test.
+with open(os.path.join(_cp, "bridgecore", "store.py"), "w",
+          encoding="utf-8") as _fh:
+    _fh.write("# a file the gate can find\n")
+_cpn = daemon.norm(_cp)
+daemon.CFG.setdefault("projects", {})[_cp] = {}
+daemon.STATE.pop("checks", None)
+
+print("   which projects it applies to, and why not all of them")
+check("the bridge's own project is accepted by these suites",
+      daemon.check_kinds(daemon.norm(os.path.dirname(daemon.ROOT))),
+      ["suites"])
+check("somebody else's project is not - running our suites over their "
+      "shader would prove nothing, and demanding it would block that pair "
+      "for ever on evidence that can never become relevant",
+      daemon.check_kinds(_cpn), [])
+daemon.CFG["projects"][_cp] = {"checks": ["suites"]}
+check("a project earns the requirement by naming it in config",
+      daemon.check_kinds(_cpn), ["suites"])
+daemon.CFG["projects"][_cp] = {"checks": ["rm -rf /"]}
+check("and the list is a vocabulary, never a command line: an entry that "
+      "is not a known kind is dropped rather than run",
+      daemon.check_kinds(_cpn), [])
+daemon.CFG["projects"][_cp] = {"checks": ["suites"]}
+
+print("   the tool takes no command, and never will")
+_ref = daemon.run_check(_cpn, "nosuch")
+check("an unknown suite is refused, not passed through",
+      (_ref["ok"], _ref["refused"]), (False, True))
+check("and the refusal names the ones that exist",
+      all(s in _ref["why"] for s in daemon.CHECK_SUITES), True)
+check("the endpoint accepts a suite NAME and nothing else - there is no "
+      "argument through which a command could arrive",
+      sorted((daemon.run_check.__code__.co_varnames or ())[:2]),
+      ["path", "suite"])
+
+print("   a real run, with the process spawning stubbed out: what the")
+print("   planner gets back is exit codes and a folder, not a verdict")
+_ran = []
+
+
+def _fake_run(cmd, cwd, env, out_path):
+    _ran.append((os.path.basename(str(cmd[-1])), env.get("BRIDGE_NO_HOOKS"),
+                 env.get("BRIDGE_DATA"), cwd))
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write("stub\nEXIT=0\n")
+    return 0, ["all cases pass"]
+
+
+_real_run, daemon._run_one = daemon._run_one, _fake_run
+_real_pkg, daemon._check_package = daemon._check_package, \
+    lambda w, e, a: (0, ["RESULT: all files identical"])
+try:
+    _r = daemon.run_check(_cpn)
+finally:
+    daemon._run_one, daemon._check_package = _real_run, _real_pkg
+check("every suite ran, plus py_compile and the package byte check",
+      [row["what"] for row in _r["rows"]],
+      ["py_compile"] + ["test_%s.py" % s for s in daemon.CHECK_SUITES]
+      + ["verify_package"])
+check("the result carries an exit code per line",
+      all(isinstance(row["exit"], int) for row in _r["rows"]), True)
+check("and a folder that exists, so the human can read the whole output",
+      os.path.isdir(_r["dir"]), True)
+check("it ran in a COPY, not in the tree it is checking",
+      all(daemon.ROOT.lower() not in (cwd or "").lower()
+          for _n, _h, _d, cwd in _ran), True)
+check("with hooks off, so the run does not take a seat in the panel as a "
+      "session nobody launched",
+      sorted({h for _n, h, _d, _c in _ran}), ["1"])
+check("and its own BRIDGE_DATA, so it cannot write the live state",
+      all(_d and daemon.ROOT.lower() not in _d.lower()
+          for _n, _h, _d, _c in _ran), True)
+
+print("   and now the gate: accepting code you did not run is refused")
+_rep = ("Fixed the parsing in bridgecore/store.py, all suites green.\n"
+        "Residence: bridgecore/store.py:norm")
+_fb = "Good. Checked: bridgecore/store.py\nResidence: bridgecore/store.py:norm"
+daemon.PENDING[_cpn] = {"content": _rep, "made": time.time()}
+daemon.STATE.pop("checks", None)
+_ok, _why, _kind = daemon.verdict_gate(_cpn, "done", _fb)
+check("'done' on a report that changed code, with no check at all, is "
+      "refused", _ok, False)
+check("and the refusal says to call the tool rather than complaining",
+      "check tool" in _why, True)
+
+print("   a check that ran BEFORE the report says nothing about it")
+daemon.STATE.setdefault("checks", {})[_cpn] = {
+    "at": time.time() - 600, "ok": True, "rows": [], "dir": _r["dir"]}
+_ok, _why, _kind = daemon.verdict_gate(_cpn, "done", _fb)
+check("a check older than the report does not count", _ok, False)
+check("and the refusal shows both times, so the planner can see why",
+      _why.count(":") >= 4, True)
+
+print("   a check that FAILED blocks acceptance and says what broke")
+daemon.STATE["checks"][_cpn] = {
+    "at": time.time(), "ok": False, "dir": _r["dir"],
+    "rows": [{"what": "test_multipair.py", "exit": 1, "tail": ["FAILED: 2"]}]}
+_ok, _why, _kind = daemon.verdict_gate(_cpn, "done", _fb)
+check("a failed check refuses 'done'", _ok, False)
+check("naming the suite that broke, not just that something did",
+      "test_multipair.py" in _why, True)
+check("and pointing at the output on disk", _r["dir"] in _why, True)
+
+print("   a fresh, passing check lets the same verdict through")
+daemon.STATE["checks"][_cpn] = {
+    "at": time.time(), "ok": True, "rows": [], "dir": _r["dir"]}
+_ok, _why, _kind = daemon.verdict_gate(_cpn, "done", _fb)
+check("done goes through once the planner has actually run it",
+      (_ok, _kind), (True, "artifacts"))
+
+print("   and the gate does not fire where it would mean nothing")
+daemon.CFG["projects"][_cp] = {}
+daemon.STATE.pop("checks", None)
+_ok, _why, _kind = daemon.verdict_gate(_cpn, "done", _fb)
+check("a project that names no checks is accepted without one",
+      _ok, True)
+daemon.CFG["projects"][_cp] = {"checks": ["suites"]}
+daemon.STATE.pop("checks", None)
+check("'continue' never needs a check - it does not accept anything",
+      daemon.verdict_gate(_cpn, "continue", "Checked: bridgecore/store.py")[0],
+      True)
+check("'wait' is free of all of it", daemon.verdict_gate(_cpn, "wait", "")[0],
+      True)
+daemon.PENDING.pop(_cpn, None)
 
 print("\n" + ("-" * 60))
 if FAILED:

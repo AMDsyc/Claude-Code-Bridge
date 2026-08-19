@@ -2258,6 +2258,253 @@ _r2 = _rl.migrate(_fake, out=lambda _m: None, port=_freeport)
 check("with the port quiet it goes ahead - so the guard is the port, "
       "not a mood", _r2["moved"], True)
 
+print("\n58. a report NOBODY EVER ANSWERS is still counted as silence")
+print("    Case 52 pinned the branch where the waiter wakes with no verdict.")
+print("    That is the rare shape. The common one - and the one that cost 37")
+print("    reports on 2026-08-19 while STATE['unanswered'] stayed at 0 - is")
+print("    the wait simply timing out, and there run_review returned before")
+print("    it ever reached the counter. Rule 27 had a gate with the door")
+print("    beside it: the accounting lived after an early exit")
+_qp = os.path.join(TMP, "quietproj")
+os.makedirs(_qp, exist_ok=True)
+_qn = daemon.norm(_qp)
+daemon.STATE.setdefault("unanswered", {}).pop(_qn, None)
+(daemon.STATE.get("paused") or {}).pop(_qn, None)
+daemon.PENDING.pop(_qn, None)
+_thr = dict(daemon.CFG.get("thresholds") or {})
+_saved_thr, _saved_deliver, _saved_notify = _thr.copy(), daemon.deliver_ex, daemon.notify
+daemon.CFG["thresholds"] = dict(_thr, review_timeout=0.4,
+                                channel_silence_warn=0.2, idle_hold=0)
+# The report is handed over successfully - that is the whole point. The
+# channel took the bytes; the session behind it answers nothing, ever.
+daemon.deliver_ex = lambda *_a, **_k: (True, "ok")
+daemon.notify = lambda *_a, **_k: None
+try:
+    _, _lp = daemon.loop_state(_qn)
+    _before = (daemon.STATE.get("unanswered") or {}).get(_qn, 0)
+    _out = daemon.run_review({}, _qn, _lp, "a report nobody will answer",
+                             "quietproj", "executor")
+    _after = (daemon.STATE.get("unanswered") or {}).get(_qn, 0)
+finally:
+    daemon.CFG["thresholds"] = _saved_thr
+    daemon.deliver_ex, daemon.notify = _saved_deliver, _saved_notify
+check("the hook is released with no verdict to carry", _out, None)
+check("and the unanswered report is COUNTED, not forgotten",
+      (_before, _after), (0, 1))
+print("   the fix is where the counting lives, not what it counts:")
+print("   note_silence itself was always right. So the proof is that the")
+print("   run reaches the hold - three unanswered reports in a row and the")
+print("   pair stops, which is what nobody got on 2026-08-19")
+daemon.CFG["thresholds"] = dict(_thr, review_timeout=0.4,
+                                channel_silence_warn=0.2, idle_hold=0)
+daemon.deliver_ex = lambda *_a, **_k: (True, "ok")
+daemon.notify = lambda *_a, **_k: None
+try:
+    for _ in range(2):
+        daemon.PENDING.pop(_qn, None)
+        _, _lp = daemon.loop_state(_qn)
+        daemon.run_review({}, _qn, _lp, "another unanswered report",
+                          "quietproj", "executor")
+    _run = (daemon.STATE.get("unanswered") or {}).get(_qn, 0)
+    _hold = (daemon.STATE.get("paused") or {}).get(_qn) or {}
+finally:
+    daemon.CFG["thresholds"] = _saved_thr
+    daemon.deliver_ex, daemon.notify = _saved_deliver, _saved_notify
+check("three in a row are counted", _run, 3)
+check("and the third one holds the pair, with the reason in words",
+      "has not answered" in (_hold.get("why") or ""), True)
+daemon.clear_silence(_qn, "quietproj")
+
+print("\n59. two channel processes, one key: the leftover cannot win it back")
+print("    Measured on 2026-08-19, twice over 150 s: the planner's channel")
+print("    registration alternated between port 56598 (the live window,")
+print("    started 17:25 as bridgecore.channel) and port 49318 (pid 2840,")
+print("    started the PREVIOUS evening as bridge.channel - a package name")
+print("    that no longer exists). channel.py heartbeats every 45 s whatever")
+print("    became of its window, and the record simply took whoever posted")
+print("    last. So about half of every report was handed to a process")
+print("    whose window had been gone for 21 hours, and accepted by it")
+print("   the discriminator is when the PROCESS started, which is the same")
+print("   fact a person uses to spot the leftover by eye")
+check("the start time of a real process can be read at all - our own",
+      isinstance(daemon.proc_started(os.getpid()), float), True)
+check("and it is in the past, but not in the last microsecond",
+      0 < time.time() - daemon.proc_started(os.getpid()) < 86400 * 30, True)
+check("a pid that cannot exist reads as unknown rather than as a time",
+      daemon.proc_started(-1), None)
+_young, _old = {"pid": 111, "port": 56598}, {"pid": 222, "port": 49318}
+_ages = {111: 2000.0, 222: 1000.0}          # 111 started later: it is live
+_saved_ps = daemon.proc_started
+daemon.proc_started = lambda p: _ages.get(int(p))
+try:
+    check("the younger process takes the record from the older one",
+          daemon.channel_supersedes(_old, 111), True)
+    check("and the older one is REFUSED when it heartbeats again - this is "
+          "the flap, and this is where it stops",
+          daemon.channel_supersedes(_young, 222), False)
+    check("the same process re-registering is always allowed",
+          daemon.channel_supersedes(_young, 111), True)
+    print("   and it fails open: a start time we cannot read never refuses,")
+    print("   because a platform we cannot see must keep its loop")
+    daemon.proc_started = lambda _p: None
+    check("unknown ages let the registration through",
+          daemon.channel_supersedes(_young, 222), True)
+finally:
+    daemon.proc_started = _saved_ps
+print("   the pid has to reach DISK, not just the in-memory registry: the")
+print("   comparison above happens on the next heartbeat, and the record it")
+print("   compares against is the one that survived a restart")
+_reg = inspect.getsource(daemon.Handler.do_POST)
+_disk = _reg[_reg.find('STATE.setdefault("channels"'):][:700]
+check("the record written to state.json carries the pid",
+      '"pid": body.get("pid")' in _disk, True)
+print("   and a port that merely ANSWERS is no longer promoted to current:")
+print("   accepting bytes is what the leftover did best")
+check("deliver_ex does not re-register whatever answered",
+      "CHANNELS[(norm(path), role)] = {\"port\": port"
+      in inspect.getsource(daemon.deliver_ex), False)
+
+print("\n60. a decision only a document knows is not a decision")
+print("    The owner said the old tree stays. That lived in CLAUDE.md and")
+print("    nowhere else - while bridge.bat runs the migration BEFORE the")
+print("    daemon at every single start, and the read-only retry added the")
+print("    same morning would have made the delete succeed. The next")
+print("    restart by anybody would have removed it, document or no")
+_kp = os.path.join(TMP, "keepproj")
+os.makedirs(os.path.join(_kp, "bridge", "data"), exist_ok=True)
+os.makedirs(os.path.join(_kp, "source", "bridgecore"), exist_ok=True)
+check("without the mark there is a migration pending, as before",
+      _rl.pending(_kp), True)
+_mark = os.path.join(_kp, "bridge", _rl.KEEP_MARK)
+open(_mark, "w", encoding="utf-8").write("kept\n")
+print("   the mark alone is not enough: a half-moved tree must not be")
+print("   stranded by a file somebody dropped into it")
+check("with no finished layout to keep, the mark is ignored",
+      (_rl.kept_on_purpose(_kp), _rl.pending(_kp)), (False, True))
+os.makedirs(os.path.join(_kp, "source", "data"), exist_ok=True)
+open(os.path.join(_kp, "source", "data", "config.json"),
+     "w", encoding="utf-8").write("{}\n")
+check("with the move complete, the mark is honoured",
+      (_rl.kept_on_purpose(_kp), _rl.pending(_kp)), (True, False))
+print("   and the line that actually deletes answers to it too, so the")
+print("   guard does not depend on pending() being consulted first")
+check("migrate refuses to remove a tree that is kept",
+      "kept_on_purpose(base)" in inspect.getsource(_rl.migrate), True)
+check("the tree is still there afterwards",
+      os.path.isdir(os.path.join(_kp, "bridge")), True)
+print("   removing the file is how the decision gets changed - it is the")
+print("   one deliberate way back, and it is written inside the file")
+os.remove(_mark)
+check("delete the mark and the migration is due again",
+      _rl.pending(_kp), True)
+
+print("\n61. an UNDELIVERED report must not freeze the window for 20 minutes")
+print("    A blocked Stop hook draws nothing, so while run_review waits the")
+print("    executor's window looks dead - reported on 2026-08-19 as the")
+print("    executor freezing and never refreshing. It waited review_timeout")
+print("    even when the report had reached nobody: twenty minutes for an")
+print("    answer to something no planner was ever given")
+_fp = os.path.join(TMP, "frozenproj")
+os.makedirs(_fp, exist_ok=True)
+_fn = daemon.norm(_fp)
+daemon.STATE.setdefault("unanswered", {}).pop(_fn, None)
+(daemon.STATE.get("paused") or {}).pop(_fn, None)
+daemon.PENDING.pop(_fn, None)
+_thr61 = dict(daemon.CFG.get("thresholds") or {})
+_sv = (_thr61.copy(), daemon.deliver_ex, daemon.notify, daemon.ensure_session)
+daemon.CFG["thresholds"] = dict(_thr61, review_timeout=6.0,
+                                channel_silence_warn=6.0,
+                                undelivered_hold=0.3, idle_hold=0)
+# Nothing takes it: no channel at all. This is the shape that froze.
+daemon.deliver_ex = lambda *_a, **_k: (False, "absent")
+daemon.notify = lambda *_a, **_k: None
+daemon.ensure_session = lambda *_a, **_k: None
+try:
+    _, _lp61 = daemon.loop_state(_fn)
+    _t0 = time.time()
+    _out61 = daemon.run_review({}, _fn, _lp61, "a report that reaches nobody",
+                               "frozenproj", "executor")
+    _took = time.time() - _t0
+finally:
+    daemon.CFG["thresholds"] = _sv[0]
+    daemon.deliver_ex, daemon.notify, daemon.ensure_session = _sv[1:]
+check("the window is released in about the short hold, not the timeout",
+      _took < 3.0, True)
+print("   measured: %.2f s, against a review_timeout of 6.0 s" % _took)
+check("and it is released with NO verdict - not reviewed is not consent",
+      _out61, None)
+check("the unanswered report is still counted",
+      (daemon.STATE.get("unanswered") or {}).get(_fn, 0), 1)
+check("and it is on disk where a person can read it",
+      os.path.isdir(os.path.join(_fp, "bridge-logs")), True)
+print("   a DELIVERED report is not cut short: a planner thinking for")
+print("   minutes must not be interrupted, so only the undelivered case")
+print("   gets the short hold")
+_src61 = inspect.getsource(daemon.run_review)
+check("the short hold applies only when nothing was sent",
+      "if not sent:" in _src61 and "undelivered_hold" in _src61, True)
+check("and the threshold is a named setting, not a number in the code",
+      "undelivered_hold" in store.DEFAULT_CONFIG["thresholds"], True)
+daemon.clear_silence(_fn, "frozenproj")
+
+print("\n62. one folder, one project key")
+print("    On 2026-08-19 config.json held one project under two spellings")
+print("    of the same folder - capitals in one, lower case in the other -")
+print("    so five configured projects showed as four pairs in /state.")
+print("    handle_add_project keyed by os.path.abspath(), which keeps the")
+print("    capitals exactly as typed, while everything else the bridge does")
+print("    is keyed by norm(). Rule 28 at the level of a dictionary key")
+_saved_projects = daemon.CFG.get("projects")
+_twin_a = os.path.join(TMP, "Games", "Shiny_Thing")
+_twin_b = _twin_a.lower()
+_lonely = os.path.join(TMP, "Other_Work")
+daemon.CFG["projects"] = {
+    _twin_a: {"checks": ["suites"]},
+    _twin_b: {"modes": {"executor": "plan"}},
+    _lonely: {},
+}
+_folded = daemon.migrate_project_keys()
+check("the duplicate spelling is folded away", len(_folded), 1)
+check("and one key is left for that folder",
+      len([k for k in daemon.CFG["projects"]
+           if "shiny_thing" in k.lower()]), 1)
+print("   merged, not dropped: the two halves can carry different settings")
+print("   and the newer one is not knowably the one that was meant")
+_kept = [v for k, v in daemon.CFG["projects"].items()
+         if "shiny_thing" in k.lower()][0]
+check("what only the loser said survives", _kept.get("modes"),
+      {"executor": "plan"})
+check("and what the winner said is untouched", _kept.get("checks"),
+      ["suites"])
+check("a project with no twin is left exactly as it was",
+      daemon.norm(_lonely) in daemon.CFG["projects"], True)
+check("running it again is a no-op", daemon.migrate_project_keys(), [])
+daemon.CFG["projects"] = _saved_projects
+print("   and the door it came through is shut: the key is normed now")
+check("handle_add_project writes a normed key",
+      "setdefault(norm(path), {})"
+      in inspect.getsource(daemon.handle_add_project), True)
+
+print("\n63. BRIDGE_PORT has to move the DAEMON, not only its clients")
+print("    Every edge honoured it - hook.py, statusline.py, channel.py,")
+print("    install.py, relayout.py all read BRIDGE_PORT - while the daemon")
+print("    took its listening port from CFG alone. So setting it sent every")
+print("    client to one port and left the daemon on 8765. On 2026-08-19 a")
+print("    run that believed itself isolated bound the LIVE bridge's port:")
+print("    netstat showed two processes LISTENING on 127.0.0.1:8765 at once,")
+print("    which Windows SO_REUSEADDR permits, with connections landing on")
+print("    whichever socket the stack picked")
+_src63 = inspect.getsource(daemon.main)
+check("the daemon reads BRIDGE_PORT before falling back to the config",
+      'os.environ.get("BRIDGE_PORT") or CFG.get("port"' in _src63, True)
+print("   and every edge still reads the same variable, so one setting")
+print("   moves the whole bridge rather than half of it")
+for _mod, _name in ((__import__("bridgecore.hook", fromlist=["x"]), "hook"),
+                    (__import__("bridgecore.statusline", fromlist=["x"]),
+                     "statusline")):
+    check("%s takes its port from BRIDGE_PORT" % _name,
+          'BRIDGE_PORT' in inspect.getsource(_mod), True)
+
 print("\n" + ("-" * 60))
 if FAILED:
     print("FAILED: %d" % len(FAILED))

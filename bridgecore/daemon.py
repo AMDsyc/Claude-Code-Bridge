@@ -318,6 +318,50 @@ def migrate_executor_mode():
     return moved
 
 
+def migrate_project_keys():
+    """Fold projects that config.json holds twice under two spellings.
+
+    On 2026-08-19 config.json carried one project under two spellings of
+    the same folder - the drive letter and the folder names capitalised in
+    one, lower case in the other - so five configured projects showed as
+    four pairs: everything the daemon keys is keyed by norm(), while
+    handle_add_project wrote the key as
+    os.path.abspath() gave it - which keeps the case exactly as it was
+    typed. Adding the same folder from the panel and from the command line,
+    or once with a different shell's idea of the drive letter, was enough.
+
+    Merging rather than dropping: the two halves can carry different
+    settings, and the one written most recently is not knowably the one
+    meant. Anything the surviving key does not already say is taken from
+    the loser, and what it does say is kept.
+    """
+    merged = []
+    with _lock:
+        projects = CFG.get("projects") or {}
+        folded = {}
+        for key, pc in list(projects.items()):
+            k = norm(key)
+            if k in folded:
+                base = folded[k][1] or {}
+                for field, value in (pc or {}).items():
+                    base.setdefault(field, value)
+                folded[k] = (folded[k][0], base)
+                merged.append(key)
+            else:
+                folded[k] = (key, dict(pc or {}))
+        if merged:
+            CFG["projects"] = {k: v[1] for k, v in folded.items()}
+            store.save_config(CFG)
+    if merged:
+        store.journal("bridge", "Folded %d duplicate project key(s) in "
+                      "config.json - %s. Everything the bridge keys is keyed "
+                      "by norm(), so a second spelling of the same folder is "
+                      "a project that exists in the config and nowhere else."
+                      % (len(merged), ", ".join(sorted(merged))),
+                      level="warn")
+    return merged
+
+
 def migrate_note():
     """Turn a pre-multipair note into the per-project form.
 
@@ -1017,6 +1061,94 @@ def port_answers(port, timeout=1.0):
         return False
 
 
+def proc_started(pid):
+    """When did this process start, in epoch seconds? None when unknown.
+
+    Used for one thing only: telling two channel processes apart. Every
+    caller must treat None as "no opinion" and let the registration
+    through - a platform whose clock we cannot read must keep its loop
+    rather than lose it to a check that cannot see.
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    if os.name == "nt":
+        try:
+            import ctypes
+            import ctypes.wintypes as wt
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            # QUERY_LIMITED_INFORMATION is enough for GetProcessTimes and,
+            # unlike QUERY_INFORMATION, it is granted for processes we do
+            # not own - which the channels are.
+            h = k32.OpenProcess(0x1000, False, pid)
+            if not h:
+                return None
+            try:
+                created, exited = wt.FILETIME(), wt.FILETIME()
+                kernel, user = wt.FILETIME(), wt.FILETIME()
+                if not k32.GetProcessTimes(h, ctypes.byref(created),
+                                           ctypes.byref(exited),
+                                           ctypes.byref(kernel),
+                                           ctypes.byref(user)):
+                    return None
+            finally:
+                k32.CloseHandle(h)
+            # FILETIME counts 100-nanosecond intervals from 1601-01-01.
+            ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime
+            return ticks / 1e7 - 11644473600.0
+        except Exception:
+            return None
+    try:
+        with open("/proc/%d/stat" % pid, "rb") as fh:
+            # field 22 is starttime in clock ticks since boot; the command
+            # name in field 2 can contain spaces and parentheses, so split
+            # after the last ')' rather than on whitespace from the start.
+            fields = fh.read().decode("utf-8", "replace")
+            fields = fields[fields.rfind(")") + 2:].split()
+        ticks = float(fields[19])
+        hz = os.sysconf("SC_CLK_TCK")
+        with open("/proc/uptime", "rb") as fh:
+            uptime = float(fh.read().split()[0])
+        return time.time() - uptime + ticks / hz
+    except Exception:
+        return None
+
+
+def channel_supersedes(prev, pid):
+    """May a registration from `pid` replace the record `prev`?
+
+    Two channel processes can hold the same (project, role) at once: a
+    window is restarted, its old channel keeps running, and channel.py
+    heartbeats every 45 s whatever happened to the window. Nothing kept
+    them apart, so the record simply took whoever posted last.
+
+    Measured on 2026-08-19, twice over 150 s: the planner's registration
+    alternated 56598 / 49318 every 45 s. Roughly half of every report was
+    therefore handed to a process whose window had been gone since the
+    previous evening - accepted by it, and never seen. 37 of that day's 43
+    reports were lost that way, and restarting the bridge could not help,
+    because the orphan simply registered again within 45 seconds.
+
+    The discriminator is when the PROCESS started. A channel belongs to
+    the window that spawned it, so between two contenders the younger one
+    is the live one and the older one is a leftover. Unknown start times
+    never refuse: fail open, always.
+    """
+    if not prev or not prev.get("pid"):
+        return True
+    if str(prev.get("pid")) == str(pid):
+        return True
+    mine, theirs = proc_started(pid), proc_started(prev.get("pid"))
+    if mine is None or theirs is None:
+        return True              # cannot tell - never refuse on a blind guess
+    if theirs > mine:
+        return False             # the one on record is younger: it stays
+    return True
+
+
 def channel_alive(path, role):
     """Live channel, or a remembered one whose port still answers.
 
@@ -1025,8 +1157,16 @@ def channel_alive(path, role):
     which every other witness is also blind: a window still sitting on its
     startup dialog has fired no hooks, and on Windows the pid we recorded
     belongs to the launcher rather than to claude itself. The channel's
-    port is on disk and answers throughout, because the process listening
-    on it is the session's own child.
+    port is on disk and answers throughout.
+
+    It used to say here that this was safe "because the process listening
+    on it is the session's own child". That was the false assumption this
+    whole function rested on, and on 2026-08-19 it cost 37 reports: the
+    process listening may just as easily be the PREVIOUS session's child,
+    still running, still accepting. What keeps the record honest now is
+    the guard at registration (channel_supersedes) - a leftover cannot
+    take the record back - so the port read here is one that has already
+    been vouched for, rather than one trusted merely for answering.
     """
     ch = channel_for(path, role)
     if ch:
@@ -1075,11 +1215,16 @@ def deliver_ex(path, role, content, meta):
             headers={"Content-Type": "application/json",
                      "X-Bridge-Secret": SECRET})
         urllib.request.urlopen(req, timeout=20).read()
-        # The port answered, so whatever the heartbeat says, this channel is
-        # current. Put it back in the registry rather than leaving the two
-        # views to disagree again.
-        CHANNELS[(norm(path), role)] = {"port": port, "ts": time.time(),
-                                        "pid": ch.get("pid")}
+        # This used to re-register whatever answered, on the reasoning that
+        # a port which takes the message must be the current channel. It is
+        # not: a leftover process from a replaced window accepts bytes
+        # perfectly well, and promoting it here is how it kept winning the
+        # registry back after every refusal. Registration is the channel's
+        # own business now - it heartbeats every 45 s and is checked there.
+        # Only the freshness of a channel we already trust is renewed.
+        cur = CHANNELS.get((norm(path), role))
+        if cur and int(cur.get("port") or 0) == port:
+            cur["ts"] = time.time()
         return True, "ok"
     except Exception as exc:
         store.journal("channel", "The %s channel is listening on port %d but "
@@ -4720,6 +4865,19 @@ def run_review(event, path, lp, msg, project, role):
             with _lock:
                 (STATE.get("frames") or {}).pop(path, None)
                 save_state()
+    # What is still hanging behind this one. A planner answers the report in
+    # front of it and has no way of knowing another is waiting: on
+    # 2026-08-19 reports 92 and 93 both stood, one verdict was given, and
+    # the pair stopped dead until the owner interrupted it, saying he was
+    # looking at two windows doing nothing. One verdict answers one
+    # report, so the only fix is to say out loud how many are owed.
+    _owed = (STATE.get("unanswered") or {}).get(path, 0)
+    if _owed:
+        content = ("%d earlier report%s on this pair got NO verdict. They "
+                   "are in bridge-logs/.../inbox/ - answer them too, not "
+                   "just this one: one verdict answers one report, so an "
+                   "unanswered report holds its own turn for ever.\n\n"
+                   % (_owed, "" if _owed == 1 else "s")) + content
     if note:
         content += "\n\nNote from the human: %s" % note
     meta = {"kind": "report", "report": str(n)}
@@ -4764,6 +4922,23 @@ def run_review(event, path, lp, msg, project, role):
     timeout = float(CFG.get("thresholds", {}).get("review_timeout", 1200))
     warn_after = float(CFG.get("thresholds", {}).get("channel_silence_warn",
                                                     240))
+    if not sent:
+        # Nothing was delivered, so there is nobody to be slow. Waiting the
+        # full review_timeout here held the executor's window for twenty
+        # minutes for an answer to a report no planner had ever been given
+        # - and a blocked Stop hook draws nothing at all, so what the owner
+        # sees for those twenty minutes is a Claude Code that looks dead -
+        # reported as the executor freezing and never refreshing
+        # (2026-08-19).
+        #
+        # The short hold is not a shortcut past the review. The report is
+        # already in the inbox and the human has already been called; what
+        # ends early is only the freeze. The turn resolves as NOT REVIEWED,
+        # never as a verdict - rule 27 is the whole reason this is a hold
+        # and not a default "continue".
+        timeout = warn_after = min(
+            float(CFG.get("thresholds", {}).get("undelivered_hold", 60)),
+            timeout)
     got = waiter["event"].wait(min(warn_after, timeout))
     if not got and sent:
         # The delivery to the channel process succeeded, yet the planner has
@@ -4794,6 +4969,19 @@ def run_review(event, path, lp, msg, project, role):
                "%s: the planner has not answered report %d in %d min. The "
                "loop is holding - look at the planner's window."
                % (project, n, int(timeout // 60)), path=path)
+        # Rule 27 has to be enforced HERE, because this is what silence
+        # actually looks like: the waiter never fires at all. The counting
+        # used to live below, past this return, so the only shape of
+        # silence that was ever counted was the rare one where the event
+        # fires carrying no verdict. The common shape - nobody answers,
+        # ever - walked straight out of this branch.
+        #
+        # Measured on 2026-08-19: 37 reports of the day's 43 sat in
+        # bridge-logs/.../inbox/ with no answer, and STATE["unanswered"]
+        # for that project was 0. So the pair was never held, nobody was
+        # called, and the guard written for exactly this night did nothing
+        # on the night it was written for.
+        note_silence(path, project, n)
         return None
 
     # A report nobody answered used to resolve as "continue" - the executor
@@ -6857,6 +7045,24 @@ class Handler(BaseHTTPRequestHandler):
                     # stopped a real session's channel from ever being
                     # reachable.
                     note_stranger(path, body.get("session_id"))
+                # A leftover channel from a replaced window heartbeats just
+                # like a live one. Whoever posted last used to win, so the
+                # record flapped and half the reports went to the corpse.
+                _prev = (STATE.get("channels") or {}).get("%s|%s"
+                                                          % (path, role))
+                if not channel_supersedes(_prev, body.get("pid")):
+                    store.journal("channel", "Refused a channel registration "
+                                  "for %s: pid %s started before the pid %s "
+                                  "already on record, so it is a leftover "
+                                  "from a window that has been replaced. Its "
+                                  "port %s is NOT being used."
+                                  % (role, body.get("pid"),
+                                     (_prev or {}).get("pid"),
+                                     body.get("port")),
+                                  project_name(path), role, "log",
+                                  project_dir=path)
+                    return self._send(200, {"ok": False,
+                                            "why": "superseded"})
                 first = (path, role) not in CHANNELS
                 CHANNELS[(path, role)] = {"port": int(body.get("port") or 0),
                                           "ts": time.time(),
@@ -6864,7 +7070,11 @@ class Handler(BaseHTTPRequestHandler):
                 with _lock:
                     STATE.setdefault("channels", {})["%s|%s" % (path, role)] \
                         = {"port": int(body.get("port") or 0),
-                           "at": time.time()}
+                           "at": time.time(),
+                           # the pid is what lets the next registration tell
+                           # a live channel from a leftover; without it on
+                           # disk the comparison has nothing to compare to
+                           "pid": body.get("pid")}
                     save_state()
                 mark_registered(path, role)
                 with _lock:
@@ -7423,7 +7633,10 @@ def handle_add_project(body):
     store.journal("project", "Added project %s" % os.path.basename(path),
                   os.path.basename(path), level="log")
     with _lock:
-        CFG.setdefault("projects", {}).setdefault(path, {})
+        # norm(), not the path as typed: everything the bridge keys is
+        # keyed by norm(), so abspath()'s preserved capitals made a
+        # second project that existed in config.json and nowhere else.
+        CFG.setdefault("projects", {}).setdefault(norm(path), {})
         store.save_config(CFG)
     return {"ok": True, "added": added, "path": path}
 
@@ -7555,7 +7768,55 @@ def main():
     elif prev_clean and prev_mid and stakes:
         reason = "shutdown_mid_run"
 
-    port = int(CFG.get("port", 8765))
+    # BRIDGE_PORT wins over the config. It is documented as a debug switch
+    # and every EDGE already honoured it - hook.py, statusline.py,
+    # channel.py, install.py, relayout.py all read it - but the daemon took
+    # its own port from CFG alone. So setting it moved every client to one
+    # port while the daemon stayed on 8765: an "isolated" run bound the
+    # LIVE bridge's port instead of its own.
+    #
+    # That is not theoretical. On 2026-08-19 a simulation started with
+    # BRIDGE_PORT set to a free port, and netstat then showed two processes
+    # LISTENING on 127.0.0.1:8765 at once - Windows SO_REUSEADDR permits
+    # exactly that - with connections landing on whichever socket the stack
+    # chose. A switch that half works is worse than one that does not exist,
+    # because it is trusted.
+    port = int(os.environ.get("BRIDGE_PORT") or CFG.get("port", 8765))
+    # Ask BEFORE binding, because binding will not refuse. ThreadingHTTPServer
+    # sets allow_reuse_address, and on Windows SO_REUSEADDR lets a second
+    # process listen on a port another one is already serving: both sockets
+    # exist, and each new connection goes to whichever the stack picks. Half
+    # the traffic then reaches a bridge that knows nothing about it - the
+    # same "started, answering nothing" outcome relayout.stop_daemon is
+    # written to avoid, arrived at from the other end.
+    #
+    # It is not theoretical. On 2026-08-19 a run that believed itself
+    # isolated ended with two processes LISTENING on 127.0.0.1:8765, and
+    # netstat is the only reason anybody noticed.
+    if port_answers(port, timeout=1.5):
+        who = ""
+        try:
+            out = subprocess.run(["netstat", "-ano"], capture_output=True,
+                                 timeout=20).stdout.decode("utf-8", "replace")
+            for line in out.splitlines():
+                if "LISTENING" in line and ":%d " % port in line:
+                    who = " (pid %s)" % line.split()[-1]
+                    break
+        except Exception:
+            pass
+        print("\n  Port %d is already being served by another process%s."
+              % (port, who))
+        print("  NOT starting a second bridge on it. Two listeners on one "
+              "port is worse than none:")
+        print("  each connection would go to whichever socket the system "
+              "picked, so half of the")
+        print("  hooks, reports and verdicts would reach a bridge that knows "
+              "nothing about them.\n")
+        print("  If that is your bridge, it is already running - open "
+              "http://127.0.0.1:%d/." % port)
+        print("  If you meant to run a second one, give it its own port: "
+              "set BRIDGE_PORT.\n")
+        raise SystemExit(1)
     try:
         server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     except OSError as exc:
@@ -7577,6 +7838,7 @@ def main():
         store.save_state(STATE)
 
     migrate_note()
+    migrate_project_keys()
     migrate_executor_mode()
     moved = migrate_keys()
     if moved:

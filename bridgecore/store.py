@@ -144,6 +144,17 @@ DEFAULT_CONFIG = {
         # of silence, and that night would have stopped after three
         # reports instead of thirty-two.
         "silence_limit": 3,
+        # How long the executor's window is held for a report that was
+        # NEVER DELIVERED. It used to be held for the full review_timeout,
+        # twenty minutes, waiting for an answer to something no planner had
+        # been given - and a blocked Stop hook draws nothing, so the owner
+        # sees a Claude Code that looks dead. A minute is enough for a
+        # queued delivery to go through if the planner's channel comes up;
+        # after that the turn ends honestly as "not reviewed" rather than
+        # freezing the window on a hope. A DELIVERED report still waits the
+        # full review_timeout, because a planner thinking for minutes must
+        # not be cut off.
+        "undelivered_hold": 60,
         # How long after a turn died in an error the bridge waits for a
         # report before saying the turn was lost. 150s: on 2026-08-19 the
         # sessions that did come back had done so within about a minute

@@ -78,9 +78,50 @@ def say(msg):
     sys.stdout.flush()
 
 
+# The owner's decision, written where the code can read it. A marker file
+# rather than a config key on purpose: config.json is rewritten from memory
+# by a running daemon, and this has to survive being read by a process that
+# runs BEFORE any daemon exists.
+KEEP_MARK = "KEPT-ON-PURPOSE.txt"
+
+
+def kept_on_purpose(base=None):
+    """Has the owner said the old tree stays?
+
+    On 2026-08-19 the migration finished except for its last step: the
+    delete failed on read-only git objects (WinError 5). The owner then
+    decided the tree stays, and said why: not because the folder is
+    wanted, but because we had not shown that removing it could be done
+    without risk. That decision lived only in CLAUDE.md.
+
+    A decision that only a document knows is not a decision, it is a wish:
+    bridge.bat runs this module BEFORE the daemon at every single start, so
+    the very next start by anybody, for any reason, would have deleted the
+    tree regardless of what the document said - and the read-only retry
+    added the same morning would by then have made it succeed. This is the
+    gate under rule 24, and the mark is a file inside the tree it protects,
+    so anyone wondering why it survives finds the answer standing in it.
+
+    It is honoured only when the new layout is actually complete. A marker
+    dropped into a half-moved tree must not strand the move.
+    """
+    base = base or BASE
+    if not os.path.isfile(os.path.join(base, "bridge", KEEP_MARK)):
+        return False
+    return os.path.isfile(os.path.join(base, "source", "data", "config.json"))
+
+
 def pending(base=None):
-    """Is there an old tree still to move?"""
-    return os.path.isdir(os.path.join(base or BASE, "bridge"))
+    """Is there an old tree still to move?
+
+    Answers no for a tree that is being kept deliberately: there is nothing
+    left to do with it, and saying yes made the whole migration re-run at
+    every start, writing another ~9 MB backup zip into releases/ each time.
+    """
+    base = base or BASE
+    if kept_on_purpose(base):
+        return False
+    return os.path.isdir(os.path.join(base, "bridge"))
 
 
 def data_dirs(old):
@@ -381,6 +422,16 @@ def migrate(base=None, out=say, assume_stopped=False, port=None):
     for line in reinstall(base, os.path.join(data, "config.json")):
         out("      " + line)
 
+    if kept_on_purpose(base):
+        # Belt as well as braces: pending() already keeps us out of here,
+        # but this is the line that actually deletes, and the decision it
+        # answers to was made about THIS folder rather than about whether
+        # a migration was due.
+        out("   the old folder is kept on purpose (%s) - not removing it"
+            % KEEP_MARK)
+        return {"moved": True, "backup": kept, "config": winner,
+                "projects": projects, "not_used": losers, "merged": added,
+                "kept": True}
     gone, why = remove_tree(old, out=out)
     if not gone:
         out("   the old folder could NOT be removed: %s" % why)

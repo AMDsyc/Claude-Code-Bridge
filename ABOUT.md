@@ -22,11 +22,12 @@ Three wordings; pick one.
 
 ## Paragraph, for the top of the repository
 
-Claude Code Bridge runs two Claude Code sessions on the same project: one has
-the hands — it edits files, runs commands and reports what it did — and the
-other holds the plan, reviews every finished turn and answers with a verdict.
-One daemon runs as many of those pairs as you have projects, a pair per
-project, side by side. It carries reports one way and verdicts the other, keeps
+Claude Code Bridge runs as many pairs of Claude Code sessions as you have
+projects — a pair per project, all at the same time, from one daemon. Within a
+pair the two sessions share a project: one has the hands — it edits files, runs
+commands and reports what it did — and the other holds the plan, reviews every
+finished turn and answers with a verdict. It carries reports one way and
+verdicts the other, keeps
 each project's log with the project, and replaces a session before its context
 runs out so the thread is not lost. The split is what makes long unattended
 runs possible: the reviewer's

@@ -1,7 +1,8 @@
 # Claude Code Bridge
 
-Two Claude Code sessions on one project. One works, one reviews. And one daemon
-runs as many of those pairs as you have projects.
+**Several Claude Code pairs at once — one per project, side by side.** In each
+pair two sessions share a project: one does the work, the other reviews every
+finished turn. One small Python daemon runs all of them.
 
 The **executor** has the hands: it edits files, runs commands and reports what
 it did. The **planner** holds the plan, reads every finished turn and answers

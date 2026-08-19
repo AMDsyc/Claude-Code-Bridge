@@ -66,7 +66,11 @@ AUTHOR_LINE = '"Claude Code Bridge" is made by AMDsyc and Claude, 2026'
 SKIP_DIRS = {".git", ".idea", ".vscode"}
 
 PUBLISHABLE_SUFFIX = (".md", ".py", ".bat", ".html", ".txt", ".gitignore")
-PUBLISHABLE_NAMES = ("LICENSE", ".gitignore")
+# Extensionless files the build really does produce. Listed one by one
+# rather than allowed by a pattern: the whole point of this check is
+# that a file nobody meant to publish is refused for being there, and
+# a pattern would quietly let in the next thing that matched it.
+PUBLISHABLE_NAMES = ("LICENSE", ".gitignore", "Makefile")
 
 # The generic forms the documentation and the fixtures are SUPPOSED to use.
 # Named and narrow: every segment has to be a placeholder word, so

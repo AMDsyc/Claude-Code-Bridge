@@ -165,6 +165,15 @@ The rules do not replace the task. They say how to do it.
     you notice the answers have stopped, say so in your first line rather
     than carrying on.
 
+28. **One name, one file.** A file lives in exactly one place. Everything
+    else is derived: called derived, and rebuilt by one command. No two
+    levels of nesting carry the same name, and a folder is named after what
+    is in it.
+    *Check:* `check_public.py` refuses a tree in which one name appears in
+    two places, and names both of them. There is one exception,
+    `__init__.py`, and it is written down in `DUPLICATE_OK` rather than
+    assumed.
+
 ## What stands in the way of the action
 
 Three of these rules do not live in this text at all. They live in the daemon

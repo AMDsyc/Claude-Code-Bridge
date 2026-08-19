@@ -126,6 +126,12 @@ the source of what is running stays available. It cannot be closed and resold.
 
 ---
 
+## Repository name
+
+`claude-code-bridge` - it says what is inside, and it repeats none of the
+names used within it (`bridgecore`, `source`, `releases`). One name meaning
+one thing is a rule here rather than a preference: see rule 28 in HONESTY.md.
+
 ## Topics for GitHub
 
 ```

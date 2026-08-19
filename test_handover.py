@@ -1243,9 +1243,9 @@ check("the file is there and has something in it", len(canon) > 2000, True)
 check("and the rules stayed short enough to put in front of every task",
       len(canon) < 15000, True)
 check("with rules in it, not just prose",
-      len(re.findall(r"^\d+\. \*\*", canon, re.M)), 27)
+      len(re.findall(r"^\d+\. \*\*", canon, re.M)), 28)
 check("and each of them carries its check where it is read",
-      len(re.findall(r"^\s+\*[^*]+:\*", canon, re.M)), 27)
+      len(re.findall(r"^\s+\*[^*]+:\*", canon, re.M)), 28)
 print("   every rule carries the thing that makes it a rule and not a wish:")
 print("   a way to check it from outside")
 # Everything about HONESTY_CASES.md moved to test_cases.py, which is
@@ -1584,7 +1584,7 @@ check("the work itself is still there, and after the rules",
 print("   the full text once, titles every time after - because the full")
 print("   canon is ~3.5k tokens and every delivered task keeps it in the")
 print("   window for good, so fifty tasks would be ~175k spent on repeating")
-print("   the same page. The titles still name all 26 rules")
+print("   the same page. The titles still name all 28 rules")
 _s1 = daemon.rules_for_delivery("task", "sess-alpha")
 _s2 = daemon.rules_for_delivery("task", "sess-alpha")
 _s3 = daemon.rules_for_delivery("report", "sess-alpha")
@@ -1595,7 +1595,7 @@ check("every one after that carries the titles alone",
 check("and the short form is a fraction of the price",
       len(_s2) < len(_s1) / 4, True)
 check("but still names every rule",
-      len([l for l in _s2.splitlines() if re.match(r"^\d+\. \S", l)]), 27)
+      len([l for l in _s2.splitlines() if re.match(r"^\d+\. \S", l)]), 28)
 check("and says where the full text is, so nothing is hidden by shortening",
       "HONESTY.md" in _s2, True)
 print("   the mark is per SESSION - a handover makes a new one, and a")

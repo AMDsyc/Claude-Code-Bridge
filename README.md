@@ -48,7 +48,12 @@ optional Telegram notification.
 
 ## Install and first run
 
-Clone or unpack, then:
+```
+git clone https://github.com/<you>/claude-code-bridge
+cd claude-code-bridge
+```
+
+Then:
 
 ```
 bridge.bat
@@ -318,7 +323,7 @@ python test_archive.py          # the archive map
 python test_search.py           # the search agent, against a stub
 python test_wall_handover.py    # a handover simulated end to end
 python test_multipair.py        # three pairs on one throwaway daemon
-python -m py_compile bridge/*.py
+python -m py_compile bridgecore/*.py
 ```
 
 A run leaves `__pycache__` behind, and a `.pyc` carries `co_filename` - the
@@ -330,7 +335,11 @@ is empty.
 
 ## Checking a package
 
-If you build an archive of this, verify it rather than trusting it:
+This checks a **package**, not a checkout. The file list it carries names the
+layout a package is unpacked into - `bridge.bat` at the top and everything else
+under `source/` - which is one level deeper than this repository, where
+`bridgecore/` sits beside the launcher. Point it at an archive you built and
+the folder you unpacked it into:
 
 ```
 python verify_package.py <repo> <zip> <unpacked> bytes.txt

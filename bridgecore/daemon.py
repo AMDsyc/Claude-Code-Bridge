@@ -3861,6 +3861,14 @@ NOART_MIN_WORDS = 5
 # looks unmistakably like a path (absolute, or carrying a file extension, or
 # ending in a separator). Anything else is prose and is ignored.
 _TOKEN = re.compile(r"[^\s,;'\"()\[\]{}<>«»]+")
+# Quoting is how a writer says "this whole thing, spaces included, is one
+# name". Every pair the two halves actually type is here; the run itself may
+# not contain a line break, so an unclosed quote cannot swallow the rest of
+# the message.
+_QUOTED = re.compile("\"([^\"\r\n]{2,})\""
+                     "|«([^»\r\n]{2,})»"
+                     "|'([^'\r\n]{2,})'"
+                     "|`([^`\r\n]{2,})`")
 _ABS = re.compile(r"^(?:[A-Za-z]:[\\/]|[\\/]{1,2}\w)")
 _EXT = re.compile(r"\.[A-Za-z0-9]{1,6}$")
 _IMAGE_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif",
@@ -3873,13 +3881,34 @@ def artifact_paths(text, project_dir=""):
 
     Returns (found, dead). A relative path is resolved against the project,
     because that is how a planner writes it.
+
+    A path may contain SPACES, and until 2026-08-19 it could not. _TOKEN
+    splits on whitespace, so a path leading through a folder whose name has
+    a space in it arrived as two stumps, neither of which exists, and the
+    gate refused an honest verdict naming a file the planner had genuinely
+    read - by name, as a forgery.
+    That is the worst thing an acceptance gate can do: the planner stopped
+    naming the files of that folder and reached for other paths instead, so
+    the verdict passed with LESS truth in it than before. A check that
+    refuses good work gets worked around, and this one was, the same
+    evening.
+
+    Two explicit forms are understood, and no guessing beyond them:
+    anything inside quotes, and a line that is nothing but a path. Spaces
+    are never guessed inside a bare token - that is what keeps "5.17" and
+    "2.1.232" from being read as filenames.
     """
     found, dead = [], []
     base = project_dir or ""
-    for raw in _TOKEN.findall(text or ""):
-        tok = raw.strip("`*.,:;")
+    text = text or ""
+
+    def consider(tok, always_dead=False):
+        """One candidate. always_dead=True when the writer marked it as a
+        path explicitly (quotes), so a miss is worth reporting even though
+        the token carries no directory part of its own."""
+        tok = tok.strip().strip("`*.,:;")
         if not tok:
-            continue
+            return
         absolute = bool(_ABS.match(tok))
         bare = not absolute and "/" not in tok and "\\" not in tok
         cand = tok if absolute or not base else os.path.join(base, tok)
@@ -3888,18 +3917,61 @@ def artifact_paths(text, project_dir=""):
         except Exception:
             here = False
         if here:
-            found.append(tok)
-            continue
-        # A token with no directory part is only ever counted when it
-        # EXISTS - never held against the writer. "§5.17", "2.1.232" and
-        # "5.104" all satisfy any reasonable "looks like a filename" test,
-        # and an earlier cut of this refused a sound verdict because it
-        # could not find a file called "5.17". A missing artefact is only
-        # called missing when the writer plainly meant a path.
-        if bare:
-            continue
+            if tok not in found:
+                found.append(tok)
+            return
+        if bare and not always_dead:
+            return
         if absolute or _EXT.search(tok) or tok[-1] in "\\/":
-            dead.append(tok)
+            if tok not in dead:
+                dead.append(tok)
+
+    def exists(p):
+        cand = p if _ABS.match(p) else (os.path.join(base, p) if base else p)
+        try:
+            return os.path.exists(cand)
+        except Exception:
+            return False
+
+    # Line by line, and each line gives up what it has been understood to
+    # say before the next pass sees it. Doing the passes over the whole
+    # message instead let a path that had already been recognised whole be
+    # reported a second time as the two stumps either side of its space.
+    for line in text.splitlines():
+        # 1. Quoted runs: quoting is the writer saying "this whole thing,
+        #    spaces and all, is one name".
+        rest, last = [], 0
+        for m in _QUOTED.finditer(line):
+            inner = next(g for g in m.groups() if g is not None).strip()
+            # A quoted phrase that is plainly not a path ("done") is still
+            # only counted when it exists - fail open, exactly as before.
+            consider(inner, always_dead=bool(_ABS.match(inner)
+                                             or _EXT.search(inner)))
+            rest.append(line[last:m.start()])
+            last = m.end()
+        rest.append(line[last:])
+        line = " ".join(rest)
+
+        # 2. A line that is nothing but a path, once a bullet or the
+        #    Checked: mark is off the front. Counted only when it is really
+        #    there, so a line of prose can never become a demand - and when
+        #    it is taken, the line is done, or the pass below would tear the
+        #    same path apart at its spaces and call the halves missing.
+        one = line.strip().lstrip("-*•").strip()
+        low = one.lower()
+        for mark in CHECKED_MARKS:
+            if low.startswith(mark):
+                one = one[len(mark):].strip()
+                break
+        if (" " in one and (_ABS.match(one) or "/" in one or "\\" in one)
+                and exists(one)):
+            if one not in found:
+                found.append(one)
+            continue
+
+        # 3. Everything else, one whitespace-separated token at a time.
+        for raw in _TOKEN.findall(line):
+            consider(raw)
     return found, dead
 
 
@@ -4244,7 +4316,12 @@ def verdict_gate(path, verdict, feedback):
         return False, (
             "The Checked: block names %d path%s that %s not on disk: %s. "
             "A path that is not there is not a check. Either give the real "
-            "ones, or say Checked: no artifacts - <reason>."
+            "ones, or say Checked: no artifacts - <reason>.\n\n"
+            "If a path CONTAINS A SPACE, put it in quotes or give it a line "
+            "of its own - those are the two ways to say where it ends. Two "
+            "spaced paths on one line, unquoted, cannot be told apart, and "
+            "the bridge will not guess: it would rather ask than invent a "
+            "boundary."
             % (len(dead), "" if len(dead) == 1 else "s",
                "is" if len(dead) == 1 else "are", ", ".join(dead[:5]))), None
     if not found:

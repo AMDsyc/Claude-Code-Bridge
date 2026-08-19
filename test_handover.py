@@ -2557,6 +2557,46 @@ check("the tree itself is", _rl.names_retired(_bad, _rt), True)
 check("and so is anything inside it",
       _rl.names_retired(os.path.join(_bad, "bridge", "daemon.py"), _rt), True)
 
+print("\n65. a path is allowed to contain a space")
+print("    The acceptance gate refused an honest verdict naming a file the")
+print("    planner had genuinely read, because _TOKEN splits on whitespace")
+print("    and 'Bridge Git\\README.md' arrived as two stumps - neither of")
+print("    which exists, so both were reported as forgeries BY NAME. The")
+print("    planner then stopped naming files in that folder and reached for")
+print("    other paths instead: the verdict passed with less truth in it")
+print("    than before. A check that refuses good work gets worked around,")
+print("    and this one was, the same evening")
+_sp65 = os.path.join(TMP, "with space")
+os.makedirs(_sp65, exist_ok=True)
+_file65 = os.path.join(_sp65, "README.md")
+open(_file65, "w", encoding="utf-8").write("real\n")
+_gone65 = os.path.join(_sp65, "NOPE.md")
+check("quoted, and really there: accepted",
+      daemon.artifact_paths('Checked: "%s"' % _file65, ""), ([_file65], []))
+check("the same in guillemets, which is what this pair types",
+      daemon.artifact_paths("Checked: «%s»" % _file65, ""),
+      ([_file65], []))
+check("alone on its line, unquoted: also accepted",
+      daemon.artifact_paths("Checked: %s" % _file65, ""), ([_file65], []))
+print("   and the gate is not weakened: a quoted path that is NOT there is")
+print("   still refused, by name. That is the half that must not be lost")
+_f65, _d65 = daemon.artifact_paths('Checked: "%s"' % _gone65, "")
+check("quoted but missing: still refused, by name", (_f65, _d65),
+      ([], [_gone65]))
+print("   fail-open is intact: a bare token is never a demand")
+check("section numbers and versions are not paths",
+      daemon.artifact_paths("Checked: §5.17, 2.1.232 and 5.104", ""),
+      ([], []))
+check("quotes round an ordinary word demand nothing",
+      daemon.artifact_paths('Checked: no artifacts - "done"', ""), ([], []))
+print("   what is deliberately NOT guessed: two spaced paths on one line,")
+print("   unquoted. There is no way to tell where the first ends, so the")
+print("   refusal says how to write it rather than inventing a boundary")
+_f2, _d2 = daemon.artifact_paths("Checked: %s and %s" % (_file65, _gone65), "")
+check("it does not silently accept the ambiguous form", _d2 != [], True)
+check("and the refusal tells the writer to quote it",
+      "CONTAINS A SPACE" in inspect.getsource(daemon.verdict_gate), True)
+
 print("\n" + ("-" * 60))
 if FAILED:
     print("FAILED: %d" % len(FAILED))

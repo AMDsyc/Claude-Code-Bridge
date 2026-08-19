@@ -7839,6 +7839,25 @@ def main():
 
     migrate_note()
     migrate_project_keys()
+    # The retired tree stays on disk by the owner's decision, but
+    # nothing is meant to USE it. Saying so in a document is not a
+    # check: the first census found a live process running out of it.
+    # So the bridge asks at every start and says so out loud - it does
+    # not repair anything here, because a setting that points back at
+    # the old tree is somebody's decision to look at, not ours to
+    # silently rewrite.
+    try:
+        _back = relayout.retired_tree_users(CFG)
+    except Exception:
+        _back = []
+    if _back:
+        store.journal("bridge", "%d setting(s) still lead into the "
+                      "retired tree - it is kept on disk but nothing "
+                      "should run from it: %s. Re-run install for "
+                      "those projects."
+                      % (len(_back), "; ".join("%s = %s" % r
+                                              for r in _back[:6])),
+                      level="warn")
     migrate_executor_mode()
     moved = migrate_keys()
     if moved:

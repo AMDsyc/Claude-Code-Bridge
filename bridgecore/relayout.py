@@ -111,6 +111,78 @@ def kept_on_purpose(base=None):
     return os.path.isfile(os.path.join(base, "source", "data", "config.json"))
 
 
+def names_retired(text, base=None):
+    """Does this text name the retired tree, or merely start like it?
+
+    A substring test is wrong here and was wrong in practice: the launcher
+    everybody is meant to use is `<base>\\bridge.bat`, which begins with the
+    same characters as `<base>\\bridge`. The first census of who still used
+    the old tree found exactly one user, and it was this mistake rather
+    than a fact. The path counts only when the component ends after it.
+    """
+    old = os.path.normcase(os.path.join(base or BASE, "bridge"))
+    # Forward slashes and JSON's doubled backslashes both have to fold down
+    # to one form first. A path inside .mcp.json or settings.json is stored
+    # with every separator written twice, and matching the raw text missed
+    # every one of them - the case that catches an .mcp.json relapse is
+    # what found this, after the gate had already been called finished.
+    hay = os.path.normcase(str(text or "")).replace("/", "\\")
+    while "\\\\" in hay:
+        hay = hay.replace("\\\\", "\\")
+    i = 0
+    while True:
+        i = hay.find(old, i)
+        if i < 0:
+            return False
+        if hay[i + len(old):i + len(old) + 1] in ("", "\\", '"', "'", " ", ";"):
+            return True
+        i += 1
+
+
+def retired_tree_users(config, base=None):
+    """Every place that would send work back into the retired tree.
+
+    The owner's requirement is not that the folder disappear - it stays -
+    but that nothing use it. That was an assertion until it was checked,
+    and checking found a live channel process running out of it. So the
+    question gets asked by the bridge from now on, rather than remembered.
+
+    Returns a list of (place, value). Empty is the healthy answer. Nothing
+    here changes a setting: it reports, and the caller decides.
+    """
+    base = base or BASE
+    found = []
+    for path in (config.get("projects") or {}):
+        if names_retired(path, base):
+            found.append(("a watched project", path))
+        s = os.path.join(path, ".claude", "settings.json")
+        try:
+            with io.open(s, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        env = data.get("env") or {}
+        for key in ("PYTHONPATH", "PYTHONSAFEPATH"):
+            if names_retired(env.get(key), base):
+                found.append(("%s env %s" % (path, key), env.get(key)))
+        for _event, entries in (data.get("hooks") or {}).items():
+            for entry in entries or []:
+                for h in entry.get("hooks") or []:
+                    if names_retired(h.get("command"), base):
+                        found.append(("%s hook" % path, h.get("command")))
+        if names_retired(json.dumps(data.get("statusLine") or {}), base):
+            found.append(("%s statusLine" % path, "see settings.json"))
+        m = os.path.join(path, ".mcp.json")
+        try:
+            with io.open(m, encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError:
+            text = ""
+        if names_retired(text, base):
+            found.append(("%s .mcp.json" % path, "names the retired tree"))
+    return found
+
+
 def pending(base=None):
     """Is there an old tree still to move?
 

@@ -2505,6 +2505,58 @@ for _mod, _name in ((__import__("bridgecore.hook", fromlist=["x"]), "hook"),
     check("%s takes its port from BRIDGE_PORT" % _name,
           'BRIDGE_PORT' in inspect.getsource(_mod), True)
 
+print("\n64. nothing may lead back into the retired tree")
+print("    The folder stays - that was the owner's decision - but nothing")
+print("    is to USE it. That was an assertion until it was checked, and")
+print("    the check found a live channel process running out of it. So the")
+print("    question is asked by the code now instead of being remembered")
+_rt = os.path.join(TMP, "retire")
+_proj = os.path.join(_rt, "aproject")
+os.makedirs(os.path.join(_proj, ".claude"), exist_ok=True)
+os.makedirs(os.path.join(_rt, "bridge"), exist_ok=True)
+
+
+def _settings(pypath, hook):
+    with open(os.path.join(_proj, ".claude", "settings.json"), "w",
+              encoding="utf-8") as fh:
+        _json.dump({"env": {"PYTHONPATH": pypath, "PYTHONSAFEPATH": "1"},
+                   "hooks": {"Stop": [{"hooks": [{"command": hook}]}]}}, fh)
+
+
+_good = os.path.join(_rt, "source")
+_bad = os.path.join(_rt, "bridge")
+_cfg64 = {"projects": {_proj: {}}}
+_settings(_good, "python -m bridgecore.hook")
+check("healthy settings name nothing retired",
+      _rl.retired_tree_users(_cfg64, _rt), [])
+print("   and it has to go red on the real shapes of a relapse, one by one")
+_settings(_bad, "python -m bridgecore.hook")
+_hits = _rl.retired_tree_users(_cfg64, _rt)
+check("PYTHONPATH pointing back at it is caught",
+      [p for p, _v in _hits if "PYTHONPATH" in p] != [], True)
+_settings(_good, os.path.join(_bad, "hook.py"))
+_hits = _rl.retired_tree_users(_cfg64, _rt)
+check("a hook command reaching into it is caught",
+      [p for p, _v in _hits if p.endswith("hook")] != [], True)
+_settings(_good, "python -m bridgecore.hook")
+with open(os.path.join(_proj, ".mcp.json"), "w", encoding="utf-8") as fh:
+    fh.write(_json.dumps({"mcpServers": {"bridge": {"args": [_bad]}}}))
+check("an .mcp.json reaching into it is caught",
+      [p for p, _v in _rl.retired_tree_users(_cfg64, _rt)
+       if ".mcp.json" in p] != [], True)
+os.remove(os.path.join(_proj, ".mcp.json"))
+check("and the tree itself being watched as a project is caught",
+      [p for p, _v in _rl.retired_tree_users({"projects": {_bad: {}}}, _rt)
+       if "watched project" in p] != [], True)
+print("   the launcher is NOT a user: <base>\\bridge.bat begins with the")
+print("   same letters as <base>\\bridge, and a substring test called it")
+print("   one - the only 'user' the first census found was that bug")
+check("bridge.bat is not mistaken for the tree",
+      _rl.names_retired(os.path.join(_rt, "bridge.bat"), _rt), False)
+check("the tree itself is", _rl.names_retired(_bad, _rt), True)
+check("and so is anything inside it",
+      _rl.names_retired(os.path.join(_bad, "bridge", "daemon.py"), _rt), True)
+
 print("\n" + ("-" * 60))
 if FAILED:
     print("FAILED: %d" % len(FAILED))

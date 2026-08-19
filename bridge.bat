@@ -4,6 +4,7 @@ set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
 setlocal
 cd /d "%~dp0"
+if exist "source\bridgecore\daemon.py" cd source
 title Bridge
 
 echo.
@@ -13,7 +14,7 @@ echo.
 echo   Folder: %CD%
 echo.
 
-if not exist "bridge\daemon.py" goto nolayout
+if not exist "bridgecore\daemon.py" goto nolayout
 
 set "PY="
 where py >nul 2>&1 && set "PY=py"
@@ -29,7 +30,7 @@ echo   Starting. Your browser will open when it is ready.
 echo   Keep this window open. Close it, or press Ctrl+C, to stop.
 echo.
 
-%PY% -m bridge.daemon %*
+%PY% -m bridgecore.daemon %*
 
 echo.
 echo   The bridge stopped. If that was not on purpose, the reason is above.

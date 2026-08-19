@@ -113,7 +113,7 @@ os.environ["BRIDGE_TELEGRAM_API"] = "http://127.0.0.1:%d" \
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from bridge import archive, daemon, sessions, store, telegram   # noqa: E402
+from bridgecore import archive, daemon, sessions, store, telegram   # noqa: E402
 
 FAILED = []
 
@@ -399,7 +399,7 @@ check("an addressed one lands on its project only",
 check("the panel's own button sends the project it is showing",
       'cmd:"note",text:$("#noteInput").value,project:CUR' in
       open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "bridge", "panel.html"), encoding="utf-8").read(),
+                        "bridgecore", "panel.html"), encoding="utf-8").read(),
       True)
 
 print("\n5. resume with nothing named is the everything-back-to-normal button")
@@ -562,7 +562,7 @@ check("alpha's own newest row is alpha's", mine[-1]["why"], "alpha ran out")
 check("which is not the newest row of the whole bridge",
       hist[-1]["why"], "beta ran out")
 psrc = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         "bridge", "panel.html"), encoding="utf-8").read()
+                         "bridgecore", "panel.html"), encoding="utf-8").read()
 check("so the panel filters by the project it is showing",
       "hlAll.filter(function(r){return r.path&&forCur(r.path)})" in psrc,
       True)
@@ -949,7 +949,14 @@ check("neither waiter was touched",
       [daemon.PENDING[canon(p)].get("verdict") for p in (A, B)],
       [None, None])
 
-said = daemon.run_telegram_command("/verdict @beta continue BETA-BY-NAME")
+for _p in (A, B):
+    with open(os.path.join(_p, "seen.txt"), "w", encoding="utf-8") as _fh:
+        _fh.write("read by the planner" + chr(10))
+# The chat path meets the same gate as every other door now, so this needs
+# a block. The case is about WHICH pair a chat command reaches, not about
+# acceptance - a refusal before addressing would test the gate instead.
+said = daemon.run_telegram_command(
+    "/verdict @beta continue BETA-BY-NAME. Checked: seen.txt")
 check("addressed by name, it goes to that one", "beta: verdict continue" in
       said, True)
 check("and it leads with beta's colour", said.startswith(marks["beta"]), True)
@@ -969,8 +976,8 @@ _mid = [p.get("message_id") for m, p in TG_CALLS if m == "sendMessage"]
 _anchor = sorted(daemon.MSGPROJ)[-1]
 check("the bridge remembered which pair that message was about",
       daemon.MSGPROJ.get(_anchor), canon(A))
-said = daemon.run_telegram_command("/verdict continue BY-REPLY",
-                                   reply_to=_anchor)
+said = daemon.run_telegram_command(
+    "/verdict continue BY-REPLY. Checked: seen.txt", reply_to=_anchor)
 check("the reply is the address", "alpha: verdict continue" in said, True)
 t2a.join(30)
 check("alpha was released by it", t2a.is_alive(), False)
@@ -1097,7 +1104,7 @@ check("a line carries the path the strip labels it by",
 
 print("   and the panel itself still holds the shape the earlier cases fixed")
 psrc7 = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "bridge", "panel.html"), encoding="utf-8").read()
+                          "bridgecore", "panel.html"), encoding="utf-8").read()
 check("eight windows, the strip is not a ninth", psrc7.count("<section"), 8)
 check("the strip draws from the daemon's rows, not its own arithmetic",
       "var box=$(\"#pairs\"),rows=D.pairs||{}" in psrc7, True)
@@ -1593,7 +1600,7 @@ RDONE = []
 threading.Thread(
     target=lambda: RDONE.append(stop_hook(
         RPROJ, "executor", RSID,
-        "Fixed the path parsing in bridge/store.py, all suites green.")),
+        "Fixed the path parsing in bridgecore/store.py, all suites green.")),
     daemon=True).start()
 check("the report is waiting", until(lambda: daemon.PENDING.get(canon(RPROJ))),
       True)
@@ -1609,7 +1616,7 @@ check("the report is untouched by the refusal",
       bool(daemon.PENDING.get(canon(RPROJ))), True)
 r = post("/verdict", {"project": RPROJ, "verdict": "done",
                       "feedback": "Checked: run.log\n"
-                                  "Residence: bridge/store.py:norm"},
+                                  "Residence: bridgecore/store.py:norm"},
          secret=True)
 check("with the residence line it goes through", r.get("ok"), True)
 check("and the executor is released", until(lambda: RDONE), True)
@@ -1678,7 +1685,7 @@ print("   it never blocks - blocking would only teach the pair to stop")
 print("   saying the word - so the verdict goes through with the debt open")
 r = post("/verdict", {"project": DPROJ, "verdict": "done",
                       "feedback": "Checked: run.log\n"
-                                  "Residence: bridge/store.py:norm"},
+                                  "Residence: bridgecore/store.py:norm"},
          secret=True)
 check("the piece is accepted", r.get("ok"), True)
 check("and the debt is still standing", len(daemon.open_debt(DPROJ)), 1)

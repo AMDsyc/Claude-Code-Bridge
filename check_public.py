@@ -183,8 +183,39 @@ def unexpected(name):
     return not name.lower().endswith(PUBLISHABLE_SUFFIX)
 
 
+# One name must mean one file. This is not a privacy rule, it is the rule
+# the layout was rebuilt around on 2026-08-19: the working tree had three
+# levels all called `bridge` and a `bridge.bat` in four places, and the owner
+# deleted the live package because he could not tell which folder was the
+# real one. A scanner that would have said "bridge.bat - 4 places" before the
+# commit is cheaper than that morning was.
+#
+# __init__.py is the one name a Python tree may legitimately repeat, once per
+# package. It is listed rather than guessed at, so a second exception has to
+# be argued for in writing.
+DUPLICATE_OK = {"__init__.py"}
+
+
+def duplicates(folder):
+    """Every basename that exists in more than one place. Names only."""
+    where = {}
+    for root, dirs, names in os.walk(folder):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for name in names:
+            rel = os.path.relpath(os.path.join(root, name),
+                                  folder).replace("\\", "/")
+            where.setdefault(name, []).append(rel)
+    return [(name, places) for name, places in sorted(where.items())
+            if len(places) > 1 and name not in DUPLICATE_OK]
+
+
 def scan(folder):
     found, files = [], 0
+    for name, places in duplicates(folder):
+        found.append((", ".join(places), 0, "duplicate file name", name,
+                      "one name in %d places - a reader cannot tell which is "
+                      "the real one, and an editor can change the copy that "
+                      "is not read" % len(places)))
     for root, dirs, names in os.walk(folder):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for d in dirs:
@@ -227,7 +258,7 @@ def main():
         out.append("личных данных не найдено / no personal data found")
         out.append("")
         out.append("checked for: " + ", ".join(k for k, _ in RULES)
-                   + ", cyrillic")
+                   + ", cyrillic, duplicate file name")
         out.append("exceptions used: the authorship and copyright lines, "
                    "this scanner's own source, and the documented "
                    "placeholder forms (C:\\path\\to\\..., session_XXXX)")

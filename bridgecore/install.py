@@ -20,7 +20,7 @@ Writes hooks and a status line into <project>/.claude/settings.json,
 merging with whatever is already there. Existing hooks are kept: if the
 project already has a Stop hook, the bridge is added alongside it.
 
-    python -m bridge.install "C:\\path\\to\\project" --role executor
+    python -m bridgecore.install "C:\\path\\to\\project" --role executor
 """
 
 import argparse
@@ -40,7 +40,7 @@ def hook_entry(python, event=""):
     return {
         "type": "command",
         "command": python,
-        "args": ["-m", "bridge.hook"],
+        "args": ["-m", "bridgecore.hook"],
         # Stop may block while the planner reviews; everything else is quick
         "timeout": 1800 if event == "Stop" else 30,
         "statusMessage": "bridge",
@@ -62,7 +62,7 @@ def write_mcp_json(project, python):
     servers = data.setdefault("mcpServers", {})
     servers["bridge"] = {
         "command": python,
-        "args": ["-m", "bridge.channel"],
+        "args": ["-m", "bridgecore.channel"],
         "env": {
             "PYTHONPATH": ROOT,
             "BRIDGE_PORT": os.environ.get("BRIDGE_PORT", "8765"),
@@ -206,7 +206,7 @@ def install(project, role=None, python=None, statusline=True):
         if "statusLine" not in cfg or "bridge" in existing:
             cfg["statusLine"] = {
                 "type": "command",
-                "command": '"%s" -m bridge.statusline' % python,
+                "command": '"%s" -m bridgecore.statusline' % python,
                 "padding": 0,
             }
 
@@ -220,12 +220,12 @@ def install(project, role=None, python=None, statusline=True):
     env["PYTHONPATH"] = ROOT
     # And keep the CURRENT DIRECTORY off sys.path.
     #
-    # The hooks are spawned as `python -m bridge.hook`, and with -m Python
+    # The hooks are spawned as `python -m bridgecore.hook`, and with -m Python
     # puts the working directory FIRST on sys.path - ahead of PYTHONPATH. So
     # any folder the session happens to be sitting in that contains a
     # `bridge/` package shadows the installed one, and the hook that runs is
     # that copy. Measured, not supposed: with PYTHONPATH pointing at the real
-    # bridge, `import bridge.hook` from a folder holding a second copy loaded
+    # bridge, `import bridgecore.hook` from a folder holding a second copy loaded
     # the second copy, and left its __pycache__ there.
     #
     # It happened here because a public copy of this project was assembled in
@@ -279,7 +279,7 @@ def uninstall(project):
                 groups = hooks.get(ev) or []
                 for g in groups:
                     keep = [h for h in (g.get("hooks") or [])
-                            if h.get("args") != ["-m", "bridge.hook"]]
+                            if h.get("args") != ["-m", "bridgecore.hook"]]
                     if len(keep) != len(g.get("hooks") or []):
                         removed.append("hook %s" % ev)
                     g["hooks"] = keep
@@ -293,7 +293,7 @@ def uninstall(project):
             else:
                 cfg.pop("hooks", None)
 
-            if "bridge.statusline" in json.dumps(cfg.get("statusLine", "")):
+            if "bridgecore.statusline" in json.dumps(cfg.get("statusLine", "")):
                 cfg.pop("statusLine", None)
                 removed.append("status line")
 

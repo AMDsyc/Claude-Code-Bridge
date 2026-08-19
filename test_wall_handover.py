@@ -45,7 +45,7 @@ os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(TMP, "claude-home")
 os.environ["PYTHONUTF8"] = "1"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from bridge import daemon, sessions, store, telegram      # noqa: E402
+from bridgecore import daemon, sessions, store, telegram      # noqa: E402
 
 FAILED = []
 STEP = [0]

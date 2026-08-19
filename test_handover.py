@@ -36,7 +36,7 @@ os.environ["BRIDGE_DATA"] = os.path.join(TMP, "data")
 os.environ["PYTHONUTF8"] = "1"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from bridge import daemon, store            # noqa: E402
+from bridgecore import daemon, store            # noqa: E402
 
 PATH = os.path.join(TMP, "proj")
 os.makedirs(PATH, exist_ok=True)
@@ -329,7 +329,7 @@ check("absent and refused are told apart",
 
 print("\n20. the channel waits longer than the bridge can take")
 csrc = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         "bridge", "channel.py"), encoding="utf-8").read()
+                         "bridgecore", "channel.py"), encoding="utf-8").read()
 check("the task call gets its own timeout", "timeout=60" in csrc, True)
 check("a timed-out call is not reported as a dead bridge",
       "do not say the bridge is down" in csrc, True)
@@ -397,7 +397,7 @@ check("plan is the routine one", daemon.plan_for(pl, PATH)["do"], "compacting")
 
 print("\n23. the channel answers the daemon before it writes to stdout")
 csrc = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         "bridge", "channel.py"), encoding="utf-8").read()
+                         "bridgecore", "channel.py"), encoding="utf-8").read()
 check("inbound events are queued, not written inline",
       "_outbox.put_nowait" in csrc, True)
 check("a writer thread drains them", "_drain_outbox" in csrc, True)
@@ -413,7 +413,7 @@ for role, want in (("executor", True), ("unknown", False)):
     check("%s record" % role,
           daemon.STATE["sessions"]["%s:channel" % role]["managed"], want)
 psrc = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         "bridge", "panel.html"), encoding="utf-8").read()
+                         "bridgecore", "panel.html"), encoding="utf-8").read()
 check("the panel hides by role, not only by the flag",
       'r==="executor"||r==="planner"' in psrc, True)
 check("and it is applied to every session row", psrc.count("ours(s)"), 4)
@@ -479,7 +479,7 @@ check("and delivers on a thread",
 
 print("\n30. the planner can start the loop it stopped")
 csrc = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         "bridge", "channel.py"), encoding="utf-8").read()
+                         "bridgecore", "channel.py"), encoding="utf-8").read()
 check("there is a loop tool", '"name": "loop"' in csrc, True)
 check("with start and stop", '"enum": ["start", "stop"]' in csrc, True)
 check("and the planner is told when to use it",
@@ -521,7 +521,7 @@ check("and calls that one routine", "which is routine" in rep, True)
 check("and does not repeat the reason as a note afterwards",
       rep.count("cannot be sized"), 1)
 psrc = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         "bridge", "panel.html"), encoding="utf-8").read()
+                         "bridgecore", "panel.html"), encoding="utf-8").read()
 check("the panel has a branch for it", "L0.sizeable===false" in psrc, True)
 check("the one-bar-from-a-total is gone from both branches",
       # This used to read "still only the sizeable branch": one bar drawn
@@ -580,7 +580,7 @@ VALID = ("text", "image", "audio", "resource_link", "resource")
 
 
 def _blocks(name, args, replies):
-    import bridge.channel as ch
+    import bridgecore.channel as ch
     real, ch.post_daemon = ch.post_daemon, lambda *a, **k: replies
     try:
         r = ch.handle_request({"jsonrpc": "2.0", "id": 1,
@@ -595,7 +595,7 @@ def _blocks_result(name, args, replies):
     """The whole result object, not just its content blocks - isError lives
     on the result, and it is the difference between a refusal the caller
     cannot miss and one it reads as a confirmation."""
-    import bridge.channel as ch
+    import bridgecore.channel as ch
     real, ch.post_daemon = ch.post_daemon, lambda *a, **k: replies
     try:
         r = ch.handle_request({"jsonrpc": "2.0", "id": 1,
@@ -623,7 +623,7 @@ print("\n35. one definition of carried context, whatever reads it")
 print("    the transcript path used to add output_tokens while the status")
 print("    line did not, and both wrote to the same field - so a turn cost")
 print("    could be the difference between two different quantities")
-from bridge import archive, sessions                        # noqa: E402
+from bridgecore import archive, sessions                        # noqa: E402
 tdir = os.path.join(TMP, "transcripts")
 os.makedirs(tdir, exist_ok=True)
 tpath = os.path.join(tdir, "carried.jsonl")
@@ -668,7 +668,7 @@ print("    the subtitle looked up CUR before CUR had been defaulted. And the")
 print("    headline itself came from a global read - the anyLoop 9 rejects,")
 print("    which with two projects claims LOOP ON while showing the other")
 psrc2 = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "bridge", "panel.html"), encoding="utf-8").read()
+                          "bridgecore", "panel.html"), encoding="utf-8").read()
 head = psrc2[psrc2.index("function renderPanel(){"):
              psrc2.index('$("#stateSub").textContent=')]
 check("the project is settled before anything is drawn from it",
@@ -897,7 +897,7 @@ check("which is more than the one pair's worth it used to keep",
 print("   a row written before rows carried a project is not shown as this")
 print("   project's - attribution is never guessed, and never silently lost")
 psrc40 = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "bridge", "panel.html"), encoding="utf-8").read()
+                           "bridgecore", "panel.html"), encoding="utf-8").read()
 check("the panel filters the log by the project it is showing",
       "hlAll.filter(function(r){return r.path&&forCur(r.path)})" in psrc40,
       True)
@@ -1065,7 +1065,7 @@ print("    said in both places a role is instructed, because a session gets")
 print("    one of them at a time: the channel's instructions arrive with a")
 print("    NEW session, the seed only after the daemon has been restarted")
 csrc44 = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "bridge", "channel.py"), encoding="utf-8").read()
+                           "bridgecore", "channel.py"), encoding="utf-8").read()
 # The seed's paragraph is a constant, not a run of literals wrapped across
 # a dozen source lines - so it can be read as the one string it is. That is
 # the whole reason it is a constant: an assertion on wrapped prose tests
@@ -1150,7 +1150,7 @@ check("with the reason where it belongs",
       bool(lv45c.get("why_blank")), True)
 print("   the panel draws the bar from that field and nothing else")
 psrc45 = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "bridge", "panel.html"), encoding="utf-8").read()
+                           "bridgecore", "panel.html"), encoding="utf-8").read()
 check("segments, from the life fraction",
       "segbar(L0.budget,L0.done,L0.life_frac" in psrc45, True)
 check("and the percentage it prints is the life one",
@@ -1269,7 +1269,7 @@ check("and it is not inside the planner-only branch",
 print("   the channel carries it too, read from the same file rather than")
 print("   copied - one text, and editing the file changes both")
 csrc47 = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "bridge", "channel.py"), encoding="utf-8").read()
+                           "bridgecore", "channel.py"), encoding="utf-8").read()
 check("the channel reads it", "def _honesty()" in csrc47, True)
 check("from the file, not from a copy of the words",
       '"HONESTY.md"' in csrc47, True)
@@ -1294,8 +1294,8 @@ print("   called \"z9\" - and a gate that refuses good work gets switched off")
 _here = os.path.dirname(os.path.abspath(__file__))
 _good, _dead = daemon.artifact_paths(
     "looked at zones z9/z10, rule 5.17, version 2.1.232 and the file "
-    "bridge/store.py", _here)
-check("a real path inside the project is found", "bridge/store.py" in _good,
+    "bridgecore/store.py", _here)
+check("a real path inside the project is found", "bridgecore/store.py" in _good,
       True)
 check("and none of the prose is called a missing file", _dead, [])
 _good2, _dead2 = daemon.artifact_paths("out/nowhere/render.png", _here)
@@ -1316,7 +1316,7 @@ check("and its refusal names why, not just that it failed",
       "hearsay" in daemon.verdict_gate(_here, "continue", "looks fine")[1],
       True)
 check("a continue with something real to open goes through",
-      daemon.verdict_gate(_here, "continue", "Checked: bridge/store.py")[0],
+      daemon.verdict_gate(_here, "continue", "Checked: bridgecore/store.py")[0],
       True)
 for _v in ("done", "stop"):
     _ok, _why, _kind = daemon.verdict_gate(_here, _v, "accepted, good")
@@ -1324,7 +1324,7 @@ for _v in ("done", "stop"):
     check("and the refusal tells the planner what to write, not that it "
       "failed", "Checked:" in _why, True)
 _ok, _why, _kind = daemon.verdict_gate(_here, "done",
-                                       "Checked: bridge/store.py")
+                                       "Checked: bridgecore/store.py")
 check("a block naming something real passes, tagged as artefacts",
       (_ok, _kind), (True, "artifacts"))
 print("   the named exit, and why its length is not the point")
@@ -1363,7 +1363,7 @@ _settings = os.path.join(_proj, ".claude", "settings.json")
 _theirs = {"type": "command", "command": "their-own-thing", "args": ["--x"]}
 with open(_settings, "w", encoding="utf-8") as fh:
     _json.dump({"hooks": {"PreToolUse": [{"hooks": [dict(_theirs)]}]}}, fh)
-from bridge import install as _install                        # noqa: E402
+from bridgecore import install as _install                        # noqa: E402
 check("PreToolUse is one of the events the installer writes",
       "PreToolUse" in _install.EVENTS, True)
 _install.install(_proj, python=sys.executable, statusline=False)
@@ -1371,7 +1371,7 @@ with open(_settings, encoding="utf-8") as fh:
     _cfg = _json.load(fh)
 _pre = [h for g in _cfg["hooks"]["PreToolUse"] for h in g.get("hooks", [])]
 check("the bridge hook is there after install",
-      any(h.get("args") == ["-m", "bridge.hook"] for h in _pre), True)
+      any(h.get("args") == ["-m", "bridgecore.hook"] for h in _pre), True)
 check("and the project's own hook was kept, not overwritten",
       any(h.get("command") == "their-own-thing" for h in _pre), True)
 print("   and the current directory is kept off sys.path, so a second copy")
@@ -1381,8 +1381,11 @@ print("   puts cwd FIRST, ahead of PYTHONPATH - a public copy assembled in a")
 print("   subfolder of a watched project was the hook that actually ran")
 with open(_settings, encoding="utf-8") as fh:
     _env = (_json.load(fh).get("env") or {})
-check("the installer writes PYTHONPATH at the bridge",
-      _env.get("PYTHONPATH", "").endswith("bridge"), True)
+check("the installer writes PYTHONPATH at the folder holding the "
+      "package, so the hooks import it by name wherever they run",
+      _env.get("PYTHONPATH", ""),
+      os.path.dirname(os.path.dirname(
+          os.path.abspath(_install.__file__))))
 check("and PYTHONSAFEPATH, which is what keeps cwd out of it",
       _env.get("PYTHONSAFEPATH"), "1")
 check("the role is never written here - it belongs to a window",
@@ -1393,7 +1396,7 @@ with open(_settings, encoding="utf-8") as fh:
 _pre2 = [h for g in (_cfg2.get("hooks") or {}).get("PreToolUse", [])
          for h in g.get("hooks", [])]
 check("uninstall takes the bridge hook out by identity",
-      any(h.get("args") == ["-m", "bridge.hook"] for h in _pre2), False)
+      any(h.get("args") == ["-m", "bridgecore.hook"] for h in _pre2), False)
 check("and leaves theirs alone",
       any(h.get("command") == "their-own-thing" for h in _pre2), True)
 with open(_settings, encoding="utf-8") as fh:
@@ -1459,7 +1462,7 @@ print("   the code detector fires on a NAMED file, a diff or a commit - never")
 print("   on words. A false demand teaches the pair to write a meaningless")
 print("   residence line to get past it")
 check("a named source file is a code change",
-      daemon.touched_code("edited bridge/daemon.py, the suites are green"), True)
+      daemon.touched_code("edited bridgecore/daemon.py, the suites are green"), True)
 check("so is a diff", daemon.touched_code("@@ -1,4 +1,6 @@\n x"), True)
 check("so is a commit", daemon.touched_code("commit a7474c0 on main"), True)
 check("but words alone are not",
@@ -1468,7 +1471,7 @@ check("and prose that looks like paths is not",
       daemon.touched_code("looked at zones z9/z10 and rule 5.17"), False)
 print("   a residence line has to name a PLACE - 'yes' is not an answer")
 check("file:function counts",
-      daemon.residence_ok("Residence: bridge/daemon.py:verdict_gate"), True)
+      daemon.residence_ok("Residence: bridgecore/daemon.py:verdict_gate"), True)
 check("a dotted identifier chain counts",
       daemon.residence_ok("Residence: store.norm"), True)
 check("a named test counts",
@@ -1512,16 +1515,16 @@ _ns = {}
 exec(compile(open(_vp, encoding="utf-8").read(), _vp, "exec"), _ns)
 check("it checks every file the package snippet lists, itself included - "
       "a package its recipient cannot verify is a weaker package",
-      (len(_ns["FILES"]), "verify_package.py" in _ns["FILES"],
-       "HONESTY_CASES.md" in _ns["FILES"],
-       "LICENSE" in _ns["FILES"]), (27, True, True, True))
+      (len(_ns["FILES"]), "source/verify_package.py" in _ns["FILES"],
+       "source/HONESTY_CASES.md" in _ns["FILES"],
+       "source/LICENSE" in _ns["FILES"]), (27, True, True, True))
 _repo = os.path.join(TMP, "pkgrepo")
 _unp = os.path.join(TMP, "pkgunp")
-for _d in (_repo, _unp):
-    os.makedirs(os.path.join(_d, "bridge"), exist_ok=True)
 for _rel in _ns["FILES"]:
     for _d in (_repo, _unp):
-        with open(os.path.join(_d, _rel), "w", encoding="utf-8") as fh:
+        _p = os.path.join(_d, _rel)
+        os.makedirs(os.path.dirname(_p), exist_ok=True)
+        with open(_p, "w", encoding="utf-8") as fh:
             fh.write("content of " + _rel + "\n")
 _zip = os.path.join(TMP, "good.zip")
 with _zf.ZipFile(_zip, "w") as z:
@@ -1533,22 +1536,24 @@ check("a package built from the tested tree matches everywhere",
 _tampered = os.path.join(TMP, "tampered.zip")
 with _zf.ZipFile(_tampered, "w") as z:
     for _rel in _ns["FILES"]:
-        if _rel == "bridge/daemon.py":
+        if _rel == "source/bridgecore/daemon.py":
             z.writestr(_rel, "content of bridge/daemon.py\n# and one more line\n")
         else:
             z.write(os.path.join(_repo, _rel), _rel)
 _rows2, _bad2, _extra2, _names2 = _ns["compare"](_repo, _tampered, _unp)
 check("one changed file in the archive is caught, and named",
-      _bad2, ["bridge/daemon.py"])
+      _bad2, ["source/bridgecore/daemon.py"])
 check("the others still match", len(_bad2), 1)
 _extra_zip = os.path.join(TMP, "extra.zip")
 with _zf.ZipFile(_extra_zip, "w") as z:
     for _rel in _ns["FILES"]:
         z.write(os.path.join(_repo, _rel), _rel)
-    z.writestr("bridge/bridge/daemon.py", "the stale nested copy\n")
+    z.writestr("source/bridgecore/bridge/daemon.py",
+               "the stale nested copy\n")
 _r3, _b3, _e3, _n3 = _ns["compare"](_repo, _extra_zip, _unp)
 check("an entry that is not on the list is caught too - that is how the "
-      "stale nested copy would get in", _e3, ["bridge/bridge/daemon.py"])
+      "stale nested copy would get in", _e3,
+      ["source/bridgecore/bridge/daemon.py"])
 print("   and rule 24 applied to this very document: a rule whose check")
 print("   names a function must have that function")
 _canon = daemon.honesty_text() + "\n" + daemon.honesty_cases_text()

@@ -36,7 +36,7 @@ os.environ["BRIDGE_DATA"] = os.path.join(TMP, "data")
 os.environ["PYTHONUTF8"] = "1"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from bridge import archive                        # noqa: E402
+from bridgecore import archive                        # noqa: E402
 
 FAILED = []
 

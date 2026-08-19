@@ -20,7 +20,7 @@ Everything meets here: hook events, status-line telemetry, the review loop
 through the planner's live session, context calibration and rotation, plan
 limits, stuck-process tracking, Telegram, the panel.
 
-Runs on 127.0.0.1 only. Start with bridge.bat or python -m bridge.daemon.
+Runs on 127.0.0.1 only. Start with bridge.bat or python -m bridgecore.daemon.
 """
 
 import json
@@ -5868,9 +5868,21 @@ def run_telegram_command(text, reply_to=None):
             waiter = PENDING.get(path)
             if not waiter:
                 return "%s %s: no report is waiting." % (mark, name_of(path))
+            # The door beside the door. This path answered the waiter
+            # directly, so a verdict typed in the chat reached the executor
+            # without meeting the gate the tool and the HTTP endpoint both
+            # go through. A lock on one of the ways in is not a lock on the
+            # resource.
+            okg, whyg, kindg = verdict_gate(path, cmd["verdict"], cmd["text"])
+            if not okg:
+                return ("%s %s: NOT accepted. %s" % (mark, name_of(path),
+                                                     whyg))
+            if kindg == "none":
+                note_no_artifacts(path, name_of(path), whyg)
             waiter["verdict"] = cmd["verdict"]
             waiter["feedback"] = cmd["text"]
             waiter["event"].set()
+            clear_silence(path, name_of(path))
             return "%s %s: verdict %s delivered." % (mark, name_of(path),
                                                      cmd["verdict"])
         if name == "note":

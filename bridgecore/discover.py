@@ -76,7 +76,7 @@ def is_installed(project_dir):
     path = os.path.join(project_dir, ".claude", "settings.json")
     try:
         with open(path, "r", encoding="utf-8") as fh:
-            return "bridge.hook" in fh.read()
+            return "bridgecore.hook" in fh.read()
     except Exception:
         return False
 

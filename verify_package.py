@@ -20,7 +20,7 @@
 Running the suites from an unpacked copy proves the copy WORKS. It does not
 prove the copy is the code that was reviewed: a file could be stale, a build
 could have picked up a different tree, a zip entry could have been written
-twice. This compares sha256 of every one of the 23 files across all three
+twice. This compares sha256 of every one of the 27 files across all three
 places - repository, archive entry, unpacked file - and a package that does
 not match on all three is not delivered, it is a failed build.
 
@@ -36,20 +36,27 @@ import zipfile
 # This file is IN the list, and on purpose: a package whose recipient cannot
 # check it is a weaker package. It is not a diagnostic like probe_context.py -
 # it is the recipe's own proof, and it travels with what it proves.
-FILES = ["bridge.bat", "add-project.bat", "README.md", "LICENSE",
-         "HONESTY.md",
+# The archive mirrors the working layout exactly, so an unpacked
+# package IS a working bridge. Shipping it flat instead would need a
+# second bridge.bat with different contents, and one name meaning two
+# files is what this layout was rebuilt to end.
+FILES = ["bridge.bat", "add-project.bat",
+         "source/README.md", "source/LICENSE", "source/HONESTY.md",
          # The evidence half ships with the package - the suites read it and
          # a pair's own history is part of the product. It is a different
          # question from the PUBLIC repository, where it must never go: it
          # quotes private messages and names closed projects.
-         "HONESTY_CASES.md", "verify_package.py", "test_cases.py",
-         "test_handover.py", "test_archive.py", "test_search.py",
-         "test_wall_handover.py", "test_multipair.py",
-         "bridge/__init__.py", "bridge/archive.py", "bridge/channel.py",
-         "bridge/daemon.py", "bridge/discover.py", "bridge/hook.py",
-         "bridge/install.py", "bridge/models.py", "bridge/panel.html",
-         "bridge/remote.py", "bridge/sessions.py", "bridge/statusline.py",
-         "bridge/store.py", "bridge/telegram.py"]
+         "source/HONESTY_CASES.md", "source/verify_package.py",
+         "source/test_cases.py", "source/test_handover.py",
+         "source/test_archive.py", "source/test_search.py",
+         "source/test_wall_handover.py", "source/test_multipair.py",
+         "source/bridgecore/__init__.py", "source/bridgecore/archive.py",
+         "source/bridgecore/channel.py", "source/bridgecore/daemon.py",
+         "source/bridgecore/discover.py", "source/bridgecore/hook.py",
+         "source/bridgecore/install.py", "source/bridgecore/models.py",
+         "source/bridgecore/panel.html", "source/bridgecore/remote.py",
+         "source/bridgecore/sessions.py", "source/bridgecore/statusline.py",
+         "source/bridgecore/store.py", "source/bridgecore/telegram.py"]
 
 
 def sha(data):
@@ -118,9 +125,10 @@ def main():
     out.append("files listed   : %d" % len(FILES))
     out.append("entries in zip : %d" % len(names))
     out.append("unexpected     : %s" % (", ".join(extra) if extra else "none"))
-    out.append("nested copy    : %s"
-               % (", ".join(n for n in names if n.startswith("bridge/bridge"))
-                  or "none - the stale bridge/bridge/bridge never packaged"))
+    out.append("stray nesting  : %s"
+               % (", ".join(n for n in names
+                            if n.startswith("source/bridgecore/bridge"))
+                  or "none - the package holds modules only"))
     out.append("")
     ok = not bad and not extra and len(names) == len(FILES)
     out.append("RESULT: %s" % (("all %d files identical in repository, "

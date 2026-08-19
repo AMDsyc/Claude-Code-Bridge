@@ -50,7 +50,7 @@ os.environ["PYTHONUTF8"] = "1"
 os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(TMP, "claude-home")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from bridge import archive, daemon, store          # noqa: E402
+from bridgecore import archive, daemon, store          # noqa: E402
 
 FAILED = []
 
@@ -304,7 +304,7 @@ check("and it is an interpreter plus a script",
       os.path.basename(good_stub()[0]).lower().startswith("python"), True)
 check("the client's own store is inside the temp folder too",
       os.environ["CLAUDE_CONFIG_DIR"].startswith(TMP), True)
-from bridge import discover                                  # noqa: E402
+from bridgecore import discover                                  # noqa: E402
 check("and a bridge-logs folder is never offered as a project",
       discover._ours(os.path.join(TMP, "proj", "bridge-logs")), True)
 check("nor one nested deeper in it",

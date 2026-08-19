@@ -57,7 +57,7 @@ bridge.bat
 on Windows, or
 
 ```
-python -m bridge.daemon
+python -m bridgecore.daemon
 ```
 
 anywhere. It starts the daemon and opens the panel at
@@ -74,8 +74,8 @@ each with its own pair, and nothing about one reaches another. From the command
 line:
 
 ```
-python -m bridge.install /path/to/project --role executor
-python -m bridge.install --help
+python -m bridgecore.install /path/to/project --role executor
+python -m bridgecore.install --help
 ```
 
 Installing **merges** — it never overwrites. Existing hooks are kept, the
@@ -92,7 +92,7 @@ What it writes into the project:
 - approvals for `mcp__bridge__verdict` and `mcp__bridge__task`
 - two environment entries: `PYTHONPATH`, pointing at the bridge, and
   `PYTHONSAFEPATH=1`. The second keeps the working directory off `sys.path`:
-  the hooks run as `python -m bridge.hook`, and with `-m` Python puts the
+  the hooks run as `python -m bridgecore.hook`, and with `-m` Python puts the
   current directory *first*, so a second copy of this package in whatever
   folder the session is sitting in would shadow the installed one. On Python
   3.9 and 3.10 the variable is ignored and the behaviour is what it was.
@@ -186,7 +186,7 @@ per project, and shown in the panel. It cannot be used quietly.
 commit — the verdict also needs
 
 ```
-Residence: bridge/store.py:norm
+Residence: bridgecore/store.py:norm
 ```
 
 Where the fix lives. A fix nobody can point at is a patch: it works today, the

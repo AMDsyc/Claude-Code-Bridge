@@ -381,7 +381,12 @@ def stop_daemon(port=None, timeout=90):
     pid = pid_on_port(port)
     if pid is None:
         return True, "the bridge was not running"
-    subprocess.run(["taskkill", "/PID", str(pid), "/T"],
+    # NOT /T. The claude windows are children of the daemon, and the tree
+    # form of taskkill would take every pair down with it - including the
+    # session that asked for this. The bridge is built the other way round:
+    # the sessions outlive the daemon and simply stop being carried while it
+    # is away, which is what makes a restart cheap.
+    subprocess.run(["taskkill", "/PID", str(pid)],
                    capture_output=True, text=True, errors="replace")
     polite = min(timeout, 45)
     end = time.time() + polite
@@ -391,7 +396,7 @@ def stop_daemon(port=None, timeout=90):
         time.sleep(1.5)
     # It did not take the hint. A bridge that will not stop is worse than a
     # 'recovered' banner, so escalate - and say plainly what it cost.
-    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+    subprocess.run(["taskkill", "/PID", str(pid), "/F"],
                    capture_output=True, text=True, errors="replace")
     end = time.time() + max(timeout - polite, 20)
     while time.time() < end:

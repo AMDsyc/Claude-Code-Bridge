@@ -42,7 +42,8 @@ import urllib.request
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import store, telegram, discover, remote, sessions, models, archive
+from . import (store, telegram, discover, remote, sessions, models,
+               archive, relayout)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -6743,6 +6744,10 @@ class Handler(BaseHTTPRequestHandler):
                     # words come from the same place the pin's do, so the
                     # two cannot end up disagreeing about a project.
                     "pairs": pairs_view(),
+                    # True while the old folder layout is still half moved,
+                    # so the panel can put the button in front of the owner
+                    # at the moment it means something instead of burying it.
+                    "relayout_pending": relayout.pending(),
                     "headline": status_headline(),
                     "canon": {p: norm(p) for p in CFG.get("projects", {})},
                     "loop_off": STATE.get("loop_off") or {},
@@ -7067,6 +7072,39 @@ class Handler(BaseHTTPRequestHandler):
                                         "why": None if sent else why})
             if p.startswith("/selftest"):
                 return self._send(200, selftest(norm(body.get("project"))))
+            if p.startswith("/relayout"):
+                # The daemon deciding about ITSELF. It spawns a helper that
+                # outlives it, then stops through its own normal path -
+                # clean_shutdown written, goodbye said - so the helper has
+                # nobody to kill and only has to wait for the port.
+                #
+                # The helper gets its own console on purpose: this is the
+                # one operation where the owner wants to watch, and if it
+                # rolls back the window stays open holding the reason.
+                try:
+                    subprocess.Popen(
+                        [sys.executable, "-m", "bridgecore.relayout",
+                         "--after-shutdown", "--port", str(CFG["port"])],
+                        cwd=ROOT, close_fds=True,
+                        creationflags=getattr(subprocess,
+                                              "CREATE_NEW_CONSOLE", 0))
+                except OSError as exc:
+                    return self._send(200, {
+                        "ok": False,
+                        "error": "could not start the helper, so nothing "
+                                 "was done: %s" % exc})
+                store.journal("bridge",
+                              "Rebuild asked for from the panel. Stopping so "
+                              "the helper can move the files; it starts the "
+                              "bridge again and puts everything back if the "
+                              "new layout does not answer.", level="warn")
+                # Answer first, then go. A second is plenty for the panel to
+                # read the reply, and shutdown() never returns.
+                threading.Timer(1.0, shutdown).start()
+                return self._send(200, {
+                    "ok": True,
+                    "pending": relayout.pending(),
+                    "message": "stopping now - the helper has its own window"})
             if p.startswith("/check"):
                 # The planner's own run. Secret-guarded like /verdict and
                 # /task, because it acts: it spawns processes and writes a

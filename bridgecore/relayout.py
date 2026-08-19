@@ -50,6 +50,7 @@ import json
 import os
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -169,7 +170,7 @@ def _copy_missing(src, dst):
     return added
 
 
-def patiently(fn, what, tries=8, wait=2.0):
+def patiently(fn, what, tries=8, wait=2.0, out=say):
     """Windows hands out transient locks on folders just written to."""
     for attempt in range(tries):
         try:
@@ -177,8 +178,66 @@ def patiently(fn, what, tries=8, wait=2.0):
         except PermissionError:
             if attempt == tries - 1:
                 raise
-            say("   %s is busy, waiting" % what)
+            out("   %s is busy, waiting" % what)
             time.sleep(wait)
+
+
+def _unlock(path):
+    """Clear the read-only flag. Returns True if there was one to clear."""
+    try:
+        if not os.access(path, os.W_OK):
+            os.chmod(path, stat.S_IWRITE)
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def _retry_readonly(func, path, _exc):
+    """rmtree's error hook: clear read-only and do that one step again."""
+    if _unlock(path):
+        func(path)
+    else:
+        raise
+
+
+def remove_tree(path, out=say, tries=8, wait=2.0):
+    """Delete a folder, including the parts git marks read-only.
+
+    Two different things wear the same PermissionError on Windows and they
+    need opposite answers, which is why they are told apart here rather than
+    both being called "busy":
+
+      - a file or folder held open by a process. Waiting is the answer, and
+        it usually works within a second or two.
+      - a file marked read-only. Waiting is useless - it will be read-only
+        for ever. git does this to everything under .git/objects, so any
+        tree that has ever been a repository hits it, and this one did:
+        rmtree stopped on .git/objects/10/82bb... and the whole move
+        reported "busy", which sent the reader looking for a process that
+        was never there.
+    """
+    kw = ({"onexc": _retry_readonly} if sys.version_info >= (3, 12)
+          else {"onerror": lambda f, p, e: _retry_readonly(f, p, e)})
+    for attempt in range(tries):
+        try:
+            shutil.rmtree(path, **kw)
+            return True, ""
+        except PermissionError as exc:
+            stuck = getattr(exc, "filename", None) or path
+            if _unlock(stuck):
+                out("   %s was read-only, flag cleared - carrying on"
+                    % os.path.basename(stuck))
+                continue
+            if attempt == tries - 1:
+                return False, ("%s is held by another process: %s"
+                               % (os.path.basename(stuck), exc))
+            out("   %s is held by a process, waiting"
+                % os.path.basename(stuck))
+            time.sleep(wait)
+        except OSError as exc:
+            return False, str(exc)
+    return False, "gave up after %d attempts" % tries
 
 
 def reinstall(base, config_path):
@@ -220,7 +279,7 @@ def reinstall(base, config_path):
     return lines or ["no projects are watched yet"]
 
 
-def migrate(base=None, out=say):
+def migrate(base=None, out=say, assume_stopped=False, port=None):
     """Move the old tree into the new one. Safe to run twice.
 
     Returns a short dict describing what happened, so a caller (or a suite)
@@ -235,6 +294,21 @@ def migrate(base=None, out=say):
     if not os.path.isdir(new):
         return {"moved": False, "why": "there is no source folder to move "
                                        "into - refusing"}
+    # Never with a live daemon. This function moves the state file and the
+    # journals a running bridge is writing to, and half of that is worse
+    # than none of it: it would be reading one data folder and writing
+    # another. The two callers that are allowed here have already made sure
+    # - bridge.bat runs before the daemon starts, and the panel button waits
+    # for the port to go quiet - so anyone reaching this with the port open
+    # is doing it by hand, and gets told rather than obeyed.
+    if not assume_stopped and port_open(port):
+        return {"moved": False,
+                "why": "the bridge is still running on 127.0.0.1:%d. Nothing "
+                       "was moved - moving the state out from under a live "
+                       "daemon would leave it reading one folder and writing "
+                       "another. Stop it first, or press the rebuild button "
+                       "in the panel, which stops it for you."
+                       % (port or PORT)}
 
     kept, files = backup(base)
     out("   the old layout is saved first: %s (%d files)"
@@ -291,9 +365,12 @@ def migrate(base=None, out=say):
         if os.path.exists(src) and not os.path.exists(dst):
             patiently(lambda s=src, d=dst: shutil.move(s, d), name)
 
-    patiently(lambda: shutil.rmtree(old), "the old folder")
-    out("   the old folder is gone; everything lives in source/ now")
-
+    # BEFORE the delete, not after. The first live run crashed inside
+    # rmtree - git marks its objects read-only - and everything below it
+    # was skipped, so every project was left with hooks naming a folder
+    # that had just been removed. Nothing here needs the old tree gone,
+    # so nothing here should wait for it.
+    #
     # Every watched project's hooks name the package and the folder it is
     # imported from. Both just changed, so every project needs the installer
     # run again - without this the hooks point at a folder that no longer
@@ -303,6 +380,14 @@ def migrate(base=None, out=say):
     out("   pointing every project's hooks at the new package")
     for line in reinstall(base, os.path.join(data, "config.json")):
         out("      " + line)
+
+    gone, why = remove_tree(old, out=out)
+    if not gone:
+        out("   the old folder could NOT be removed: %s" % why)
+        out("   everything else moved, and the bridge will run from source/;"
+            " the leftover folder is safe to delete by hand")
+    else:
+        out("   the old folder is gone; everything lives in source/ now")
 
     # The manual step this replaced.
     stale = os.path.join(base, "finish-layout.bat")
@@ -448,16 +533,39 @@ def restore(base, kept, out=say):
     return True
 
 
-def run_now(base=None, port=None, start_wait=180, out=say):
-    """The whole thing, with a way back. Returns a dict."""
+def wait_port_free(port=None, timeout=120):
+    """Wait for a daemon that is already stopping to let go of its port.
+
+    This is the panel-button path: the daemon spawns this helper and then
+    shuts itself down through its own normal path, so there is nobody to
+    kill - only somebody to wait for. Waiting rather than killing is what
+    keeps the clean_shutdown record and the goodbye message intact.
+    """
+    end = time.time() + timeout
+    while time.time() < end:
+        if not port_open(port):
+            return True, "the bridge has stopped"
+        time.sleep(1.5)
+    return False, "the bridge is still holding its port after %ds" % timeout
+
+
+def run_now(base=None, port=None, start_wait=180, out=say, stop=True):
+    """The whole thing, with a way back. Returns a dict.
+
+    stop=False means the daemon is already on its way out - it asked for
+    this itself - so wait for the port instead of killing anything.
+    """
     base = base or BASE
     out("Bridge: finishing the folder rebuild.")
-    ok, why = stop_daemon(port)
+    if stop:
+        ok, why = stop_daemon(port)
+    else:
+        ok, why = wait_port_free(port)
     out("   %s" % why)
     if not ok:
         return {"ok": False, "stage": "stop", "why": why}
 
-    result = migrate(base, out=out)
+    result = migrate(base, out=out, assume_stopped=True, port=port)
     if not result.get("moved"):
         out("   nothing to move - starting again")
         started, why = start_daemon(base, start_wait, port)
@@ -488,6 +596,21 @@ def main(argv=None):
     base = BASE
     if "--base" in argv:
         base = argv[argv.index("--base") + 1]
+
+    # The panel button: the daemon spawned this and is shutting itself down.
+    if "--after-shutdown" in argv:
+        r = run_now(base, port, stop=False)
+        if not r.get("ok"):
+            say("")
+            say("The rebuild did not take, and everything has been put back.")
+            say("Reason: %s" % r.get("why"))
+            say("This window is left open on purpose - the lines above are "
+                "the whole story.")
+            try:
+                input("Press Enter to close. ")
+            except (EOFError, OSError):
+                pass
+        return 0 if r.get("ok") else 1
 
     if "--now" in argv:
         r = run_now(base, port)

@@ -137,6 +137,19 @@ details .inner{padding:4px 14px 14px;color:var(--label);line-height:1.6}
     <select id="projSel" style="width:280px"></select>
   </div>
   <div class="sub" id="stateSub">the loop is on; reports go to the planner, verdicts come back.</div>
+  <!-- Only while the old folder layout is still half moved. In front of the
+       owner at the moment it means something, and gone the moment it does
+       not - a notice that never goes away stops being read. -->
+  <div class="card" id="relayoutBanner" style="display:none;margin:10px 0">
+    <b>The folders are half rebuilt.</b>
+    <span class="dim">The bridge is running from the old layout. One click
+    moves everything into place and starts it again - about a minute, your
+    sessions keep running, and if the new layout does not come up it all
+    goes back by itself.</span>
+    <div class="row" style="margin-top:8px">
+      <button class="btn big" id="relayoutGoTop">rebuild the folders and restart</button>
+    </div>
+  </div>
   <!-- One row per pair, and nothing below it changes: everything under this
        is about the one project on screen. This says which OTHER pairs are up
        without leaving it, which is the only thing three pairs need that one
@@ -355,6 +368,26 @@ details .inner{padding:4px 14px 14px;color:var(--label);line-height:1.6}
       <div class="row" style="margin-top:8px">
         <button class="btn" id="archiveNow">archive now</button>
         <span class="dim">rule: older than 7 days, or the project passes 2 GB</span>
+      </div>
+    </div>
+    <div class="card" id="relayoutCard">
+      <h2 style="margin-top:0">folder layout</h2>
+      <div class="dim" id="relayoutState" style="margin-bottom:8px"></div>
+      <div class="row"><button class="btn" id="relayoutGo">rebuild the folders and restart</button></div>
+      <div class="dim" style="margin-top:8px;line-height:1.6">
+        The bridge stops itself the normal way, a helper window moves the
+        files, and the bridge starts again. It takes about a minute and you
+        do not have to do anything while it runs.
+        <b>Your sessions keep running</b> - only the daemon restarts, and
+        while it is away nothing is carried, nothing is lost.
+        <br><br>
+        <b>If the new layout does not come up, everything goes back by
+        itself</b> and the old bridge is started again. A full copy is
+        written to <code>releases\</code> before a single file moves, and the
+        helper window stays open with the reason.
+        <br><br>
+        Starting <code>bridge.bat</code> yourself does the same move - this
+        button is only the way to do it without closing the window first.
       </div>
     </div>
   </div>
@@ -1236,6 +1269,14 @@ function loadResume(){
 /* ---------- settings ---------- */
 var NOTIFY_LABELS={iteration_done:"iteration finished",verdict_changes:"verdict asks for changes",model_dropped:"model dropped down the chain",waiting_process:"waiting on a process",process_stuck:"process looks stuck",needs_you:"a session needs your answer",rotation_name:"rotation / naming a new session",limit_low:"a limit is nearly spent",crash:"the bridge itself broke",session_died:"a session window died",session_start:"session started",session_end:"session ended"};
 function renderSettings(){
+  // Say which of the two things the button will do, rather than leaving the
+  // owner to guess whether there is anything left to move.
+  var rs=$("#relayoutState");
+  if(rs){rs.textContent=D.relayout_pending
+    ? "the old folders are still here - this moves them and restarts"
+    : "already in the new layout - this button is just a restart"}
+  var rb=$("#relayoutBanner");
+  if(rb){rb.style.display=D.relayout_pending?"":"none"}
   var nv=D.config.notify||{},tb=$("#notifyTable tbody");tb.innerHTML="";
   Object.keys(NOTIFY_LABELS).forEach(function(k){
     var v=nv[k]||"silent";
@@ -1275,6 +1316,23 @@ $("#addCustomModel").onclick=function(){
   post("/config",{custom_models:cm}).then(tick);$("#customModel").value="";
 };
 $("#archiveNow").onclick=function(){post("/archive-now",{}).then(function(r){alert("Packed "+r.packed+" day folder(s).")})};
+// The rebuild button. The daemon decides about itself here: it spawns the
+// helper, then stops through its own normal path, so the confirmation says
+// what is about to happen rather than asking the owner to trust a word.
+$("#relayoutGoTop").onclick=function(){$("#relayoutGo").onclick()};
+$("#relayoutGo").onclick=function(){
+  var pending=!!(D&&D.relayout_pending);
+  var what=pending
+    ? "The bridge will stop, a helper window will move the folders into their new places, and the bridge will start again."
+    : "There is nothing left to move, so this is simply a restart.";
+  if(!confirm(what+"\n\nYour claude sessions keep running.\nIf the new layout does not come up, everything goes back by itself and the old bridge is started again.\n\nGo ahead?"))return;
+  post("/relayout",{}).then(function(r){
+    if(r&&r.ok){
+      $("#relayoutState").textContent="stopping - the helper has its own window; this page will go blank until the bridge is back";
+    }else{
+      alert("Nothing was done: "+((r&&r.error)||"no answer from the bridge"));
+    }
+  })};
 
 /* ---------- telegram ---------- */
 function renderTelegram(){

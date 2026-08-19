@@ -158,6 +158,25 @@ def load(path):
     return {}
 
 
+# The package was called `bridge` until 2026-08-19. An entry naming the old
+# module is OURS and stale - not somebody else's hook to be preserved - and
+# it has to be removed, not merely joined by a new one. Leaving it is what
+# broke every pair that day: PYTHONPATH had been updated to the new folder
+# while the hook entries still read `-m bridge.hook`, so every event in all
+# four projects raised "No module named 'bridge'". install() kept it because
+# it only recognised the new spelling as its own.
+LEGACY_HOOK_ARGS = (["-m", "bridge.hook"],)
+OUR_HOOK_ARGS = (["-m", "bridgecore.hook"],) + LEGACY_HOOK_ARGS
+
+
+def drop_stale(group):
+    """Remove hook entries that are ours under an older name."""
+    before = list(group.get("hooks") or [])
+    group["hooks"] = [h for h in before
+                      if list(h.get("args") or []) not in LEGACY_HOOK_ARGS]
+    return len(before) - len(group["hooks"])
+
+
 def already_there(group, entry):
     for h in group.get("hooks", []):
         if h.get("command") == entry["command"] and h.get("args") == entry["args"]:
@@ -194,6 +213,8 @@ def install(project, role=None, python=None, statusline=True):
         if target is None:
             target = {"hooks": []}
             groups.append(target)
+        for g in groups:
+            drop_stale(g)
         if not already_there(target, entry):
             target.setdefault("hooks", []).append(dict(entry))
             added += 1
@@ -279,7 +300,8 @@ def uninstall(project):
                 groups = hooks.get(ev) or []
                 for g in groups:
                     keep = [h for h in (g.get("hooks") or [])
-                            if h.get("args") != ["-m", "bridgecore.hook"]]
+                            if list(h.get("args") or [])
+                            not in OUR_HOOK_ARGS]
                     if len(keep) != len(g.get("hooks") or []):
                         removed.append("hook %s" % ev)
                     g["hooks"] = keep
@@ -293,7 +315,9 @@ def uninstall(project):
             else:
                 cfg.pop("hooks", None)
 
-            if "bridgecore.statusline" in json.dumps(cfg.get("statusLine", "")):
+            _sl = json.dumps(cfg.get("statusLine", ""))
+            if ("bridgecore.statusline" in _sl
+                    or "bridge.statusline" in _sl):
                 cfg.pop("statusLine", None)
                 removed.append("status line")
 

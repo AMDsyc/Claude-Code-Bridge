@@ -79,9 +79,13 @@ each with its own pair, and nothing about one reaches another. From the command
 line:
 
 ```
+add-project.bat C:\path\to\project        (Windows, the short way)
 python -m bridgecore.install /path/to/project --role executor
 python -m bridgecore.install --help
 ```
+
+`add-project.bat` is a wrapper around the same installer, and it is the only
+command-line way in that you need to remember.
 
 Installing **merges** — it never overwrites. Existing hooks are kept, the
 previous `settings.json` is backed up next to it as `settings.json.before-bridge`,
@@ -338,10 +342,11 @@ Environment variables:
 
 ## The rules
 
-`HONESTY.md` holds twenty-six rules both halves are handed at every session
+`HONESTY.md` holds twenty-eight rules both halves are handed at every session
 start, and which are put in front of every task and every report. They are not
-advice: each one came from something that actually went wrong, and three of
-them are the gates described above rather than text.
+advice: each one came from something that actually went wrong, and several of
+them are the gates described above rather than text — a rule nothing refuses
+holds until the first inconvenient day, which is itself one of the rules.
 
 The full canon goes to a session once, on its first delivery — which includes
 the first delivery after every handover, since a replacement has been told

@@ -2117,8 +2117,11 @@ check("and the other is named as a loser, not discarded", len(_lose), 1)
 check("an unreadable config loses to anything readable",
       relayout.score_config(os.path.join(_rb, "no-such.json")), (-1, 0, 0, 0))
 
+import socket as _sock_mod                                  # noqa: E402
+_qs = _sock_mod.socket(); _qs.bind(("127.0.0.1", 0))
+_QUIET = _qs.getsockname()[1]; _qs.close()
 _out = []
-_r = relayout.migrate(_rb, out=_out.append)
+_r = relayout.migrate(_rb, out=_out.append, port=_QUIET)
 check("it moved", _r["moved"], True)
 check("taking the config with four projects", _r["projects"], 4)
 check("and it says which, out loud, so a person can see it",
@@ -2145,7 +2148,7 @@ check("and the whole old layout was zipped before anything moved",
 
 print("   and again: a rebuild that only works once breaks the second time")
 print("   somebody starts the bridge")
-_r2 = relayout.migrate(_rb, out=lambda _m: None)
+_r2 = relayout.migrate(_rb, out=lambda _m: None, port=_QUIET)
 check("a second run has nothing to do", _r2["moved"], False)
 check("and says so rather than pretending it worked", _r2["why"],
       "nothing to move")
@@ -2158,7 +2161,7 @@ check("pending() is what bridge.bat asks, and it now says no",
 print("   it refuses rather than guesses when there is nowhere to move to")
 _lonely = os.path.join(TMP, "lonely")
 os.makedirs(os.path.join(_lonely, "bridge", "data"))
-_r3 = relayout.migrate(_lonely, out=lambda _m: None)
+_r3 = relayout.migrate(_lonely, out=lambda _m: None, port=_QUIET)
 check("no source folder means no move", _r3["moved"], False)
 check("and the old tree is still there, untouched",
       os.path.isdir(os.path.join(_lonely, "bridge")), True)
@@ -2176,6 +2179,84 @@ if os.path.exists(_bat):
     check("and there is no finish-layout.bat left to run",
           os.path.exists(os.path.join(os.path.dirname(_bat),
                                       "finish-layout.bat")), False)
+
+import socket as _socket                                    # noqa: E402
+
+print("\n57. you cannot double-click the wrong launcher")
+print("   The owner restarted the bridge and it came up in the OLD layout:")
+print("   there were four bridge.bat on disk and he reached one of the")
+print("   three that should not exist. Measured that day - the live daemon")
+print("   was writing bridge/data while source/data had never been made")
+print("   at all. Deleting them mid-move is not the answer, because the")
+print("   move is what deletes them; until then they are signposts")
+_base = os.path.dirname(os.path.dirname(os.path.abspath(daemon.__file__)))
+_old = os.path.join(_base, "bridge")
+if os.path.isdir(_old):
+    _stubs = [os.path.join(_old, "bridge.bat"),
+              os.path.join(_old, "add-project.bat"),
+              os.path.join(_old, "bridge", "bridge.bat"),
+              os.path.join(_old, "bridge", "add-project.bat")]
+    _live = [s for s in _stubs if os.path.exists(s)]
+    check("every launcher left in the old tree is there to be found",
+          len(_live) > 0, True)
+    for _s in _live:
+        _txt = open(_s, encoding="utf-8", errors="replace").read()
+        check("%s starts nothing" % os.path.relpath(_s, _base).replace(
+            chr(92), "/"),
+            ("daemon" in _txt or "-m bridge" in _txt or "%PY%" in _txt),
+            False)
+        check("   and says where the real one is",
+              "bridge.bat" in _txt and "Projects" in _txt, True)
+else:
+    print("   (the old tree is gone, so there is nothing left to stub -")
+    print("    which is the state this case exists to reach)")
+
+print("   the one launcher that does work finds its own folder, so it")
+print("   cannot be started 'from the wrong place' - %~dp0 is absolute")
+_root_bat = os.path.join(_base, "bridge.bat")
+if os.path.exists(_root_bat):
+    _t = open(_root_bat, encoding="utf-8", errors="replace").read()
+    check("it changes to its own directory before anything else",
+          'cd /d "%~dp0"' in _t, True)
+    check("and steps down into source only if the package is there",
+          'if exist "source' + chr(92) + 'bridgecore' + chr(92)
+          + 'daemon.py" cd source' in _t, True)
+    check("it finishes the rebuild before starting the daemon, not after",
+          _t.index("-m bridgecore.relayout") < _t.index("-m bridgecore.daemon"),
+          True)
+
+print("   and the move refuses to run under a live daemon: moving the")
+print("   state file and the journals out from under one would leave it")
+print("   reading one folder and writing another, which is worse than")
+print("   not moving at all")
+from bridgecore import relayout as _rl                       # noqa: E402
+_sock = _socket.socket()
+_sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+_sock.bind(("127.0.0.1", 0))
+_sock.listen(1)
+_busy = _sock.getsockname()[1]
+try:
+    _fake = os.path.join(TMP, "livecheck")
+    os.makedirs(os.path.join(_fake, "bridge", "data"), exist_ok=True)
+    os.makedirs(os.path.join(_fake, "source", "bridgecore"), exist_ok=True)
+    _r = _rl.migrate(_fake, out=lambda _m: None, port=_busy)
+    check("a busy port stops it before a single file moves",
+          _r["moved"], False)
+    check("and the refusal says why, and what to do instead",
+          ("still running" in _r["why"] and "button" in _r["why"]), True)
+    check("nothing was created in the new tree",
+          os.path.exists(os.path.join(_fake, "source", "data")), False)
+    check("and the old tree is untouched",
+          os.path.isdir(os.path.join(_fake, "bridge", "data")), True)
+finally:
+    _sock.close()
+_free = _socket.socket()
+_free.bind(("127.0.0.1", 0))
+_freeport = _free.getsockname()[1]
+_free.close()
+_r2 = _rl.migrate(_fake, out=lambda _m: None, port=_freeport)
+check("with the port quiet it goes ahead - so the guard is the port, "
+      "not a mood", _r2["moved"], True)
 
 print("\n" + ("-" * 60))
 if FAILED:

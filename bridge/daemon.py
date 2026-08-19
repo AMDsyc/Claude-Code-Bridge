@@ -236,7 +236,8 @@ norm = store.norm
 
 PATH_KEYED = ("loops", "inflight", "awaiting", "loop_off", "loop_off_told",
               "seed", "planner_seed", "handover", "last_feedback",
-              "paused", "note", "idle_spin", "noart", "frames", "debt")
+              "paused", "note", "idle_spin", "noart", "frames", "debt",
+              "unanswered")
 PAIR_KEYED = ("pids", "down", "launches", "last_session", "channels",
               "autostart_tried", "autostart_told")
 
@@ -2903,6 +2904,9 @@ def situation(path):
            # It rides in the same payload the panel already polls, so the
            # named exit is visible without anyone going to look for it.
            "no_artifacts": (STATE.get("noart") or {}).get(path, 0),
+           # Reports that got no verdict, in a row. Silence used to read as
+           # consent; it is a number on the panel now.
+           "unanswered": (STATE.get("unanswered") or {}).get(path, 0),
            # Declared temporary solutions still open. This never blocks -
            # blocking would only teach the pair to stop saying the word -
            # but it is always in front of a human, which is the mechanism.
@@ -4087,9 +4091,104 @@ def note_no_artifacts(path, project, reason):
     return n
 
 
+# ---- silence is not consent ----------------------------------------------
+#
+# The night of 2026-08-18/19. The planner's window was restarted by a lost
+# connection to the server. Its channel PROCESS stayed up and kept accepting
+# deliveries, so every report was handed over successfully - and the session
+# behind it never saw one. Thirty-two reports, 41 through 72, over 11.9 hours.
+# Not one got a verdict.
+#
+# What made it invisible rather than loud was one line at the end of
+# run_review: `verdict = waiter["verdict"] or "continue"`. A report nobody
+# answered resolved as "continue" - so the executor was told to carry on,
+# every time, by nobody. Silence read as consent. The human thought the work
+# was being accepted; the planner thought there were no reports.
+#
+# The idle damper did engage - the gaps between reports were about 21 minutes,
+# which is its hold - so it made the night QUIETER without making it visible.
+# It answers "the pair has nothing to do", and this was "nobody is answering",
+# which is a different thing and was not covered by anything.
+#
+# The threshold: the median gap between unanswered reports that night was 21
+# minutes, so three in a row is about an hour of silence. With this in place
+# the night would have stopped after three reports and an hour instead of
+# thirty-two and twelve.
+
+SILENCE_LIMIT = 3
+
+
+def silence_limit():
+    try:
+        n = int((CFG.get("thresholds") or {}).get("silence_limit",
+                                                  SILENCE_LIMIT))
+    except Exception:
+        n = SILENCE_LIMIT
+    return max(1, n)
+
+
+def note_silence(path, project, n):
+    """One more report went unanswered. Returns True when the pair was
+    stopped by it."""
+    path = norm(path)
+    with _lock:
+        counts = STATE.setdefault("unanswered", {})
+        counts[path] = counts.get(path, 0) + 1
+        run = counts[path]
+        save_state()
+    limit = silence_limit()
+    if run < limit:
+        store.journal("silence", "Report %d got no verdict - %d in a row. At "
+                                 "%d the pair stops and asks for you."
+                      % (n, run, limit), project, "planner", "warn",
+                      project_dir=path)
+        return False
+    why = ("the planner has not answered %d reports in a row (last was %d). "
+           "Nothing is being reviewed, so the pair is held rather than left "
+           "to carry on unread." % (run, n))
+    pause_project(path, why)
+    store.journal("silence", "PAIR HELD: " + why, project, "planner", "warn",
+                  project_dir=path)
+    notify("needs_you",
+           "%s: the planner has answered nothing for %d reports. The pair is "
+           "held - work is NOT being reviewed. Check the planner window; the "
+           "unanswered reports are in bridge-logs/.../inbox/. Resume from the "
+           "panel, or just answer with a verdict." % (project, run),
+           path=path)
+    return True
+
+
+def clear_silence(path, project=""):
+    """A real verdict arrived. Returns how many reports had gone unanswered,
+    so the planner can be told what it missed in one line rather than in a
+    flood."""
+    path = norm(path)
+    with _lock:
+        run = (STATE.get("unanswered") or {}).pop(path, 0)
+        held = (STATE.get("paused") or {}).get(path) or {}
+        was_silence = "has not answered" in (held.get("why") or "")
+        save_state()
+    if was_silence:
+        resume_project(path)
+        store.journal("silence", "Planner answered again - the hold is off. "
+                                 "%d reports had gone unanswered." % run,
+                      project or project_name(path), "planner", "log",
+                      project_dir=path)
+    return run
+
+
 def run_review(event, path, lp, msg, project, role):
     """Deliver the report, wait for the verdict. Returns hook_output or None."""
     hook_output = None
+    # Held because nobody is answering: do not make another report to add
+    # to a pile no one is reading. The hold comes off when a verdict
+    # arrives or a person resumes the project.
+    _held = (STATE.get("paused") or {}).get(path) or {}
+    if "has not answered" in (_held.get("why") or ""):
+        store.journal("silence", "Turn finished while the pair is held - no "
+                      "report made, nothing is reading them.", project,
+                      role, "log", project_dir=path)
+        return None
     hold = float(CFG.get("thresholds", {}).get("idle_hold")
                  if CFG.get("thresholds", {}).get("idle_hold") is not None
                  else IDLE_HOLD_SEC)
@@ -4224,6 +4323,21 @@ def run_review(event, path, lp, msg, project, role):
                % (project, n, int(timeout // 60)), path=path)
         return None
 
+    # A report nobody answered used to resolve as "continue" - the executor
+    # told to carry on, every time, by nobody. That is what made the night
+    # of 2026-08-18/19 invisible instead of loud. Silence is now counted,
+    # and after silence_limit reports in a row the pair is held.
+    answered = waiter["verdict"] is not None
+    if not answered:
+        note_silence(path, project, n)
+    else:
+        missed = clear_silence(path, project)
+        if missed:
+            store.journal("silence", "Planner is back. %d report%s had gone "
+                          "unanswered while it was away - they are in "
+                          "bridge-logs/.../inbox/."
+                          % (missed, "" if missed == 1 else "s"),
+                          project, "planner", "warn", project_dir=path)
     verdict = waiter["verdict"] or "continue"
     feedback = waiter["feedback"] or ""
     store.iteration_file(path, n, "planner",
@@ -5369,6 +5483,7 @@ def pairs_view():
             # from was forty-five workarounds nobody was counting.
             "no_artifacts": (STATE.get("noart") or {}).get(path, 0),
             "debt_open": len(open_debt(path)),
+            "unanswered": (STATE.get("unanswered") or {}).get(path, 0),
             "roles": roles,
         }
     return out
@@ -6332,6 +6447,10 @@ class Handler(BaseHTTPRequestHandler):
                     waiter["feedback"] = fb
                     waiter["event"].set()
                     return self._send(200, {"ok": True, "delivered": True})
+                # No report was waiting, but a live verdict still proves the
+                # planner is back - so a pair held for silence is let go here
+                # too, rather than waiting for a report nobody would make.
+                clear_silence(path, project_name(path))
                 # No Stop hook is waiting - the executor is idle at its
                 # prompt. The verdict still has somewhere to go, and this is
                 # the path the loop falls back on when the planner's task

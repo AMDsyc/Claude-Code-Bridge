@@ -138,6 +138,12 @@ DEFAULT_CONFIG = {
         # and the hook's own (1800s), so the hold always ends on
         # the bridge's terms rather than by something expiring.
         "idle_hold": 1200,
+        # Reports that may go unanswered in a row before the pair is held.
+        # Three, because the median gap between unanswered reports on the
+        # night this came from was 21 minutes - so three is about an hour
+        # of silence, and that night would have stopped after three
+        # reports instead of thirty-two.
+        "silence_limit": 3,
     },
     "retention": {"days": 7, "size_gb": 2, "archive_on_rotate": False},
     # The archive search agent: a headless one-off that reads the archive

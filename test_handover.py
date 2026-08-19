@@ -1243,9 +1243,9 @@ check("the file is there and has something in it", len(canon) > 2000, True)
 check("and the rules stayed short enough to put in front of every task",
       len(canon) < 15000, True)
 check("with rules in it, not just prose",
-      len(re.findall(r"^\d+\. \*\*", canon, re.M)), 26)
+      len(re.findall(r"^\d+\. \*\*", canon, re.M)), 27)
 check("and each of them carries its check where it is read",
-      len(re.findall(r"^\s+\*[^*]+:\*", canon, re.M)), 26)
+      len(re.findall(r"^\s+\*[^*]+:\*", canon, re.M)), 27)
 print("   every rule carries the thing that makes it a rule and not a wish:")
 print("   a way to check it from outside")
 # Everything about HONESTY_CASES.md moved to test_cases.py, which is
@@ -1590,7 +1590,7 @@ check("every one after that carries the titles alone",
 check("and the short form is a fraction of the price",
       len(_s2) < len(_s1) / 4, True)
 check("but still names every rule",
-      len([l for l in _s2.splitlines() if re.match(r"^\d+\. \S", l)]), 26)
+      len([l for l in _s2.splitlines() if re.match(r"^\d+\. \S", l)]), 27)
 check("and says where the full text is, so nothing is hidden by shortening",
       "HONESTY.md" in _s2, True)
 print("   the mark is per SESSION - a handover makes a new one, and a")
@@ -1669,6 +1669,53 @@ print("  ..   first delivery of a session: %d chars, %d utf-8 bytes"
       % (len(_full), len(_full.encode("utf-8"))))
 print("  ..   every delivery after that:   %d chars, %d utf-8 bytes"
       % (len(_short), len(_short.encode("utf-8"))))
+
+print("\n52. silence is not consent")
+print("    The night of 2026-08-18/19: the planner's window was restarted by")
+print("    a lost connection. Its channel PROCESS stayed up and kept taking")
+print("    deliveries, so every report was handed over successfully and the")
+print("    session behind it saw none. 32 reports, 41 to 72, over 11.9 hours,")
+print("    not one answered - and the last line of run_review read")
+print("    `verdict = waiter[\"verdict\"] or \"continue\"`, so every one of them")
+print("    resolved as continue. The executor was told to carry on, every")
+print("    time, by nobody")
+print("   the threshold comes from that night rather than from taste: the")
+print("   median gap between unanswered reports was 21 minutes, so three in")
+print("   a row is about an hour")
+check("three is the default, and it is configurable",
+      (daemon.silence_limit(),
+       "silence_limit" in store.DEFAULT_CONFIG["thresholds"]), (3, True))
+_sp = os.path.join(TMP, "silenceproj")
+os.makedirs(_sp, exist_ok=True)
+daemon.STATE.setdefault("unanswered", {}).pop(daemon.norm(_sp), None)
+_held = [daemon.note_silence(_sp, "silenceproj", 40 + i) for i in range(1, 4)]
+check("the first two are counted and let go", _held[:2], [False, False])
+check("the third holds the pair", _held[2], True)
+_rec = (daemon.STATE.get("paused") or {}).get(daemon.norm(_sp)) or {}
+check("and the hold says why, in words a person can act on",
+      "has not answered" in (_rec.get("why") or ""), True)
+check("the count is in the readout the panel polls",
+      daemon.situation(_sp)["unanswered"], 3)
+print("   a held pair stops MAKING reports - there is no point adding to a")
+print("   pile nobody is reading, and that is what turned three into 32")
+check("run_review returns before it makes one",
+      'if "has not answered" in (_held.get("why") or ""):'
+      in inspect.getsource(daemon.run_review), True)
+print("   what was missed is not lost, and comes back as one line rather")
+print("   than as a flood")
+_missed = daemon.clear_silence(_sp, "silenceproj")
+check("a live verdict says how many went unanswered", _missed, 3)
+check("and lifts the hold",
+      bool((daemon.STATE.get("paused") or {}).get(daemon.norm(_sp))),
+      False)
+check("the reports themselves are on disk, not in memory",
+      "inbox_write" in inspect.getsource(daemon.run_review), True)
+print("   and silence no longer resolves as a verdict at all")
+_src = inspect.getsource(daemon.run_review)
+check("run_review distinguishes answered from unanswered",
+      'answered = waiter["verdict"] is not None' in _src, True)
+check("and calls the counter on the unanswered branch",
+      "note_silence(path, project, n)" in _src, True)
 
 print("\n" + ("-" * 60))
 if FAILED:

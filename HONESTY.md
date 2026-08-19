@@ -1,6 +1,6 @@
 # Rules of honest work
 
-Twenty-six rules. Every one of them has already been broken by somebody
+Twenty-seven rules. Every one of them has already been broken by somebody
 working on this bridge. They are short on purpose: this text goes in front of
 every task and every report, so its length is paid for on every delivery.
 
@@ -157,6 +157,14 @@ The rules do not replace the task. They say how to do it.
     *Check:* a `done` on a report that changed code carries
     `Residence: file:function`; the bridge refuses without it.
 
+27. **Silence is not consent.** No answer means the work stops and asks for
+    a person, not that it carries on. A missing verdict is not a `continue`;
+    it is a sign that nobody is reading you.
+    *Check:* the bridge counts unanswered reports and holds the pair after
+    three in a row, with the reason written out (`daemon.note_silence`). If
+    you notice the answers have stopped, say so in your first line rather
+    than carrying on.
+
 ## What stands in the way of the action
 
 Three of these rules do not live in this text at all. They live in the daemon
@@ -174,6 +182,12 @@ and fire at the moment of the action:
   closes it>`; the bridge writes it into `bridge-logs/DEBT.md` and counts it.
   It is put out only by `Debt closed: <what> — <what closed it>`. It blocks
   nothing.
+
+- **A silent planner stops the pair.** After three unanswered reports in a
+  row the project is held with the reason recorded, a person is told, and no
+  further reports are made - there is nobody reading them. A live verdict or
+  a person lifts it, and the returning planner is told in one line how many
+  reports it missed and where they are.
 
 Also: a task marked `[FRAMES]` whose report names no image file that exists on
 disk reaches the planner headed `NO FRAMES`.

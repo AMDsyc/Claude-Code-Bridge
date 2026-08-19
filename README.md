@@ -4,6 +4,28 @@
 pair two sessions share a project: one does the work, the other reviews every
 finished turn. One small Python daemon runs all of them.
 
+Four things it does that are worth knowing before anything else:
+
+- **The reviewer cannot say "looks good".** A verdict that accepts or judges
+  work is refused unless it names artefacts — and the daemon opens them. A path
+  that is not on disk is refused by name. A report that changed code needs a
+  line saying where the fix lives; where a project names the checks its code is
+  accepted by, `done` also needs a successful test run made *after* that report.
+  This is not advice in a prompt, it is a refusal at the moment of acting.
+- **Context is measured, not guessed.** The window, the point compaction fires
+  at, the floor it leaves behind, and how many turns are left in the current
+  cycle — read from what the client actually reports, per model and per project.
+  A session is replaced before it runs out, and the replacement is handed the
+  thread in writing.
+- **Several projects at the same time.** A pair each, from one daemon. Loop,
+  pause, iteration count, event feed, notes and archive belong to the pair; the
+  five-hour plan limit belongs to your account, so that one is watched across
+  all of them.
+- **No pip, no Node, no build step.** Python 3.9+ and its standard library.
+  Everything binds to `127.0.0.1`; the only call that leaves the machine is an
+  optional Telegram notification. Written on Windows first, with POSIX
+  fallbacks.
+
 The **executor** has the hands: it edits files, runs commands and reports what
 it did. The **planner** holds the plan, reads every finished turn and answers
 with a verdict. A small Python daemon carries reports one way and verdicts the
@@ -21,6 +43,42 @@ the bridge watches it across all of them.
 change as new ways around them turn up — most of what is here arrived that
 way. The panel, the config keys and the format of what the bridge writes into
 a project can change between versions; backward compatibility is not promised.
+
+## How this differs
+
+Two Claude Code sessions, one working and one reviewing, is not a new idea.
+If you have already looked at **TandemKit**, **autonomy-loop**, **claudex**,
+**hyperclaude** or one of the several others, that shape will be familiar —
+it is the common part, and it is a good idea, which is why everybody arrives
+at it.
+
+So the shape is not the thing to compare. These four are, and they are written
+as questions you can put to any of them, this one included, by opening the
+repository:
+
+- **What happens when the reviewer just says yes?** Here the verdict is
+  refused: no artefacts named, no acceptance; a named path that is not on disk
+  is refused by name; a code change with nowhere to point is refused; where the
+  project says which tests accept its code, a stale test run is refused with
+  both timestamps. Look for the place that *says no*, and whether anything
+  would notice if it were removed.
+- **What happens when the window fills up?** Here the numbers come from what
+  the client reports, and the session is replaced before it stops being able to
+  finish a turn, with the thread handed over in writing. Look for whether the
+  answer is arithmetic or "restart it when it breaks".
+- **What happens with a second project?** Here each pair has its own loop,
+  pause, feed, notes and archive, and nothing global is left to leak between
+  them; the account's five-hour limit is the one thing deliberately shared.
+- **What does it cost to install?** Here: Python and its standard library.
+
+I have not audited the others and this section deliberately claims nothing
+about them — it would be worth very little if I had guessed. The comparison is
+yours to make; what is offered is the list of things worth comparing.
+
+One more, which is not a feature: the rules the pair works under were not
+written in advance. Each came from something that went wrong here, and the
+ones that matter are enforced by code rather than asked for politely, because
+a rule nothing refuses lasts until the first inconvenient day.
 
 ## Why two sessions
 

@@ -939,6 +939,44 @@ def migrate_notify_levels():
     return dropped
 
 
+def reseed_proctrack():
+    """Give the process watcher back the records that outlived the daemon.
+
+    A tracked command is written to two places: PROCTRACK in memory and
+    STATE["inflight"] on disk. A restart empties the first and reloads the
+    second - and process_watch, the only thing that ever reports or ages a
+    tracked command, walks PROCTRACK. So after any restart a record that
+    survived on disk is invisible to the one component that could act on it,
+    while every watchdog still reads it as "busy".
+
+    That is how 2026-08-21 stayed broken: process_watch DID its job at
+    16:56:37 (asked the pair) and 17:06:37 (told a person), then the bridge
+    restarted at 21:56:07, the record lost its watcher, and nothing said a
+    word again while three tiers stayed silenced.
+
+    The windows themselves survive a restart, so a command genuinely running
+    at that moment is still running and must keep its record - which is why
+    this re-seeds rather than clears. Ageing is INFLIGHT_MAX_SEC's job, and
+    it applies to both copies.
+    """
+    seeded = 0
+    for path, rows in ((STATE.get("inflight") or {})).items():
+        for sig, meta in (rows or {}).items():
+            if sig in PROCTRACK.get(path, {}):
+                continue
+            PROCTRACK.setdefault(path, {})[sig] = {
+                "cmd": (meta or {}).get("cmd", ""),
+                "started": (meta or {}).get("started") or time.time(),
+                "session": (meta or {}).get("session", "")}
+            seeded += 1
+    if seeded:
+        store.journal("process", "Picked up %d tracked command%s that "
+                      "outlived the last daemon - the watcher can see them "
+                      "again" % (seeded, "" if seeded == 1 else "s"),
+                      level="log")
+    return seeded
+
+
 def migrate_compaction_points():
     """Recompute every stored compaction point from its own samples.
 
@@ -3643,8 +3681,13 @@ def situation(path):
            "debt_total": len(debt_rows(path)),
            "frames_wanted": bool((STATE.get("frames") or {}).get(path)),
            "handover": bool((STATE.get("handover") or {}).get(path)),
-           "inflight": list((STATE.get("inflight") or {}).get(path, {}).values())
-                       + list(PROCTRACK.get(path, {}).values()),
+           # Through inflight_live, so a record whose PostToolUse never
+           # arrived stops counting as work after INFLIGHT_MAX_SEC. Every
+           # tier of the watchdog reads this one value - clinch() returns
+           # None on it, assess() exits early on it, tool_in_flight() calls
+           # it busy - so a leaked record here is not one blind spot but
+           # all of them at once.
+           "inflight": inflight_live(path),
            "roles": {}}
     for role in ("executor", "planner"):
         sess = best_session(path, role) or {}
@@ -5409,6 +5452,64 @@ def transcript_frozen(path, role, quiet):
         return False, 0
 
 
+# A tracked command that has been "running" this long is not work, it is a
+# leaked record. Measured, like stall_quiet: across every journal this bridge
+# has written the longest legitimate single command was about five minutes
+# (p50 3s, p95 58s, p99 311s), so an hour is eleven times the worst real one
+# and nothing genuine has ever come near it.
+#
+# It has to exist because the record outlives the thing it describes. A
+# PostToolUse is what clears it, and a turn that dies mid-tool never sends
+# one - so the record is immortal, and EVERY watchdog reads it as "busy".
+# 2026-08-21: a `cat` heredoc was tracked at 16:41:18, the turn died at
+# 16:44:33 with server_error, and from that moment clinch(), stalled() and
+# the half-hourly assess() were all silenced for that project. Twenty
+# minutes of a planner not answering went unreported five hours later
+# because of it, and a second project had been carrying the same thing
+# since 2026-08-18. STATE["assessed"] said so in plain words the whole
+# time: "something is still running for the executor - nothing".
+INFLIGHT_MAX_SEC = 3600
+_INFLIGHT_STALE_TOLD = set()
+
+
+def inflight_live(path):
+    """The tracked commands for this project that are still plausibly running.
+
+    Same source as before - the persisted record plus the in-memory one -
+    but a record past INFLIGHT_MAX_SEC is dropped from the answer instead of
+    silencing the watchdog for ever. Said once per record, at warn, because
+    a leaked record means a turn died mid-tool and that is worth knowing.
+
+    Never raises: on anything unexpected it answers with what it has, which
+    is the old behaviour.
+    """
+    try:
+        p = norm(path)
+        rows = list(((STATE.get("inflight") or {}).get(p) or {}).items())
+        rows += [kv for kv in (PROCTRACK.get(p) or {}).items()
+                 if kv[0] not in ((STATE.get("inflight") or {}).get(p) or {})]
+        now_ts = time.time()
+        live, stale = [], []
+        for sig, meta in rows:
+            age = now_ts - float((meta or {}).get("started") or now_ts)
+            (stale if age > INFLIGHT_MAX_SEC else live).append((sig, meta, age))
+        for sig, meta, age in stale:
+            key = "%s|%s|%s" % (p, sig, int((meta or {}).get("started") or 0))
+            if key not in _INFLIGHT_STALE_TOLD:
+                _INFLIGHT_STALE_TOLD.add(key)
+                store.journal(
+                    "process",
+                    "A tracked command has been \"running\" %.1f h - longer "
+                    "than any real one has ever taken here. Treating it as a "
+                    "leaked record and not as work, so the watchdogs can see "
+                    "this pair again: %s"
+                    % (age / 3600.0, brief((meta or {}).get("cmd"), 60)),
+                    project_name(path), "executor", "warn", project_dir=path)
+        return [meta for _, meta, _ in live]
+    except Exception:
+        return list(((STATE.get("inflight") or {}).get(norm(path)) or {}).values())
+
+
 def tool_in_flight(path, role, sit=None):
     """Is something legitimately running for this half right now?
 
@@ -5432,9 +5533,12 @@ def tool_in_flight(path, role, sit=None):
     check; accusing a working half costs the pair's trust in the warning.
     """
     try:
-        if (STATE.get("inflight") or {}).get(norm(path)):
-            return True
-        if PROCTRACK.get(norm(path)):
+        # inflight_live, not the raw dict: a leaked record used to answer
+        # "busy" for ever and take tier 2 out with it. Note the key is the
+        # PROJECT, so one leaked record on the executor side silenced this
+        # check for the PLANNER too - which is exactly what happened on
+        # 2026-08-21.
+        if inflight_live(path):
             return True
         if sit is None:
             sess = best_session(path, role) or {}
@@ -6894,8 +6998,17 @@ def handle_event(event):
                     "gradle", "dotnet build")
         bg = bool(tin.get("run_in_background")) if isinstance(tin, dict) \
             else False
+        # Match the COMMAND, not what it is carrying. This used to test the
+        # whole string, heredoc body and all, so a shell command was tracked
+        # as a long build because of a word inside the text it was writing:
+        # on 2026-08-21 a `cat >> notes.md <<'ZZEOF'` was tracked
+        # because the prompt in the heredoc began "make an idle animation".
+        # It cost that pair its entire watchdog for five hours - see
+        # INFLIGHT_MAX_SEC. The first line is the command; everything after
+        # the first newline is data being fed to it.
+        head = cmd.splitlines()[0] if cmd else ""
         if event.get("tool_name") == "Bash" and (
-                bg or any(p in cmd for p in patterns)):
+                bg or any(p in head for p in patterns)):
             sig = cmd.split()[0][:40] if cmd else "bash"
             PROCTRACK.setdefault(path, {})[sig] = {
                 "cmd": cmd[:160], "started": time.time(),
@@ -9398,6 +9511,7 @@ def main():
     migrate_executor_mode()
     migrate_notify_levels()
     migrate_compaction_points()
+    reseed_proctrack()
     moved = migrate_keys()
     if moved:
         store.journal("bridge", "Re-keyed %d stored entries to the canonical "

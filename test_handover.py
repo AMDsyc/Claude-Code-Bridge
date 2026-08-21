@@ -3801,6 +3801,104 @@ check("no point, no handover from this branch", _np["do"] != "handover", True)
 check("and the view says the point is unknown rather than guessing it",
       daemon.wall_view(_sj(996305), PATH)["compact"], None)
 
+print("\n88. a tracked command whose PostToolUse never came silences")
+print("    every tier of the watchdog, and used to do it for ever")
+print("    2026-08-21: a heredoc was tracked at 16:41:18, the turn died at")
+print("    16:44:33 with server_error, and from then on clinch(), stalled()")
+print("    and the half-hourly assess() all read the pair as busy. A planner")
+print("    went 20 minutes without answering a report and not one of them")
+print("    said a word. A second project had carried the same since 08-18")
+print("   first: the record is only made for a command that IS a build -")
+print("   the pattern is matched against the command, not its heredoc")
+_pt = inspect.getsource(daemon.handle_event)
+check("the match reads the first line only",
+      'head = cmd.splitlines()[0] if cmd else ""' in _pt, True)
+check("and tests that, not the whole string",
+      "any(p in head for p in patterns)" in _pt, True)
+check("the whole-string test is gone",
+      "any(p in cmd for p in patterns)" in _pt, False)
+_real = ("cat >> research/prompts.md <<'ZZEOF'\n\n## A\n\n```\n"
+         "make an idle animation of a pixelart mech\n")
+_pats = ("godot", "pytest", "npm test", "cargo build", "make",
+         "gradle", "dotnet build")
+check("the command that started it matched on its payload",
+      any(p in _real for p in _pats), True)
+check("and does not match on its first line",
+      any(p in _real.splitlines()[0] for p in _pats), False)
+print("   a real build still matches, on either shape")
+check("a bare one", any(p in "godot --headless --export".splitlines()[0]
+                        for p in _pats), True)
+check("and a chained one",
+      any(p in "cd game && godot --headless".splitlines()[0]
+          for p in _pats), True)
+
+print("   second: a record that outlives every real command stops")
+print("   counting as work, so one leak cannot silence a pair for ever")
+daemon.STATE.clear()
+daemon.STATE.update({"sessions": {}, "windows": {}, "compactions": {},
+                     "last_session": {}, "inflight": {}, "loops": {},
+                     "paused": {}, "pids": {}})
+daemon.PROCTRACK.clear()
+daemon._INFLIGHT_STALE_TOLD.clear()
+_k = daemon.norm(PATH)
+check("an hour is the ceiling", daemon.INFLIGHT_MAX_SEC, 3600)
+daemon.STATE["inflight"][_k] = {
+    "cat": {"cmd": "cat >> notes.md <<'ZZEOF'", "started": time.time() - 60}}
+check("a command running a minute is work",
+      len(daemon.inflight_live(PATH)), 1)
+check("and tier 2 calls the pair busy",
+      daemon.tool_in_flight(PATH, "planner"), True)
+daemon.STATE["inflight"][_k]["cat"]["started"] = time.time() - 5.7 * 3600
+check("the same record 5.7 hours on is not work",
+      len(daemon.inflight_live(PATH)), 0)
+check("so tier 2 can see this pair again",
+      daemon.tool_in_flight(PATH, "planner"), False)
+print("   it is keyed by PROJECT, which is why the executor's leaked")
+print("   record took the check out for the PLANNER as well")
+check("the planner was silenced by the executor's record",
+      "inflight_live(path)" in inspect.getsource(daemon.tool_in_flight), True)
+print("   and a leak is said out loud once, not swallowed")
+_il = inspect.getsource(daemon.inflight_live)
+check("journalled at warn", '"warn"' in _il, True)
+check("once per record", "_INFLIGHT_STALE_TOLD" in _il, True)
+
+print("   third: tiers 1 and 3 read the same value through the same door")
+_sit = inspect.getsource(daemon.situation)
+check("situation asks inflight_live",
+      '"inflight": inflight_live(path)' in _sit, True)
+check("and not the raw dict",
+      'list((STATE.get("inflight") or {}).get(path, {}).values())' in _sit,
+      False)
+_cl = inspect.getsource(daemon.clinch)
+check("clinch still stands down on something in flight",
+      'sit.get("inflight")' in _cl, True)
+_as = inspect.getsource(daemon.assess)
+check("and assess still exits early on it", 'sit["inflight"]' in _as, True)
+print("   both are right to - what was wrong was the value they were given")
+
+print("   fourth: the only sweeper walks memory, which a restart empties")
+print("   while the record itself lives on disk and survives. After the")
+print("   21:56:07 restart nothing could report the leak any more")
+_pw = inspect.getsource(daemon.process_watch)
+check("process_watch walks PROCTRACK", "PROCTRACK.items()" in _pw, True)
+check("not the persisted record", 'STATE.get("inflight")' in _pw, False)
+daemon.PROCTRACK.clear()
+daemon.STATE["inflight"][_k] = {
+    "cat": {"cmd": "cat >> notes.md <<'ZZEOF'", "started": time.time() - 900}}
+check("after a restart the watcher sees nothing",
+      len(daemon.PROCTRACK.get(_k) or {}), 0)
+check("re-seeding hands it back", daemon.reseed_proctrack(), 1)
+check("and now the watcher has it", len(daemon.PROCTRACK.get(_k) or {}), 1)
+check("with the ORIGINAL start time, not now",
+      int(time.time() - daemon.PROCTRACK[_k]["cat"]["started"]) >= 890, True)
+print("   it re-seeds and does not clear: the windows outlive the daemon,")
+print("   so a command genuinely running at restart is still running")
+check("a record already in memory is not doubled",
+      daemon.reseed_proctrack(), 0)
+_rs = inspect.getsource(daemon.reseed_proctrack)
+check("nothing is dropped here - ageing is INFLIGHT_MAX_SEC's job",
+      "pop(" in _rs or "clear()" in _rs, False)
+
 print("\n" + ("-" * 60))
 if FAILED:
     print("FAILED: %d" % len(FAILED))

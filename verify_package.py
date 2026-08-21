@@ -20,7 +20,7 @@
 Running the suites from an unpacked copy proves the copy WORKS. It does not
 prove the copy is the code that was reviewed: a file could be stale, a build
 could have picked up a different tree, a zip entry could have been written
-twice. This compares sha256 of every one of the 28 files across all three
+twice. This compares sha256 of every one of the 29 files across all three
 places - repository, archive entry, unpacked file - and a package that does
 not match on all three is not delivered, it is a failed build.
 
@@ -46,7 +46,8 @@ FILES = ["bridge.bat", "add-project.bat",
          # a pair's own history is part of the product. It is a different
          # question from the PUBLIC repository, where it must never go: it
          # quotes private messages and names closed projects.
-         "source/HONESTY_CASES.md", "source/verify_package.py",
+         "source/HONESTY_CASES.md",
+    "source/QUIET.md", "source/verify_package.py",
          "source/test_cases.py", "source/test_handover.py",
          "source/test_archive.py", "source/test_search.py",
          "source/test_wall_handover.py", "source/test_multipair.py",

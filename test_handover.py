@@ -1252,10 +1252,14 @@ canon = daemon.honesty_text()
 check("the file is there and has something in it", len(canon) > 2000, True)
 check("and the rules stayed short enough to put in front of every task",
       len(canon) < 15000, True)
-check("with rules in it, not just prose",
-      len(re.findall(r"^\d+\. \*\*", canon, re.M)), 28)
+# Counted from the canon itself, not pinned: the number changes when a rule
+# is added (29 on 2026-08-21, the quiet-run rule), and a copy of it here
+# would only ever be yesterday's. What must hold is that EVERY rule carries
+# a check - that is the invariant, and it does not depend on how many.
+_n_rules = len(re.findall(r"^\d+\. \*\*", canon, re.M))
+check("with rules in it, not just prose", _n_rules >= 28, True)
 check("and each of them carries its check where it is read",
-      len(re.findall(r"^\s+\*[^*]+:\*", canon, re.M)), 28)
+      len(re.findall(r"^\s+\*[^*]+:\*", canon, re.M)), _n_rules)
 print("   every rule carries the thing that makes it a rule and not a wish:")
 print("   a way to check it from outside")
 # Everything about HONESTY_CASES.md moved to test_cases.py, which is
@@ -1523,11 +1527,19 @@ _vp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 check("the tool ships with the repo", os.path.exists(_vp), True)
 _ns = {}
 exec(compile(open(_vp, encoding="utf-8").read(), _vp, "exec"), _ns)
+# The COUNT is read from the list rather than pinned beside it: it moved
+# 28 -> 29 on 2026-08-21 when QUIET.md joined the package, and a second
+# copy of the number here would only ever be yesterday's. What matters is
+# not how many there are but that the list contains the files a recipient
+# needs in order to check the package - including this checker itself.
+_n_files = len(_ns["FILES"])
 check("it checks every file the package snippet lists, itself included - "
       "a package its recipient cannot verify is a weaker package",
-      (len(_ns["FILES"]), "source/verify_package.py" in _ns["FILES"],
+      (_n_files >= 28, "source/verify_package.py" in _ns["FILES"],
        "source/HONESTY_CASES.md" in _ns["FILES"],
-       "source/LICENSE" in _ns["FILES"]), (28, True, True, True))
+       "source/LICENSE" in _ns["FILES"]), (True, True, True, True))
+check("and the canon's own long form travels with it",
+      "source/QUIET.md" in _ns["FILES"], True)
 _repo = os.path.join(TMP, "pkgrepo")
 _unp = os.path.join(TMP, "pkgunp")
 for _rel in _ns["FILES"]:
@@ -1542,7 +1554,7 @@ with _zf.ZipFile(_zip, "w") as z:
         z.write(os.path.join(_repo, _rel), _rel)
 _rows, _bad, _extra, _names = _ns["compare"](_repo, _zip, _unp)
 check("a package built from the tested tree matches everywhere",
-      (_bad, _extra, len(_names)), ([], [], 28))
+      (_bad, _extra, len(_names)), ([], [], _n_files))
 _tampered = os.path.join(TMP, "tampered.zip")
 with _zf.ZipFile(_tampered, "w") as z:
     for _rel in _ns["FILES"]:
@@ -1605,7 +1617,8 @@ check("every one after that carries the titles alone",
 check("and the short form is a fraction of the price",
       len(_s2) < len(_s1) / 4, True)
 check("but still names every rule",
-      len([l for l in _s2.splitlines() if re.match(r"^\d+\. \S", l)]), 28)
+      len([l for l in _s2.splitlines() if re.match(r"^\d+\. \S", l)]),
+      _n_rules)
 check("and says where the full text is, so nothing is hidden by shortening",
       "HONESTY.md" in _s2, True)
 print("   the mark is per SESSION - a handover makes a new one, and a")
@@ -3501,6 +3514,77 @@ print("   of exactly the window pid the bridge recorded at launch, so the")
 print("   test is sound on real data - and there was not one refusal in the")
 print("   journal that day, so this is a latent defect closed, not an")
 print("   outage explained")
+
+print("\n84. rule 29: a run that opens a window runs quiet")
+print("    The owner: he must not see flashing windows or lose the keyboard")
+print("    to a test while he is working, in any project. The canon is read")
+print("    from disk on EVERY delivery, so a rule added here reaches every")
+print("    pair on their next task or report - no restart, no message")
+_here = os.path.dirname(os.path.dirname(os.path.abspath(daemon.__file__)))
+_ru = _io.open(os.path.join(_here, "HONESTY.md"), encoding="utf-8").read()
+# HONESTY.en.md is a source for the PUBLIC build, not a package file, so it
+# is present in the repository and absent from an unpacked package. The
+# English wording is therefore asserted only where the file exists - and its
+# absence from the REPOSITORY is itself a failure, checked just below, so
+# this cannot quietly become a check that never runs.
+_en_path = os.path.join(_here, "HONESTY.en.md")
+_en_here = os.path.isfile(_en_path)
+_en = _io.open(_en_path, encoding="utf-8").read() if _en_here else ""
+check("the English canon is in the repository beside the Russian one",
+      _en_here or not os.path.isfile(os.path.join(_here, "make_public.py")),
+      True)
+check("rule 29 is in the canon", "29. **" in _ru, True)
+check("and in the English canon", not _en_here or "29. **" in _en, True)
+print("   the Russian canon is checked STRUCTURALLY here and the English one")
+print("   for its wording, on purpose: this file is published, the public")
+print("   repository is English-only, and check_public.py enforces that.")
+print("   Spelling the Russian phrases out in escapes would pass the scan")
+print("   while meaning exactly what the scan exists to stop")
+import re as _re29
+check("the Russian canon now carries 29 numbered rules",
+      len(_re29.findall(r"^\d+\. \*\*", _ru, _re29.M)), 29)
+check("and every one of them still carries its check",
+      len(_re29.findall(r"^\s+\*[^*]+:\*", _ru, _re29.M)), 29)
+check("the English canon carries 29 too",
+      not _en_here
+      or len(_re29.findall(r"^\d+\. \*\*", _en, _re29.M)) == 29, True)
+check("the English header counts them",
+      not _en_here or "Twenty-nine rules." in _en, True)
+print("   the English rule names the mechanism, not just the goal")
+check("born minimised by the operating system",
+      not _en_here or ("BORN minimised" in _en
+                       and "operating system" in _en), True)
+check("with no right to take the keyboard",
+      not _en_here or "no right to take the keyboard" in _en, True)
+check("drawing forced while it stays minimised",
+      not _en_here or "drawing forced" in _en, True)
+check("the default in the wrapper, never in project settings",
+      not _en_here or "never in the project's settings" in _en, True)
+check("and coordinates refused outright",
+      not _en_here or "Coordinates are not a mechanism" in _en, True)
+print("   and it is honest that there is NO mechanical gate - the bridge")
+print("   cannot see anybody's screens, so the last word is the person's.")
+print("   Inventing a pseudo-gate would be a check that cannot fail")
+check("the English rule says the gate does not exist",
+      not _en_here or "no mechanical gate" in _en, True)
+check("and hands the last word to the person",
+      not _en_here or "do not call the mode quiet until they" in _en, True)
+print("   the full text is a separate file, so the canon pays four lines")
+print("   and not an essay - QUIET.md is never delivered to anybody")
+_q = os.path.join(_here, "QUIET.md")
+check("QUIET.md exists", os.path.isfile(_q), True)
+_qt = _io.open(_q, encoding="utf-8").read()
+import re as _re29b
+check("it carries principles, traps and a checklist - four sections",
+      len(_re29b.findall(r"^## \d+\.", _qt, _re29b.M)), 4)
+check("both canons point at it",
+      "QUIET.md" in _ru and (not _en_here or "QUIET.md" in _en), True)
+print("   minimised by an order from the OS, not minimised later by code")
+_ls = inspect.getsource(sessions.launch)
+check("the window is born minimised and unfocused",
+      "SW_SHOWMINNOACTIVE" in _ls, True)
+check("by STARTUPINFO at creation, not by a later call",
+      "STARTF_USESHOWWINDOW" in _ls, True)
 
 print("\n" + ("-" * 60))
 if FAILED:

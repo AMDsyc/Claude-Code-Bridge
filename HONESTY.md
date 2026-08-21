@@ -1,6 +1,6 @@
 # Rules of honest work
 
-Twenty-eight rules. Every one of them has already been broken by somebody
+Twenty-nine rules. Every one of them has already been broken by somebody
 working on this bridge. They are short on purpose: this text goes in front of
 every task and every report, so its length is paid for on every delivery.
 
@@ -176,6 +176,24 @@ The rules do not replace the task. They say how to do it.
     two places, and names both of them. There is one exception,
     `__init__.py`, and it is written down in `DUPLICATE_OK` rather than
     assumed.
+
+29. **A run that opens a window runs quiet.** The window is BORN minimised
+    by an order from the operating system - not minimised later by the
+    application's own code, which leaves the flash a person actually sees -
+    with no right to take the keyboard, and with drawing forced for as long
+    as it stays minimised. The default lives in the automation's own
+    wrapper, never in the project's settings, or it infects the runs a
+    person starts by hand. Coordinates are not a mechanism: the system
+    clamps a window's position back onto the desktop, and it does so
+    silently. Nobody should see a window at all.
+    *Check:* the application reads its own window mode BEFORE it changes
+    anything and must see "minimised"; the same seed run normally and run
+    quiet gives the same numbers, and a different seed must move them. This
+    rule has no mechanical gate - the bridge cannot see your screens - so
+    the last word belongs to the person in front of them: ask outright
+    whether they saw anything, and do not call the mode quiet until they
+    answer. The full text, the traps and the checklist are in `QUIET.md`
+    beside this file.
 
 ## What stands in the way of the action
 

@@ -1716,14 +1716,41 @@ print("    with_rules() in isolation proves the function; this proves the")
 print("    path - a task the planner sent and a report the executor made,")
 print("    both arriving at a live channel with the canon in front")
 RP = A
+
+
+def carrying(role, needle):
+    """The delivery that carries this text - not merely the latest one.
+
+    Every read here used to be DELIVERED[...][-1], and that made the
+    whole case a race with the idle watcher: its "sent it its state"
+    branch delivers state_report(...) tagged {"kind": "task"}, so one
+    background message can both become [-1] and - because that kind is
+    CHARGED - spend the session's one full-canon delivery.
+
+    Reading [-1] failed in two different ways. As a check it returned
+    the wrong answer; as `_r.index(...)` it raised ValueError and took
+    the suite down with exit 1 and no FAIL line at all, which is the
+    worse of the two because it looks like a crash rather than a
+    verdict.
+
+    When this failed the tiering was never wrong: 10 536 characters
+    against 1 553, exactly as documented.
+    """
+    for d in DELIVERED[(canon(RP), role)]:
+        body = d.get("content") or ""
+        if needle in body:
+            return body
+    return None
+
+
 DELIVERED[(canon(RP), "executor")].clear()
 post("/task", {"project": RP, "instructions": "ETO TELO ZADACHI"}, secret=True)
 # This session has been written to before, so the canon has already been
 # spent on it in full - what rides here is the reminder. That IS the
 # behaviour under test: the fence is always there, the whole text is not.
 check("the task arrived",
-      until(lambda: DELIVERED[(canon(RP), "executor")]), True)
-_t = DELIVERED[(canon(RP), "executor")][-1].get("content") or ""
+      until(lambda: carrying("executor", "ETO TELO ZADACHI")), True)
+_t = carrying("executor", "ETO TELO ZADACHI") or ""
 check("with the rules in front of it",
       ("RULES OF WORK" in _t,
        _t.index("RULES OF WORK") < _t.index("ETO TELO ZADACHI")),
@@ -1735,8 +1762,8 @@ threading.Thread(
     target=lambda: stop_hook(RP, "executor", GSID, "ETO TELO OTCHETA"),
     daemon=True).start()
 check("the report arrived",
-      until(lambda: DELIVERED[(canon(RP), "planner")]), True)
-_r = DELIVERED[(canon(RP), "planner")][-1].get("content") or ""
+      until(lambda: carrying("planner", "ETO TELO OTCHETA")), True)
+_r = carrying("planner", "ETO TELO OTCHETA") or ""
 check("with the rules in front of it too",
       ("RULES OF WORK" in _r,
        _r.index("RULES OF WORK") < _r.index("ETO TELO OTCHETA")),
@@ -1758,20 +1785,26 @@ print("   and the tiering holds on the real path: a window that has "
 print("   written to gets the canon whole, and only then the reminder")
 FRESH = "fresh-sid-0001"
 daemon.remember_session(RP, "executor", FRESH)
+
+
+# The precondition of this case is a session nobody has written to yet,
+# and on the real path that has to be established, not assumed. Stopping
+# the loop holds off the watcher that would otherwise write first, and
+# clearing the mark makes "fresh" true at the moment it is claimed.
+# Neither touches what is under test: /task -> deliver_ex ->
+# rules_for_delivery still runs exactly as it does in production, and
+# the two assertions below still fail if the tiering stops working.
+post("/loop", {"action": "stop", "project": RP})
+(daemon.STATE.get("rules_full") or {}).pop(FRESH, None)
 DELIVERED[(canon(RP), "executor")].clear()
 post("/task", {"project": RP, "instructions": "PERVAYA"}, secret=True)
 check("the first task to a fresh window carries the whole canon",
-      until(lambda: DELIVERED[(canon(RP), "executor")]
-            and "*"
-            in (DELIVERED[(canon(RP), "executor")][-1].get("content")
-                or "")), True)
+      until(lambda: "*" in (carrying("executor", "PERVAYA") or "")), True)
 DELIVERED[(canon(RP), "executor")].clear()
 post("/task", {"project": RP, "instructions": "VTORAYA"}, secret=True)
 check("and the second one carries the reminder instead",
-      until(lambda: DELIVERED[(canon(RP), "executor")]
-            and "*"
-            not in (DELIVERED[(canon(RP), "executor")][-1].get("content")
-                    or "")), True)
+      until(lambda: carrying("executor", "VTORAYA") is not None
+            and "*" not in carrying("executor", "VTORAYA")), True)
 
 print("\n28. continue is a judgement too, and judgement needs an artefact")
 print("    Another pair found the gap by falling into it: their planner")

@@ -5342,6 +5342,45 @@ def nudge_stalled(path, role, since, owed=""):
     return "called you"
 
 
+def pair_moved_since(path, role, when):
+    """Any sign of life in this pair since `when`? Cheap signals only.
+
+    Used to re-ask, at the moment of speaking, a question that was answered
+    when the message was decided on. Four independent witnesses, any one of
+    which means the pair is not the stopped thing the message would call it:
+
+      a finished turn      STATE["stop_seen"] moved past `when`
+      a delivery           a task went out after it
+      something running    a tracked command or the session's own state
+      a growing transcript the window is writing
+
+    Errs towards SILENCE: anything unreadable answers "moved", because the
+    cost of a message wrongly withheld is a line in the journal, and the
+    cost of one wrongly sent is a person told a working pair is dead.
+    """
+    if not when:
+        return False
+    try:
+        key = "%s|%s" % (norm(path), role)
+        if float((STATE.get("stop_seen") or {}).get(key) or 0) > when:
+            return True
+        if float((STATE.get("last_task") or {}).get(norm(path)) or 0) > when:
+            return True
+        if (STATE.get("inflight") or {}).get(norm(path)) \
+                or PROCTRACK.get(norm(path)):
+            return True
+        sess = best_session(path, role) or {}
+        if float(sess.get("seen_at") or 0) > when:
+            return True
+        sid = last_session_id(path, role) or sess.get("session_id")
+        tp = sessions.transcript_of(sid) if sid else None
+        if tp and os.path.isfile(tp) and os.path.getmtime(tp) > when:
+            return True
+    except Exception:
+        return True                  # cannot tell -> say nothing
+    return False
+
+
 def check_lost_turn(path):
     """A turn that ended in an error and never came back.
 
@@ -5366,6 +5405,28 @@ def check_lost_turn(path):
             with _lock:                       # the turn came back after all
                 STATE["stopfail"].pop(key, None)
                 save_state()
+            continue
+        # No claim about state without checking it AT THE MOMENT of the
+        # claim. The decision to speak was taken 150 seconds ago; a lot can
+        # happen in 150 seconds, and on 2026-08-21 it did - a turn died at
+        # 11:35:06, the owner nudged the window himself, and the message
+        # that went out at 11:38:36 said "the pair is idle, not working"
+        # about a pair that was working. True when it was decided, false
+        # when it was said.
+        #
+        # The grace itself is right and is not touched: it exists to let a
+        # late report catch up. What was missing is the second look.
+        if pair_moved_since(path, role, rec.get("at", 0)):
+            with _lock:
+                STATE["stopfail"].pop(key, None)
+                save_state()
+            store.journal("turn_lost",
+                          "%s / %s: the turn died at %s but the pair is "
+                          "moving again - not telling"
+                          % (project_name(path), role,
+                             time.strftime("%H:%M:%S",
+                                           time.localtime(rec.get("at", 0)))),
+                          project_name(path), role, "log", project_dir=path)
             continue
         with _lock:
             STATE["stopfail"][key]["told"] = True
@@ -6340,28 +6401,41 @@ def handle_event(event):
                           % (model, at // 1000,
                              min(prev or at, at) // 1000),
                           project, role, "log", project_dir=path)
-            # The threshold the bridge passes at launch is only a belief
-            # until a compaction proves where one actually fires. When the
-            # two disagree this far, the override is not reaching the
-            # session, and every distance computed from the set value is
-            # wrong. Said once per role, then dropped - the measurement
-            # takes over from here anyway.
+            # This used to conclude "the setting is not reaching the
+            # session" whenever the size after a compaction sat far above
+            # the threshold, and it said so five times between 2026-07-30
+            # and 2026-08-17. It was wrong every time, and it was believed.
+            #
+            # `at` is where the TURN ENDED, not where compaction fired -
+            # the line above says as much, calling it an upper bound.
+            # Compaction fires BETWEEN turns, so a turn that starts under
+            # the threshold and grows past it ends far above it with the
+            # setting working perfectly. That is one turn overshooting, not
+            # a setting going missing, and the two need opposite repairs.
+            #
+            # Checked against the client on 2026-08-21: it reads
+            # CLAUDE_AUTOCOMPACT_PCT_OVERRIDE as a PERCENT and honours it
+            # for 0 < n <= 100 -
+            #   threshold = min(floor(window * n/100), window - 13000)
+            # - and launch() does pass it. So the only thing this can
+            # honestly report is the overshoot itself.
             want = applied_compact_pct(path, role)
             win = ref.get("window") or 0
             if want and win:
                 got = at * 100.0 / win
-                if abs(got - want) > 10 and not STATE.get("pctgap:%s|%s"
-                                                          % (path, role)):
+                if got - want > 10 and not STATE.get("pctgap:%s|%s"
+                                                     % (path, role)):
                     with _lock:
                         STATE["pctgap:%s|%s" % (path, role)] = True
                         save_state()
                     store.journal(
-                        "loop", "The %s was launched with the compaction "
-                        "threshold set to %d%% but compacted at %d%% of its "
-                        "window (%dk of %dk). The setting is not reaching "
-                        "the session; the measured point is used instead."
+                        "loop", "The %s compacts at %d%% and this turn ran "
+                        "to %d%% of the window (%dk of %dk) before it "
+                        "ended - one turn crossed the threshold and kept "
+                        "going. The turn is the size to watch, not the "
+                        "setting."
                         % (role, want, round(got), at // 1000, win // 1000),
-                        project, role, "sound", project_dir=path)
+                        project, role, "log", project_dir=path)
         policy = store.project_config(CFG, path).get("rotate_policy",
                                                      "compact")
         if policy == "compact":

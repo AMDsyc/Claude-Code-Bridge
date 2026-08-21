@@ -204,7 +204,20 @@ PROJECT_DEFAULTS = {
     # Percent of the context window at which Claude Code compacts. Set it and
     # the point is known instead of discovered; leave it None to keep Claude
     # Code's own default, which has changed between versions.
-    "autocompact_pct": 80,
+    #
+    # 70, not 80, since 2026-08-21, and the arithmetic is an incident rather
+    # than a preference. Compaction fires BETWEEN turns, so what has to fit
+    # between the threshold and the end of the window is one whole turn:
+    #
+    #   window                     1 000 000
+    #   at 80% the threshold is      800 000   -> 200 000 of headroom
+    #   the turn that died needed  1 000 274   -> it wanted 200 274
+    #
+    # It missed by 274 tokens, and the session died with its own compaction
+    # request too big to send. 70% gives 300 000 - half as much again as the
+    # largest single turn ever seen here - and that margin is the whole
+    # reason for the number.
+    "autocompact_pct": 70,
     # How many compactions a session is worth continuing through. Each one
     # frees 60-70% of the context and the session carries on, so compaction
     # is not the danger; what degrades is understanding. Reports converge on

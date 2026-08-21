@@ -128,6 +128,41 @@ def allow_verdict_tool(project):
     return True
 
 
+def keep_autocompact_on(project):
+    """Make auto-compaction explicit rather than assumed.
+
+    Measured against the client on 2026-08-21: it defaults to ON -
+
+        function iP(){ if(DISABLE_COMPACT||DISABLE_AUTO_COMPACT) return false;
+                       return setting("autoCompactEnabled", true).value }
+
+    - so writing `true` changes nothing today. It is written anyway, for one
+    reason: the setting is a switch a person can flip in the client's own
+    settings screen, and if it is ever flipped off the compaction threshold
+    the bridge sets stops meaning anything, silently, and every window runs
+    to the hard limit. An explicit `true` in the project's settings makes
+    that visible instead of mysterious.
+
+    Written to the project's settings.json, beside the hooks, so it travels
+    with the project and shows up in a diff.
+    """
+    path = os.path.join(project, ".claude", "settings.json")
+    data = {}
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            return False
+    if data.get("autoCompactEnabled") is True:
+        return False
+    data["autoCompactEnabled"] = True
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2)
+    return True
+
+
 def approve_channel(project):
     """Pre-approve the bridge channel so no session ever asks about it.
 
@@ -342,6 +377,8 @@ def install(project, role=None, python=None, statusline=True):
         json.dump(cfg, fh, ensure_ascii=False, indent=2)
 
     allow_verdict_tool(project)
+    if keep_autocompact_on(project):
+        print("  auto-compaction written as explicitly on")
 
     gi = os.path.join(project, ".gitignore")
     line = "bridge-logs/"

@@ -312,8 +312,17 @@ check("the loop is on",
       daemon.loop_state(PROJ)[1].get("active"), True)
 check("the window was observed, not deduced",
       daemon.wall_view(sess_of("executor"), PROJ)["window"], WINDOW)
+# Not a magic number: it is PROJECT_DEFAULTS["autocompact_pct"] of the
+# window, and it moved 80 -> 70 on 2026-08-21 because compaction fires
+# BETWEEN turns and 80% left only 200k of headroom, while the turn that
+# killed a session needed 200,274. Read from the default rather than
+# copied, so the suite follows the decision instead of pinning yesterday's.
+_want_compact = min(int(WINDOW * store.PROJECT_DEFAULTS["autocompact_pct"]
+                        / 100.0), WINDOW - 13000)
 check("the compaction point comes from the launch threshold",
-      daemon.wall_view(sess_of("executor"), PROJ)["compact"], 800000)
+      daemon.wall_view(sess_of("executor"), PROJ)["compact"], _want_compact)
+check("and that threshold leaves a whole turn of headroom",
+      WINDOW - _want_compact >= 200274, True)
 check("nothing has compacted yet",
       daemon.compactions_done(PROJ, "executor"), 0)
 check("so the distance to the wall is not sizeable",
@@ -429,7 +438,8 @@ check("with remote control, so it shows up in the app",
       "--remote-control" in lr["argv"], True)
 check("and the development-channels flag the channel needs",
       "--dangerously-load-development-channels" in lr["argv"], True)
-check("the compaction threshold was passed to it", lr["autocompact"], "80")
+check("the compaction threshold was passed to it", lr["autocompact"],
+      str(store.PROJECT_DEFAULTS["autocompact_pct"]))
 check("no --resume: a handover is a NEW session, not the old one",
       "--resume" in lr["argv"], False)
 

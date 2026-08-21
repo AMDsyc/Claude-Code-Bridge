@@ -3305,6 +3305,115 @@ check("start_daemon hands the daemon a cleaned environment",
 check("built from the same one list, not a second copy of it",
       "clean_env()" in inspect.getsource(_rl.start_daemon), True)
 
+print("\n80. no claim about state without checking it as it is said")
+print("    A turn died at 11:35:06 on 2026-08-21; the owner nudged the")
+print("    window himself; and the message that went out at 11:38:36 said")
+print("    \"the pair is idle, not working\" about a pair that was working.")
+print("    True when it was decided, false when it was said - and 150")
+print("    seconds is long enough for that to matter")
+_mp = os.path.join(TMP, "moved_project")
+_when = time.time() - 200
+daemon.STATE["stop_seen"] = {}
+daemon.STATE["last_task"] = {}
+daemon.STATE["inflight"] = {}
+check("a pair with no sign of life has not moved",
+      daemon.pair_moved_since(_mp, "executor", _when), False)
+print("   four independent witnesses, any one of which is enough")
+daemon.STATE["stop_seen"] = {"%s|executor" % daemon.norm(_mp): time.time()}
+check("a turn finished since then counts",
+      daemon.pair_moved_since(_mp, "executor", _when), True)
+daemon.STATE["stop_seen"] = {}
+daemon.STATE["last_task"] = {daemon.norm(_mp): time.time()}
+check("a task delivered since then counts",
+      daemon.pair_moved_since(_mp, "executor", _when), True)
+daemon.STATE["last_task"] = {}
+daemon.STATE["inflight"] = {daemon.norm(_mp): {"x": {"cmd": "build"}}}
+check("something running counts",
+      daemon.pair_moved_since(_mp, "executor", _when), True)
+daemon.STATE["inflight"] = {}
+check("and with all of them cleared it is quiet again",
+      daemon.pair_moved_since(_mp, "executor", _when), False)
+print("   it errs towards SILENCE: a message wrongly withheld costs a line")
+print("   in the journal, one wrongly sent tells a person a working pair is")
+print("   dead. So anything it cannot read answers 'moved'")
+_saved_best = daemon.best_session
+
+
+def _boom(*a, **k):
+    raise RuntimeError("cannot read")
+
+
+daemon.best_session = _boom
+check("an unreadable state means say nothing",
+      daemon.pair_moved_since(_mp, "executor", _when), True)
+daemon.best_session = _saved_best
+check("and a missing timestamp is not a claim either way",
+      daemon.pair_moved_since(_mp, "executor", 0), False)
+print("   the grace itself is untouched - it is there so a late report can")
+print("   catch up, and it was never the thing that was wrong")
+_cl = inspect.getsource(daemon.check_lost_turn)
+check("the grace is still stopfail_grace",
+      "stopfail_grace" in _cl, True)
+check("and the check happens before the message, not instead of the grace",
+      _cl.index("pair_moved_since") < _cl.index('notify("crash"'), True)
+check("a pair that came back is dropped from the book, not just skipped",
+      'STATE["stopfail"].pop(key, None)' in _cl, True)
+
+print("\n81. compaction fires between turns, so a turn has to fit")
+print("    An executor died on 2026-08-21 with its own compaction")
+print("    request too big to send: 1,000,274 tokens against a")
+print("    1,000,000 window. At 80% the threshold was 800k, which")
+print("    leaves 200,000 of headroom - and the turn wanted 200,274.")
+print("    It missed by 274 tokens")
+check("the threshold is 70 now, not 80",
+      store.PROJECT_DEFAULTS.get("autocompact_pct"), 70)
+print("   70% leaves 300k - half as much again as the largest single turn")
+print("   ever seen here. That margin IS the number's reason")
+_win = 1000000
+_thr = min(int(_win * 70 / 100), _win - 13000)
+check("on a 1M window that is a 700k threshold", _thr, 700000)
+check("leaving 300k of headroom for one turn", _win - _thr, 300000)
+check("which is more than the turn that died needed",
+      (_win - _thr) > 200274, True)
+print("   and the value reaches the window: the client reads")
+print("   CLAUDE_AUTOCOMPACT_PCT_OVERRIDE as a PERCENT and honours it for")
+print("   0 < n <= 100, and launch() puts it in the environment it passes")
+_ls = inspect.getsource(sessions.launch)
+check("launch sets the override from what it was given",
+      'env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(int(autocompact_pct))'
+      in _ls, True)
+check("and passes that environment to the process",
+      "env=env" in _ls, True)
+print("   the detector no longer accuses the setting of going missing. It")
+print("   said so five times between 2026-07-30 and 2026-08-17 and was")
+print("   wrong every time: `at` is where the TURN ENDED, not where")
+print("   compaction fired, and a turn that starts under the threshold and")
+print("   grows past it ends far above it with the setting working")
+_ds = inspect.getsource(daemon)
+check("it does not claim the setting is not reaching the session",
+      "The setting is not reaching" in _ds, False)
+check("it reports the overshoot instead",
+      "one turn crossed the threshold and kept" in _ds, True)
+check("and at log level, not as an alarm",
+      '"The %s compacts at %d%% and this turn ran "' in _ds, True)
+print("   auto-compaction is written down rather than assumed. The client")
+print("   defaults it ON, so this changes nothing today - it is written so")
+print("   that flipping it off becomes visible instead of silently making")
+print("   the threshold meaningless")
+from bridgecore import install as _inst2
+_acp = os.path.join(TMP, "autocompact_project")
+os.makedirs(os.path.join(_acp, ".claude"), exist_ok=True)
+_io.open(os.path.join(_acp, ".claude", "settings.json"), "w",
+         encoding="utf-8").write(u'{"env": {"KEEP": "me"}}')
+check("the key is written", _inst2.keep_autocompact_on(_acp), True)
+_after = _js.load(_io.open(os.path.join(_acp, ".claude", "settings.json"),
+                           encoding="utf-8"))
+check("and it is true", _after.get("autoCompactEnabled"), True)
+check("while whatever was already there is untouched",
+      (_after.get("env") or {}).get("KEEP"), "me")
+check("writing it twice is a no-op, not a rewrite",
+      _inst2.keep_autocompact_on(_acp), False)
+
 print("\n" + ("-" * 60))
 if FAILED:
     print("FAILED: %d" % len(FAILED))

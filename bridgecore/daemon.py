@@ -1328,7 +1328,7 @@ def proc_started(pid):
         return None
 
 
-def channel_supersedes(prev, pid):
+def channel_supersedes(prev, pid, ppid=None, path=None, role=None):
     """May a registration from `pid` replace the record `prev`?
 
     Two channel processes can hold the same (project, role) at once: a
@@ -1352,6 +1352,36 @@ def channel_supersedes(prev, pid):
         return True
     if str(prev.get("pid")) == str(pid):
         return True
+
+    # Parentage decides before age does, because age gets this one exactly
+    # backwards. PROJECT is os.getcwd() and ROLE is BRIDGE_ROLE, and both
+    # are inherited by anything the window spawns - a subagent's own MCP
+    # servers included - so such a channel registers under the very same
+    # (project, role) key. It is always YOUNGER than the window's channel,
+    # so the age rule hands it the record; and because a win is silent
+    # while only a refusal is logged, the theft leaves no trace. Worse, the
+    # window's own channel is then refused for ever after - it is the older
+    # contender - so every report goes to a process inside a subagent and
+    # the planner never sees one.
+    #
+    # Measured 2026-08-21: all six live channels were direct children of
+    # exactly the window pid the bridge recorded at launch, so the test is
+    # sound on real data. It did NOT happen that day - there was not one
+    # refusal in the journal - which is why this is a latent defect closed
+    # rather than an outage explained.
+    #
+    # Fails open in both directions: an unknown parent, or a window pid we
+    # never recorded, falls through to the age rule exactly as before.
+    win = (STATE.get("pids") or {}).get("%s|%s" % (norm(path or ""), role or "")) \
+        if (path or role) else None
+    win_pid = (win or {}).get("pid")
+    if win_pid and ppid:
+        if str(ppid) == str(win_pid):
+            return True          # the window's own channel always wins
+        prev_ppid = prev.get("ppid")
+        if prev_ppid and str(prev_ppid) == str(win_pid):
+            return False         # a stranger may not take it from the window
+
     mine, theirs = proc_started(pid), proc_started(prev.get("pid"))
     if mine is None or theirs is None:
         return True              # cannot tell - never refuse on a blind guess
@@ -8160,7 +8190,8 @@ class Handler(BaseHTTPRequestHandler):
                 # record flapped and half the reports went to the corpse.
                 _prev = (STATE.get("channels") or {}).get("%s|%s"
                                                           % (path, role))
-                if not channel_supersedes(_prev, body.get("pid")):
+                if not channel_supersedes(_prev, body.get("pid"),
+                                          body.get("ppid"), path, role):
                     store.journal("channel", "Refused a channel registration "
                                   "for %s: pid %s started before the pid %s "
                                   "already on record, so it is a leftover "
@@ -8184,7 +8215,11 @@ class Handler(BaseHTTPRequestHandler):
                            # the pid is what lets the next registration tell
                            # a live channel from a leftover; without it on
                            # disk the comparison has nothing to compare to
-                           "pid": body.get("pid")}
+                           "pid": body.get("pid"),
+                           # and the parent is what tells the window's own
+                           # channel from one a subagent started under the
+                           # same key
+                           "ppid": body.get("ppid")}
                     save_state()
                 mark_registered(path, role)
                 with _lock:

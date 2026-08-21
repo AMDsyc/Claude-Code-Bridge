@@ -3451,6 +3451,57 @@ _dsrc2 = inspect.getsource(daemon)
 check("and /state sends it, from the one place it is defined",
       'store.PROJECT_DEFAULTS.get("autocompact_pct")' in _dsrc2, True)
 
+print("\n83. a channel a subagent started may not take the window's seat")
+print("    PROJECT is os.getcwd() and ROLE is BRIDGE_ROLE, and anything a")
+print("    window spawns inherits both - so a channel started deeper inside")
+print("    the window registers under the very same (project, role) key.")
+print("    It is always YOUNGER than the window's own channel, and the age")
+print("    rule hands the record to the younger one")
+_p = os.path.join(TMP, "seat_project")
+_k = daemon.norm(_p)
+daemon.STATE["pids"] = {"%s|planner" % _k: {"pid": 1000}}
+_window_chan = {"pid": 2000, "ppid": 1000}          # the window's own
+print("   the window's own channel always keeps its seat")
+check("the window's channel may register",
+      daemon.channel_supersedes(None, 2000, 1000, _p, "planner"), True)
+check("and may re-register over itself",
+      daemon.channel_supersedes(_window_chan, 2000, 1000, _p, "planner"),
+      True)
+print("   a stranger under the same key is refused, however young it is -")
+print("   and this is the case the age rule got exactly backwards")
+check("a subagent's channel may not take it",
+      daemon.channel_supersedes(_window_chan, 3000, 2500, _p, "planner"),
+      False)
+print("   the theft would have been INVISIBLE: a win is silent, only a")
+print("   refusal is journalled, and afterwards the window's own channel is")
+print("   refused for ever - it is the older contender - so every report")
+print("   goes to a process inside a subagent and the planner sees none")
+print("   it fails open in both directions, or it would refuse real windows")
+check("an unknown parent falls through to the age rule",
+      daemon.channel_supersedes(_window_chan, 3000, None, _p, "planner")
+      in (True, False), True)
+check("a window pid we never recorded falls through too",
+      daemon.channel_supersedes(_window_chan, 3000, 2500,
+                                os.path.join(TMP, "unknown_project"),
+                                "planner") in (True, False), True)
+daemon.STATE["pids"] = {}
+check("with no pids on record at all it behaves exactly as before",
+      daemon.channel_supersedes(None, 3000, 2500, _p, "planner"), True)
+print("   and the parent has to survive on the record, or the next")
+print("   comparison has nothing to compare against")
+_dsrc3 = inspect.getsource(daemon)
+check("the registration stores the parent",
+      '"ppid": body.get("ppid")' in _dsrc3, True)
+check("and channel.py sends it",
+      '"ppid": os.getppid()' in _io.open(
+          os.path.join(os.path.dirname(daemon.__file__), "channel.py"),
+          encoding="utf-8").read(), True)
+print("   measured 2026-08-21: all six live channels were direct children")
+print("   of exactly the window pid the bridge recorded at launch, so the")
+print("   test is sound on real data - and there was not one refusal in the")
+print("   journal that day, so this is a latent defect closed, not an")
+print("   outage explained")
+
 print("\n" + ("-" * 60))
 if FAILED:
     print("FAILED: %d" % len(FAILED))

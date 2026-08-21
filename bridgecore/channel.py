@@ -306,6 +306,14 @@ def heartbeat(port):
     while True:
         post_daemon("/channel/register",
                     {"project": PROJECT, "port": port, "pid": os.getpid(),
+                     # Whose child this channel is. PROJECT is os.getcwd()
+                     # and ROLE comes from BRIDGE_ROLE, and ANYTHING the
+                     # window spawns inherits both - so a channel started
+                     # deeper inside the window registers under exactly the
+                     # same key. The parent is what tells the window's own
+                     # channel from one belonging to something the window
+                     # started; the daemon knows which pid it launched.
+                     "ppid": os.getppid(),
                      "role": ROLE})
         time.sleep(45)
 

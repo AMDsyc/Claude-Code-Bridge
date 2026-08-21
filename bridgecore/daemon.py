@@ -24,6 +24,7 @@ Runs on 127.0.0.1 only. Start with bridge.bat or python -m bridgecore.daemon.
 """
 
 import glob
+import hashlib
 import json
 import os
 import re
@@ -1848,6 +1849,97 @@ def acted_recently(path, tag, gap=900):
     return False
 
 
+def question_fingerprint(question_tail):
+    """What the executor is waiting on, as one short string.
+
+    The wait is identified by its CONTENT. A timer answers "has it been
+    half an hour", which is a different question from "is this the same
+    wait I already called a person about".
+    """
+    said = "\n".join("%s: %s" % (r.get("who"), r.get("text"))
+                      for r in (question_tail or [])[-3:])
+    return hashlib.sha256(said.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+# What an explicit hand-back looks like, in the shipped language. A pair
+# working in another language adds its own wording under
+# config.json -> "decline_marks"; the two lists are used together, never
+# one instead of the other. Kept out of the source on purpose: the public
+# repository is English-only by design and check_public.py enforces it, so
+# a hard-coded list in another language could only ship by weakening that
+# gate - which is exactly what nobody may do to get their own file through.
+DECLINE_MARKS = ("owner's decision", "owner decision", "call the human",
+                 "not mine to decide", "the owner decides",
+                 "that is for the owner")
+
+
+def decline_marks():
+    """The shipped wording plus whatever this installation added."""
+    extra = CFG.get("decline_marks")
+    if isinstance(extra, str):
+        extra = [extra]
+    if not isinstance(extra, (list, tuple)):
+        extra = []
+    return tuple(DECLINE_MARKS) + tuple(
+        str(m).lower() for m in extra if str(m).strip())
+
+
+def planner_declined(text):
+    """Did the planner say this one is the owner's to decide?
+
+    Deliberately narrow. A planner that simply has not answered yet is not
+    declining, and must not be treated as one - the poll exists to wake
+    exactly that case. Only an explicit hand-back counts.
+    """
+    low = (text or "").lower()
+    return any(m in low for m in decline_marks())
+
+
+def note_owner_question(path, question_tail):
+    """One wait, one call to the human. The poll itself is untouched.
+
+    The half-hourly poll stays exactly as it is - it wakes halves that
+    have gone dull, and the owner was explicit that limiting it would
+    remove the thing it is for. What was missing is the other end: on
+    2026-08-21 the planner declined the same question fifteen times
+    between 05:48 and 09:38, correctly, because it was the owner's call -
+    and not one needs_you reached anybody. Counted from that day's
+    events.jsonl: 15 asks, 0 notifications. The owner answered when he
+    happened to come back.
+
+    So the decline now rings a phone, once per wait. The chat is a phone,
+    not a log: fifteen identical messages is not fifteen times the
+    information. A different wait is a different question and rings again.
+
+    Returns True when the caller should make that one call.
+    """
+    fp = question_fingerprint(question_tail)
+    key = norm(path)
+    with _lock:
+        book = STATE.setdefault("owner_question", {})
+        rec = book.get(key) or {}
+        if rec.get("fp") == fp and rec.get("told"):
+            return False
+        book[key] = {"fp": fp, "told": True, "at": time.time()}
+        save_state()
+    return True
+
+
+def call_human_about(path, question_tail):
+    """The planner handed this back to the owner. Ring once, and say why."""
+    name = project_name(path)
+    said = "\n\n".join("%s: %s" % (r.get("who"), r.get("text"))
+                         for r in (question_tail or [])[-3:])
+    store.journal("loop",
+                  "The planner says this is the owner's decision, so the "
+                  "human is being called - the poll goes on as before",
+                  name, "planner", "warn", project_dir=path)
+    notify("needs_you",
+           "%s: the executor is waiting and the planner says this one is "
+           "yours to decide.\n\n%s" % (name, said[-1200:]), path=path)
+    return "called you"
+
+
 def ask_planner_about(path, question_tail, ex):
     """Hand the executor's question to the planner, with the numbers.
 
@@ -2055,6 +2147,23 @@ def assess(path):
         return done("the planner at the end of its runway",
                     "handing over the planner to a fresh session")
 
+    found = clinch(path, sit)
+    if found:
+        # Named once per window, like every other branch here. A clinch
+        # that announced itself on every pass would be the fifteen-times
+        # problem again, wearing a different hat.
+        if acted_recently(path, "clinch"):
+            return done("both halves waiting on each other, already called")
+        return done("both halves waiting on each other",
+                    call_out_clinch(path, found))
+
+    hit = stalled(path, sit)
+    if hit:
+        if acted_recently(path, "stall:%s" % hit[0]):
+            return done("a half that has stopped writing, already nudged")
+        return done("a half that has stopped writing",
+                    nudge_stalled(path, hit[0], hit[1]))
+
     if waiting_for_direction(ex["tail"]):
         if acted_recently(path, "direction"):
             return done("an executor between pieces, already passed on")
@@ -2089,6 +2198,13 @@ def assess(path):
         return done("the executor between pieces", "told you")
 
     if looks_like_a_question(ex["tail"]):
+        # Tier 3, unchanged: the poll keeps its cadence and its reach. The
+        # only addition is that an explicit hand-back to the owner rings a
+        # phone once, instead of the question circling with nobody told.
+        if planner_declined(" ".join(r.get("text") or ""
+                                     for r in (pl["tail"] or [])[-3:])) \
+                and note_owner_question(path, ex["tail"]):
+            call_human_about(path, ex["tail"])
         if acted_recently(path, "question"):
             return done("an unanswered question, already passed on")
         return done("the executor waiting on an answer",
@@ -4646,6 +4762,302 @@ def note_stop_seen(path, role):
         save_state()
 
 
+# ---------------------------------------------------------------------
+# The three-tier watchdog. Tier 3 - the half-hourly blind poll - is older
+# than the other two and is deliberately UNTOUCHED: it exists to wake a
+# half that has gone dull, including the case where neither half knows the
+# other is stuck, and rate-limiting it would remove the thing it is for.
+# The owner said so on 2026-08-21 and again when approving these tiers.
+#
+# Tiers 1 and 2 are not a replacement for it. They are the cases that can
+# be NAMED, so that the pair is told what is missing instead of being
+# poked in general terms.
+#
+# What already held an invariant before these were written - checked
+# first, because a second counter for one fact is worse than none:
+#
+#   a turn that ended in an error and never came back
+#       -> check_lost_turn / STATE["stopfail"], thresholds.stopfail_grace
+#   a report nobody answered, three in a row
+#       -> note_silence / clear_silence, thresholds.silence_limit
+#   a report that reached nobody at all
+#       -> the undelivered_hold branch of run_review
+#   a window that launched and never registered
+#       -> the startup watchdog, thresholds.startup_grace
+#   an executor spinning on empty exchanges
+#       -> trivial_report + IDLE_SPIN_LIMIT + thresholds.idle_hold
+#   a command still running
+#       -> situation()["inflight"] and looks_busy(), thresholds.stall_grace
+#
+# Tier 1 adds only what is missing from that list, and the headline is the
+# owner's own case: the executor finished a piece and believed it had
+# sent it, nothing actually went out, and both halves now wait for each
+# other - or the same thing the other way round.
+# ---------------------------------------------------------------------
+
+
+def note_task_sent(path):
+    """Remember when work last went out, so a turn can be missed."""
+    with _lock:
+        STATE.setdefault("last_task", {})[norm(path)] = time.time()
+        save_state()
+
+
+def last_movement(path):
+    """The most recent moment this pair actually moved, or 0.
+
+    Movement is a finished turn or a task going out - not a status line and
+    not a heartbeat, both of which tick while nothing happens.
+    """
+    key = norm(path)
+    when = float((STATE.get("last_task") or {}).get(key) or 0)
+    for role in MANAGED_ROLES:
+        when = max(when, float((STATE.get("stop_seen") or {})
+                               .get("%s|%s" % (key, role)) or 0))
+    return when
+
+
+def clinch(path, sit, grace=None):
+    """Tier 1: both halves waiting for each other, and nothing in flight.
+
+    The case this was built for: the executor finished a piece and
+    believed it had sent it, nothing actually went out, and both halves
+    now wait for each other - or the same thing the other way round.
+    Neither half is stuck in the sense tier 2 means - both are
+    healthy and idle at their prompts - and neither will move, because
+    each believes the ball is with the other.
+
+    It is a statement about STATE, not about activity: the loop is on, so
+    work is owed; nothing sits in PENDING, so no report is being judged;
+    no verdict is travelling; nothing is running; and no handover is under
+    way. Every one of those is a legitimate reason to be quiet, which is
+    why they are all excluded before the quiet is called a clinch.
+
+    A paused pair and a loop that is off are NOT clinches - that is the
+    idle damper's territory and a deliberate stop respectively. A clinch
+    requires owed work.
+
+    Returns a dict naming the missing hop, or None.
+    """
+    if grace is None:
+        grace = float(CFG.get("thresholds", {}).get("clinch_grace", 900))
+    if not sit.get("loop") or sit.get("paused"):
+        return None                      # nothing is owed; quiet is correct
+    if (STATE.get("idle_holding") or {}).get(norm(path)):
+        return None                      # the damper is holding on purpose
+    if sit.get("reviewing") or sit.get("verdict_in_flight") \
+            or sit.get("handover") or sit.get("inflight"):
+        return None                      # something legitimately in flight
+    roles = sit.get("roles") or {}
+    if not all((roles.get(r) or {}).get("alive") for r in MANAGED_ROLES):
+        return None                      # a missing window is another guard
+    if any(looks_busy((roles.get(r) or {}).get("tail") or [])
+           for r in MANAGED_ROLES):
+        return None
+    moved = last_movement(path)
+    if not moved or time.time() - moved < grace:
+        return None
+    _, lp = loop_state(path)
+    n = lp.get("iteration") or 0
+    sent = float((STATE.get("last_task") or {}).get(norm(path)) or 0)
+    stopped = max(float((STATE.get("stop_seen") or {})
+                        .get("%s|%s" % (norm(path), r)) or 0)
+                  for r in MANAGED_ROLES)
+    # Name the hop that is missing rather than saying "stuck". Which half
+    # to wake follows from it: if work went out and no turn came back, the
+    # executor never picked it up; otherwise a report never reached the
+    # planner and the executor is the one holding it.
+    if sent >= stopped:
+        return {"why": "task_no_turn", "wake": "executor", "iteration": n,
+                "since": time.time() - moved,
+                "said": "iteration %s: work went out and no turn came back"
+                        % (n or "?")}
+    return {"why": "report_never_arrived", "wake": "executor", "iteration": n,
+            "since": time.time() - moved,
+            "said": "iteration %s: a turn finished and no report reached the "
+                    "planner" % (n or "?")}
+
+
+def call_out_clinch(path, found):
+    """Say what is missing, wake the half that owes it, then tell a human.
+
+    Named, not general: "iteration 41: a turn finished and no report
+    reached the planner" is something a person can act on; "the pair is
+    stuck" is not.
+    """
+    name = project_name(path)
+    mins = int((found.get("since") or 0) // 60)
+    said = found.get("said") or "the pair is waiting on itself"
+    store.journal("loop",
+                  "Both halves are idle with work owed and nothing in "
+                  "flight for %dm - %s. Waking the %s."
+                  % (mins, said, found.get("wake") or "executor"),
+                  name, found.get("wake") or "executor", "warn",
+                  project_dir=path)
+    woke = False
+    try:
+        woke = bool(deliver(path, found.get("wake") or "executor",
+                            "The bridge sees no work in flight for this "
+                            "project and both halves idle: %s. If you are "
+                            "holding a finished piece, report it now; if you "
+                            "have nothing, say so in one line." % said,
+                            {"kind": "info"}))
+    except Exception:
+        woke = False
+    if not woke:
+        notify("needs_you",
+               "%s: both halves are idle and nothing is in flight - %s. The "
+               "bridge could not reach the %s to wake it."
+               % (name, said, found.get("wake") or "executor"), path=path)
+    return "woke the %s" % (found.get("wake") or "executor") if woke \
+        else "called you"
+
+
+def transcript_frozen(path, role, quiet):
+    """Has this half's transcript stopped growing for longer than `quiet`?
+
+    The transcript is the only witness that is not the session's own word
+    for it: a window can be alive, its status line ticking, and nothing
+    being written. Size as well as mtime, because a file touched without
+    growing is not progress.
+
+    FAILS OPEN, and that matters more than the detection: no session id,
+    no transcript, an unreadable file, a clock that disagrees - all answer
+    "not frozen". A stall detector that guesses wrong accuses a working
+    pair, and the tier-3 poll is still behind it either way.
+
+    Returns (frozen, seconds_quiet) with seconds 0 when it cannot tell.
+    """
+    try:
+        sess = best_session(path, role) or {}
+        sid = last_session_id(path, role) or sess.get("session_id")
+        if not sid:
+            return False, 0
+        tp = sessions.transcript_of(sid)
+        if not tp or not os.path.isfile(tp):
+            return False, 0
+        st = os.stat(tp)
+        key = "%s|%s" % (norm(path), role)
+        with _lock:
+            book = STATE.setdefault("tscript", {})
+            was = book.get(key) or {}
+            now_ts = time.time()
+            if was.get("size") != st.st_size:
+                book[key] = {"size": st.st_size, "at": now_ts}
+                save_state()
+                return False, 0
+            since = now_ts - float(was.get("at") or now_ts)
+        return since >= quiet, since
+    except Exception:
+        return False, 0
+
+
+def tool_in_flight(path, role, sit=None):
+    """Is something legitimately running for this half right now?
+
+    Only signals the bridge actually writes are read here. That is worth
+    saying because the obvious-looking ones do not exist: there is no
+    STATE["tool_open"] and no STATE["compacting"], and a check reading
+    them would have been a check that never fires.
+
+      STATE["inflight"][path] / PROCTRACK[path]
+          a tracked long-running Bash command. NOT every tool - only the
+          background and long-pattern ones (see the PreToolUse branch).
+          Ordinary short tools are covered by the transcript instead:
+          they finish in seconds (p50 3s, p95 58s) and write as they go,
+          so they never reach the freeze threshold.
+      the session's own state
+          touch_session records "compacting" on PreCompact and "waiting on
+          a process" while a tracked command runs. Both are the client
+          telling us it is busy.
+
+    Cannot tell -> True. Being told "busy" wrongly costs one skipped
+    check; accusing a working half costs the pair's trust in the warning.
+    """
+    try:
+        if (STATE.get("inflight") or {}).get(norm(path)):
+            return True
+        if PROCTRACK.get(norm(path)):
+            return True
+        if sit is None:
+            sess = best_session(path, role) or {}
+            state = sess.get("state")
+        else:
+            state = ((sit.get("roles") or {}).get(role) or {}).get("state")
+        if state in ("compacting", "waiting on a process"):
+            return True
+    except Exception:
+        return True          # cannot tell -> assume busy, never accuse
+    return False
+
+
+def stalled(path, sit, quiet=None):
+    """Tier 2: this half owes an action, is not working, and is not writing.
+
+    Three conditions, all required:
+      (a) it owes something - tier 1 says what, or a report is unanswered;
+      (b) its transcript has not grown for longer than `quiet`;
+      (c) nothing is legitimately in flight - no tool open, no compaction,
+          no tracked process.
+
+    THE THRESHOLD IS MEASURED, not chosen. Across every journal this
+    bridge has written (data/logs/*/events.jsonl, 2026-07-26 to
+    2026-08-21): 5 400 tracked commands, median 3s, p95 58s, p99 311s -
+    the longest legitimate single command in ordinary use was about five
+    minutes, which matches the 302s `cat DECISIONS.md` seen on 2026-08-21.
+    Turn gaps: 14 314 samples, median 30s, p95 843s, p99 1889s.
+
+    The default of 600s is roughly twice the p99 command and ten times the
+    p95, and every one of those commands is excluded by (c) anyway - so
+    what 600s has to survive is a single model turn that writes nothing
+    for ten minutes with no tool running. Below the p99 turn gap of 1889s
+    only because (c) removes the reason turns are long.
+
+    Returns (role, seconds) for the first half that qualifies, or None.
+    """
+    if quiet is None:
+        quiet = float(CFG.get("thresholds", {}).get("stall_quiet", 600))
+    if not sit.get("loop") or sit.get("paused") or sit.get("handover"):
+        return None
+    roles = sit.get("roles") or {}
+    for role in MANAGED_ROLES:
+        r = roles.get(role) or {}
+        if not r.get("alive"):
+            continue
+        if tool_in_flight(path, role, sit):
+            continue
+        frozen, since = transcript_frozen(path, role, quiet)
+        if frozen:
+            return role, since
+    return None
+
+
+def nudge_stalled(path, role, since, owed=""):
+    """Push THIS half, and say what it owes - not a general poke."""
+    name = project_name(path)
+    mins = int((since or 0) // 60)
+    what = owed or "the piece you are holding"
+    store.journal("loop",
+                  "%s / %s has written nothing for %dm with no tool running "
+                  "and work owed - nudging it about %s"
+                  % (name, role, mins, what), name, role, "warn",
+                  project_dir=path)
+    try:
+        if deliver(path, role, "Nothing has been written in this window for "
+                               "%d minutes and no tool is running, while the "
+                               "bridge still expects %s. If you are working, "
+                               "carry on and ignore this. If you are not, "
+                               "finish the turn and say where you got to."
+                               % (mins, what), {"kind": "info"}):
+            return "nudged the %s" % role
+    except Exception:
+        pass
+    notify("needs_you", "%s: the %s has been silent for %dm with nothing "
+           "running and %s still owed, and the bridge cannot reach it."
+           % (name, role, mins, what), path=path)
+    return "called you"
+
+
 def check_lost_turn(path):
     """A turn that ended in an error and never came back.
 
@@ -5039,6 +5451,15 @@ def run_review(event, path, lp, msg, project, role):
         ev = IDLEWAIT.setdefault(path, threading.Event())
         ev.clear()
         clear_spin(path)
+        # A held pair looks exactly like a clinch from outside - loop on,
+        # both halves idle, nothing in PENDING, nothing in flight - because
+        # the hold happens before the iteration is spent and the waiter
+        # registered, so `reviewing` is False throughout. Without this the
+        # tier-1 check would call the damper a deadlock every time it did
+        # its job. Say plainly that this quiet is on purpose.
+        with _lock:
+            STATE.setdefault("idle_holding", {})[path] = time.time()
+            save_state()
         store.journal("loop", "Nothing to review for %d turns - holding the "
                               "pair until there is work, or %d minutes, "
                               "whichever comes first. The last turn said: %s"
@@ -5046,6 +5467,9 @@ def run_review(event, path, lp, msg, project, role):
                          brief(msg, 80) or "(nothing)"),
                       project, role, "log", project_dir=path)
         woken = ev.wait(hold)
+        with _lock:
+            (STATE.get("idle_holding") or {}).pop(path, None)
+            save_state()
         store.journal("loop", "Held pair released - %s"
                       % ("work arrived" if woken else
                          "checking in after %d minutes"
@@ -5921,6 +6345,8 @@ def deliver_task_later(path, text, tries=3):
     body = "Task from the planner:\n\n%s" % text
     for attempt in range(1, tries + 1):
         ok, why = deliver_ex(path, "executor", body, {"kind": "task"})
+        if ok:
+            note_task_sent(path)
         if ok:
             store.journal("task", "Task delivered to the executor%s"
                           % ("" if attempt == 1 else

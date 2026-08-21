@@ -2852,6 +2852,169 @@ check("no model chosen means no --model flag",
 _sess.subprocess.Popen = _real_popen
 daemon.maybe_auto_probe = _real_probe
 
+print("\n72. tier 1: both halves waiting on each other")
+print("    The case this was built for: the executor finished a piece")
+print("    and believed it had sent it, nothing actually went out, and")
+print("    both halves now wait for each other. Neither is stuck the")
+print("    way tier 2 means - both are healthy and idle, and neither")
+print("    will move, because each believes the ball is with the other")
+_cp = os.path.join(TMP, "clinch_project")
+os.makedirs(_cp, exist_ok=True)
+_ck = daemon.norm(_cp)
+
+
+def _sit(**kw):
+    base = {"loop": True, "paused": False, "reviewing": False,
+            "verdict_in_flight": False, "handover": False, "inflight": [],
+            "roles": {"executor": {"alive": True, "tail": []},
+                      "planner": {"alive": True, "tail": []}}}
+    base.update(kw)
+    return base
+
+
+daemon.STATE["last_task"] = {_ck: time.time() - 4000}
+daemon.STATE["stop_seen"] = {"%s|executor" % _ck: time.time() - 5000}
+daemon.STATE["idle_holding"] = {}
+_f = daemon.clinch(_cp, _sit())
+check("a pair with work owed and nothing moving is a clinch",
+      bool(_f), True)
+check("and it names the missing hop rather than saying 'stuck'",
+      _f["why"], "task_no_turn")
+check("naming which half to wake",
+      _f["wake"], "executor")
+print("   every legitimate reason to be quiet is excluded FIRST - each of")
+print("   these is a working pair, not a deadlock")
+check("a report being judged is not a clinch",
+      daemon.clinch(_cp, _sit(reviewing=True)), None)
+check("a verdict on its way is not a clinch",
+      daemon.clinch(_cp, _sit(verdict_in_flight=True)), None)
+check("a command still running is not a clinch",
+      daemon.clinch(_cp, _sit(inflight=["build"])), None)
+check("a handover under way is not a clinch",
+      daemon.clinch(_cp, _sit(handover=True)), None)
+check("a paused pair is not a clinch",
+      daemon.clinch(_cp, _sit(paused=True)), None)
+check("and the loop being off is not a clinch - that is a decision",
+      daemon.clinch(_cp, _sit(loop=False)), None)
+print("   the idle damper is the trap here: while it holds a pair, PENDING")
+print("   is NOT set, so a held pair looks exactly like a clinch from")
+print("   outside. Calling the damper a deadlock every time it worked is")
+print("   the one way this check could have made things worse")
+daemon.STATE["idle_holding"] = {_ck: time.time()}
+check("a pair the damper is holding is not a clinch",
+      daemon.clinch(_cp, _sit()), None)
+daemon.STATE["idle_holding"] = {}
+check("and it is a clinch again once the hold comes off",
+      bool(daemon.clinch(_cp, _sit())), True)
+print("   a fresh turn is movement, so the clock restarts")
+daemon.STATE["stop_seen"] = {"%s|executor" % _ck: time.time()}
+check("a pair that has just moved is not a clinch",
+      daemon.clinch(_cp, _sit()), None)
+
+print("\n73. tier 2: a half that owes work and has stopped writing")
+print("    Three conditions, all required: it owes something, its")
+print("    transcript has not grown, and nothing is legitimately running.")
+print("    The threshold is MEASURED - across every journal this bridge has")
+print("    written, 5400 tracked commands ran median 3s, p95 58s, p99 311s,")
+print("    and turn gaps p95 843s. 600s is about twice the p99 command")
+_sp = os.path.join(TMP, "stall_project")
+os.makedirs(_sp, exist_ok=True)
+print("   a transcript that cannot be found says NOT frozen - fail open, or")
+print("   the detector accuses a pair it simply cannot see")
+_saved_best = daemon.best_session
+daemon.best_session = lambda p, r: {}
+check("no session means not frozen",
+      daemon.transcript_frozen(_sp, "executor", 1), (False, 0))
+daemon.best_session = _saved_best
+print("   busy is busy: a tracked command or a compaction is a reason to be")
+print("   quiet, and neither may be called a stall")
+daemon.STATE["inflight"] = {daemon.norm(_sp): {"x": {"cmd": "build"}}}
+check("a tracked command means something is in flight",
+      daemon.tool_in_flight(_sp, "executor"), True)
+daemon.STATE["inflight"] = {}
+check("a compacting session is in flight too",
+      daemon.tool_in_flight(_sp, "executor",
+                            {"roles": {"executor": {"state": "compacting"}}}),
+      True)
+check("and a session waiting on a process is in flight",
+      daemon.tool_in_flight(_sp, "executor",
+                            {"roles": {"executor":
+                                       {"state": "waiting on a process"}}}),
+      True)
+check("an idle session is not",
+      daemon.tool_in_flight(_sp, "executor",
+                            {"roles": {"executor": {"state": "idle"}}}),
+      False)
+print("   and a stall is never looked for where nothing is owed")
+check("the loop being off means no stall check at all",
+      daemon.stalled(_sp, _sit(loop=False)), None)
+check("nor while a handover is under way",
+      daemon.stalled(_sp, _sit(handover=True)), None)
+
+print("\n74. tier 3: the poll is untouched; a hand-back rings once")
+print("    The half-hourly poll keeps its cadence and its reach - it wakes")
+print("    halves that have gone dull, and the owner was explicit that")
+print("    limiting it would remove the thing it is for. What was missing")
+print("    is the other end: on 2026-08-21 the planner declined the same")
+print("    question 15 times between 05:48 and 09:38, correctly, and not")
+print("    one needs_you reached anybody (measured: 15 asks, 0 notifies)")
+_op = os.path.join(TMP, "owner_q_project")
+os.makedirs(_op, exist_ok=True)
+check("an explicit hand-back to the owner is recognised",
+      daemon.planner_declined("this is the owner's decision"), True)
+check("and wording this installation adds is honoured too",
+      daemon.planner_declined("call the human about this"), True)
+print("   a pair working in another language adds its own wording in")
+print("   config.json rather than in the source: the public repository is")
+print("   English-only by design and check_public.py enforces that, so a")
+print("   hard-coded list in another language could only ship by weakening")
+print("   the very gate nobody may weaken to get their own file through")
+_saved_marks = daemon.CFG.get("decline_marks")
+daemon.CFG["decline_marks"] = ["ceci regarde le proprietaire"]
+check("a mark from config is honoured",
+      daemon.planner_declined("desole, ceci regarde le proprietaire"), True)
+check("and the shipped ones still are, never one instead of the other",
+      daemon.planner_declined("the owner decides"), True)
+daemon.CFG["decline_marks"] = _saved_marks
+check("a config that names nothing leaves the shipped list alone",
+      len(daemon.decline_marks()) >= len(daemon.DECLINE_MARKS), True)
+print("   a planner that has simply not answered yet is NOT declining -")
+print("   waking exactly that case is what the poll is for")
+check("silence is not a decline",
+      daemon.planner_declined(""), False)
+check("nor is ordinary work",
+      daemon.planner_declined("Checked the file, continue with the next "
+                              "piece"), False)
+_qt = [{"who": "executor", "text": "Do we push to the public repo?"}]
+daemon.STATE["owner_question"] = {}
+check("the first hand-back on a wait rings the phone",
+      daemon.note_owner_question(_op, _qt), True)
+check("the same wait does not ring again - the chat is a phone, not a log",
+      daemon.note_owner_question(_op, _qt), False)
+check("and still does not, however many times it is asked",
+      daemon.note_owner_question(_op, _qt), False)
+print("   a different wait is a different question, and rings on its own")
+_qt2 = [{"who": "executor", "text": "Which schema did you want?"}]
+check("a new wait rings again",
+      daemon.note_owner_question(_op, _qt2), True)
+check("the fingerprint is what tells them apart",
+      daemon.question_fingerprint(_qt) != daemon.question_fingerprint(_qt2),
+      True)
+print("   and the call itself is one message of a kind that reaches a phone")
+check("needs_you is on TELEGRAM_KINDS",
+      "needs_you" in daemon.TELEGRAM_KINDS, True)
+_rang = []
+_rn, _rj = daemon.notify, store.journal
+daemon.notify = lambda kind, text, **kw: _rang.append((kind, text))
+store.journal = lambda *a, **k: None
+daemon.call_human_about(_op, _qt)
+daemon.notify, store.journal = _rn, _rj
+check("exactly one message goes out", len(_rang), 1)
+check("of the kind that rings", _rang[0][0] if _rang else None, "needs_you")
+check("carrying what the executor actually asked",
+      "Do we push to the public repo?" in (_rang[0][1] if _rang else ""),
+      True)
+
 print("\n" + ("-" * 60))
 if FAILED:
     print("FAILED: %d" % len(FAILED))

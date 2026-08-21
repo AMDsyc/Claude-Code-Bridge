@@ -5411,6 +5411,221 @@ def pair_moved_since(path, role, when):
     return False
 
 
+# ---------------------------------------------------------------------
+# Losing the connection, and picking the work back up.
+#
+# The owner asked for this in one sentence: if the connection drops,
+# probe once a minute for a connection, and if there IS one, carry on.
+# Read it exactly - not "if it comes back", but "if it is there". His
+# words verbatim are in the decision record, which is not published.
+#
+# WHAT ALREADY HELD SOMETHING, checked before any of this was written:
+#   a planner that answers nothing      -> note_silence / clear_silence
+#   a report that reached nobody        -> the 240s fallback in run_review
+#   a task that landed mid-turn         -> take_open_task on a done verdict
+#   an idle executor with the loop on   -> "sent it its state" in assess
+#   a stale pinned message              -> sync_links, on the telegram
+#                                          reconnect among others
+#   a turn that died and never returned -> check_lost_turn + pair_moved_since
+#   a pair the damper is holding        -> STATE["idle_holding"]
+#   a pair a person paused              -> STATE["paused"], untouched by all
+#                                          of this
+# What none of them do is notice that SEVERAL pairs went quiet at once, and
+# nothing at all picks the work back up afterwards. That is what this adds.
+#
+# THE DETECTOR IS MEASURED, and the obvious one was measured first and
+# thrown away. "Two or more pairs whose turns died network-shaped" fires
+# ZERO times in this bridge's whole journal - including through the
+# 12:07-12:47 outage of 2026-08-21, which produced no turn deaths at all.
+# Telegram's own drops are no better: about twenty a day, most of them
+# isolated, while the sessions were fine. Both would have been detectors
+# that never fire or fire constantly.
+#
+# What DID fire is the family that says "a planner is not answering" - the
+# 240s fallback, the silence counter, the held pair. Counted in ten-minute
+# buckets over every journal this bridge has written, TWO OR MORE distinct
+# pairs unanswered in one bucket happens 5 times in a month, and two of
+# those five are the outage window itself. Rare enough to mean something,
+# and it covers the case it was built for.
+# ---------------------------------------------------------------------
+
+
+def note_unanswered_pair(path):
+    """One pair went quiet. Remember when, for the wide-outage question."""
+    with _lock:
+        book = STATE.setdefault("quiet_pairs", {})
+        book[norm(path)] = time.time()
+        cut = time.time() - 3600
+        for k in [k for k, v in book.items() if float(v or 0) < cut]:
+            book.pop(k, None)
+        save_state()
+
+
+def outage_suspected(window=None, need=None):
+    """Have several pairs gone quiet at once?
+
+    One pair not answering is ordinary - its planner is thinking, or
+    running a check. Several at once is not about any of them.
+    """
+    window = float(window if window is not None
+                   else (CFG.get("thresholds") or {}).get("outage_window",
+                                                          600))
+    need = int(need if need is not None
+               else (CFG.get("thresholds") or {}).get("outage_pairs", 2))
+    now_ts = time.time()
+    book = STATE.get("quiet_pairs") or {}
+    fresh = [k for k, v in book.items() if now_ts - float(v or 0) <= window]
+    return len(fresh) >= need, sorted(fresh)
+
+
+def connection_is_there(timeout=4.0):
+    """Is there a connection at all, right now?
+
+    THE OUTBOUND RULE. This bridge makes exactly one kind of outbound call -
+    Telegram - and that is constitutional. This is the one exception, and it
+    exists because the owner asked for it in as many words - probe once
+    a minute for a connection, and carry on if there is one; his exact
+    sentence is in the decision record. It is narrow on purpose: it runs ONLY while several pairs are quiet at once, it is a
+    HEAD, it times out in seconds, and `outage_probe` in config.json turns
+    it off entirely for anyone who would rather it did not exist.
+    That there is Telegram polling already is not a substitute: Telegram
+    drops about twenty times a day here while the sessions are perfectly
+    fine, so it answers a question about Telegram, not about what the
+    windows depend on.
+    Returns True, False, or None when it was not asked.
+    """
+    host = (CFG.get("outage_probe")
+            if CFG.get("outage_probe") is not None else "api.anthropic.com")
+    if not host:
+        return None                        # switched off deliberately
+    try:
+        import http.client
+        c = http.client.HTTPSConnection(str(host), timeout=timeout)
+        try:
+            c.request("HEAD", "/")
+            c.getresponse()
+            return True                    # any answer at all is a connection
+        finally:
+            c.close()
+    except Exception:
+        return False
+
+
+def resume_after_outage(pairs, why=""):
+    """One pass, once per outage, over everything the quiet left standing.
+
+    Deliberately uses only machinery that already exists - no new way to
+    wake anybody. And deliberately does NOT touch:
+      * a pair a person paused by hand (their reason, not ours);
+      * a pair whose loop is off (that is a decision, not a casualty);
+      * a pair the idle damper is holding (its quiet is on purpose);
+      * the silence counters - those are cleared by a live verdict and by
+        nothing else, or a pair could be quietly un-held without anybody
+        having read a thing.
+    """
+    done = []
+    for path in pairs:
+        try:
+            sit = situation(path)
+        except Exception:
+            continue
+        name = project_name(path)
+        if sit.get("paused"):
+            done.append("%s: left alone, a person paused it" % name)
+            continue
+        if not sit.get("loop"):
+            done.append("%s: left alone, its loop is off" % name)
+            continue
+        if (STATE.get("idle_holding") or {}).get(norm(path)):
+            done.append("%s: left alone, the damper is holding it" % name)
+            continue
+
+        # (a) work the bridge is already holding for this pair
+        held = take_open_task(path)
+        if held:
+            try:
+                deliver(path, "executor",
+                        "The connection was lost while this was in flight, "
+                        "so it was never picked up. It is still the work in "
+                        "hand:\n\n%s" % held.get("text", ""),
+                        {"kind": "task"})
+                done.append("%s: handed back a task it never started" % name)
+                continue
+            except Exception:
+                pass
+
+        # (b) reports that went to the inbox because nobody could be reached
+        pend = PENDING.get(norm(path))
+        if pend and pend.get("content"):
+            try:
+                ok, _ = deliver_ex(path, "planner", pend["content"],
+                                   {"kind": "report"})
+                done.append("%s: report %s delivered again"
+                            % (name, pend.get("n", "?")) if ok
+                            else "%s: report still will not go" % name)
+                continue
+            except Exception:
+                pass
+
+        # (c) nothing in flight and the loop is on: the standing nudge
+        try:
+            ex = (sit.get("roles") or {}).get("executor") or {}
+            if ex.get("alive") and not sit.get("inflight"):
+                deliver(path, "executor", state_report(path, "executor",
+                                                       ex.get("sess") or {}),
+                        {"kind": "task"})
+                done.append("%s: woke its executor with its state" % name)
+        except Exception:
+            pass
+    return done
+
+
+def outage_watch():
+    """Once a minute, and ONLY while several pairs are quiet at once.
+
+    Not an endless ping: with nothing wrong this loop looks at a dictionary
+    and goes back to sleep.
+    """
+    while True:
+        time.sleep(60)
+        try:
+            suspected, pairs = outage_suspected()
+            if not suspected:
+                with _lock:
+                    if STATE.pop("outage", None) is not None:
+                        save_state()
+                continue
+            with _lock:
+                rec = STATE.setdefault("outage", {"since": time.time(),
+                                                  "done": False})
+                save_state()
+            if rec.get("done"):
+                continue
+            there = connection_is_there()
+            if there is False:
+                continue                   # still dark; look again in a minute
+            # There IS a connection - or we were told not to ask. Either way
+            # the owner's instruction is the same: carry on.
+            acted = resume_after_outage(pairs)
+            with _lock:
+                STATE.setdefault("outage", {})["done"] = True
+                save_state()
+            try:
+                sync_links("after a connection came back")
+            except Exception:
+                pass
+            store.journal(
+                "loop",
+                "Several pairs went quiet at once (%s). The connection %s, "
+                "so the work was picked back up: %s"
+                % (", ".join(project_name(p) for p in pairs),
+                   "is there" if there else "was not probed",
+                   "; ".join(acted) or "nothing needed doing"),
+                level="warn")
+        except Exception:
+            pass
+
+
 def check_lost_turn(path):
     """A turn that ended in an error and never came back.
 
@@ -5995,6 +6210,7 @@ def run_review(event, path, lp, msg, project, role):
         # called, and the guard written for exactly this night did nothing
         # on the night it was written for.
         note_silence(path, project, n)
+        note_unanswered_pair(path)
         return None
 
     # A report nobody answered used to resolve as "continue" - the executor
@@ -6004,6 +6220,7 @@ def run_review(event, path, lp, msg, project, role):
     answered = waiter["verdict"] is not None
     if not answered:
         note_silence(path, project, n)
+        note_unanswered_pair(path)
     else:
         missed = clear_silence(path, project)
         if missed:
@@ -9129,6 +9346,7 @@ def main():
     threading.Thread(target=stall_watch, daemon=True).start()
     threading.Thread(target=idle_watch, daemon=True).start()
     threading.Thread(target=links_watch, daemon=True).start()
+    threading.Thread(target=outage_watch, daemon=True).start()
     threading.Thread(target=disk_watch, daemon=True).start()
     threading.Timer(2.0, lambda: reconcile()).start()
     maybe_auto_probe()   # fill the model registry before anyone launches

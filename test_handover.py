@@ -3586,6 +3586,83 @@ check("the window is born minimised and unfocused",
 check("by STARTUPINFO at creation, not by a later call",
       "STARTF_USESHOWWINDOW" in _ls, True)
 
+print("\n85. several pairs quiet at once, and picking the work back up")
+print("    The owner: if the connection drops, probe once a minute, and if")
+print("    there IS one, carry on. Read exactly - not \"if it comes back\".")
+print("    On 2026-08-21 three pairs said nothing for forty minutes and")
+print("    revived only by themselves")
+print("   the obvious detector was measured FIRST and thrown away: two or")
+print("   more pairs whose turns died network-shaped fires ZERO times in")
+print("   this bridge's whole journal, including through that outage, which")
+print("   produced no turn deaths at all. Telegram is no better - about")
+print("   twenty drops a day while the sessions were fine")
+print("   what DID fire: two or more pairs unanswered in one bucket, five")
+print("   times in a month, two of them the outage itself")
+_a = os.path.join(TMP, "quiet_a")
+_b = os.path.join(TMP, "quiet_b")
+daemon.STATE["quiet_pairs"] = {}
+check("nothing quiet is not an outage", daemon.outage_suspected()[0], False)
+daemon.note_unanswered_pair(_a)
+check("ONE pair quiet is ordinary - a planner thinking, or running a check",
+      daemon.outage_suspected()[0], False)
+daemon.note_unanswered_pair(_b)
+check("two at once is not about either of them",
+      daemon.outage_suspected()[0], True)
+print("   and it forgets: an outage is a window, not a life sentence")
+daemon.STATE["quiet_pairs"] = {daemon.norm(_a): time.time() - 5000,
+                               daemon.norm(_b): time.time() - 5000}
+check("two pairs quiet an hour ago is not an outage now",
+      daemon.outage_suspected()[0], False)
+check("the window and the count are both configurable",
+      ("outage_window" in inspect.getsource(daemon.outage_suspected)
+       and "outage_pairs" in inspect.getsource(daemon.outage_suspected)),
+      True)
+print("   the probe is the ONE outbound exception in this project, and it")
+print("   is narrow: only while several pairs are quiet, a HEAD, seconds of")
+print("   timeout, and switchable off entirely")
+_saved_probe = daemon.CFG.get("outage_probe")
+daemon.CFG["outage_probe"] = ""
+check("switched off, it is not asked at all",
+      daemon.connection_is_there(), None)
+daemon.CFG["outage_probe"] = _saved_probe
+_cs = inspect.getsource(daemon.connection_is_there)
+check("it is a HEAD, not a fetch", '"HEAD"' in _cs, True)
+# NOT an escaped copy of the Russian: writing the quote in escapes
+# would slip past check_public while meaning exactly what that gate
+# exists to stop. What the shipped comment has to carry is the
+# JUSTIFICATION - that this outbound exists because it was asked
+# for, and where the words themselves are kept.
+check("and it says whose decision the exception is",
+      ("owner asked for it" in _cs and "decision record" in _cs),
+      True)
+_ow = inspect.getsource(daemon.outage_watch)
+check("it is only asked while several pairs are quiet",
+      _ow.index("outage_suspected") < _ow.index("connection_is_there"), True)
+check("and the pass runs once per outage, not every minute",
+      'rec.get("done")' in _ow, True)
+print("   the resume pass uses only machinery that already exists, and")
+print("   leaves alone every kind of quiet that is somebody's decision")
+_rs = inspect.getsource(daemon.resume_after_outage)
+check("a pair a person paused is left alone", 'sit.get("paused")' in _rs, True)
+check("a pair whose loop is off is left alone",
+      'not sit.get("loop")' in _rs, True)
+check("a pair the damper is holding is left alone",
+      "idle_holding" in _rs, True)
+check("it hands back work the bridge already holds",
+      "take_open_task(path)" in _rs, True)
+check("it tries an undelivered report again",
+      "deliver_ex(path" in _rs, True)
+check("and it invents no new way to wake anybody",
+      "state_report(path" in _rs, True)
+print("   the silence counters are NOT reset by this: only a live verdict")
+print("   clears them, or a pair could be un-held with nobody having read")
+print("   a word of what it wrote")
+check("resuming does not clear silence",
+      "clear_silence" in _rs, False)
+print("   and the whole pass is one summary line, not a burst of messages")
+check("one journal line for the pass",
+      _ow.count("store.journal") , 1)
+
 print("\n" + ("-" * 60))
 if FAILED:
     print("FAILED: %d" % len(FAILED))

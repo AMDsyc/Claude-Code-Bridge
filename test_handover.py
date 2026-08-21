@@ -2597,6 +2597,190 @@ check("it does not silently accept the ambiguous form", _d2 != [], True)
 check("and the refusal tells the writer to quote it",
       "CONTAINS A SPACE" in inspect.getsource(daemon.verdict_gate), True)
 
+print("\n66. a loop record for a folder that never was a pair")
+print("    STATE['loops'] kept an entry for the old layout's package folder")
+print("    - never added as a project, never ran a turn, just a path the")
+print("    daemon had once been started from. When that folder was deleted")
+print("    on 2026-08-19 the row became a pointer to nothing. It was found")
+print("    by asking whether anything still named the vanished path, which")
+print("    is the check that exists for exactly this")
+_gl = dict(daemon.STATE.get("loops") or {})
+_here = os.path.join(TMP, "realfolder")
+os.makedirs(_here, exist_ok=True)
+_gone = os.path.join(TMP, "vanished")
+daemon.STATE["loops"] = {
+    _gone: {"active": False, "iteration": 0},          # the ghost
+    _gone + "-worked": {"active": False, "iteration": 12},   # gone, but ran
+    _gone + "-busy": {"active": True, "iteration": 0},       # gone, running
+    _here: {"active": False, "iteration": 0},               # here, idle
+}
+_saved_cfg66 = daemon.CFG.get("projects")
+daemon.CFG["projects"] = {daemon.norm(_here): {}}
+# The note the same ghost left in another dictionary. It looks like
+# history and is not: the daemon deletes it as soon as the loop starts.
+daemon.STATE["loop_off"] = {
+    _gone: {"at": "2026-08-03 10:51:49", "why": "you pressed stop"},
+    _here: {"at": "2026-08-19 12:00:00", "why": "a real project, kept"},
+}
+_dropped, _notes = daemon.migrate_ghost_records()
+check("the ghost is dropped", _dropped, [_gone])
+check("and so is the note it left elsewhere",
+      [n for n in _notes if "loop_off" in n] != [], True)
+check("while the note of a live project is untouched",
+      _here in daemon.STATE["loop_off"], True)
+print("   and nothing else is, because any one condition alone would throw")
+print("   away something real: a project on an unplugged drive has")
+print("   iterations behind it, and a running one is running")
+check("a missing folder WITH iterations is kept",
+      _gone + "-worked" in daemon.STATE["loops"], True)
+check("a missing folder that is ACTIVE is kept",
+      _gone + "-busy" in daemon.STATE["loops"], True)
+check("a folder that exists is kept whatever its counters",
+      _here in daemon.STATE["loops"], True)
+check("running it again drops nothing",
+      daemon.migrate_ghost_records(), ([], []))
+daemon.STATE["loops"] = _gl
+daemon.STATE.pop("loop_off", None)
+daemon.CFG["projects"] = _saved_cfg66
+
+print("\n67. the folder's own spelling is what a person is shown")
+print("    Keys are folded to norm(), which on Windows is lower case, and")
+print("    project_name used to recover the capitals from the config key.")
+print("    Then migrate_project_keys folded the config keys too - correctly,")
+print("    two spellings of one folder were two projects - and every name in")
+print("    the panel lost its capitals in a single restart.")
+print("    The disk was the better witness all along")
+_np = os.path.join(TMP, "Nice_Name")
+os.makedirs(_np, exist_ok=True)
+_saved_cfg67 = daemon.CFG.get("projects")
+daemon.CFG["projects"] = {daemon.norm(_np): {}}      # folded, lower case
+check("the name keeps its capitals even though the key lost them",
+      daemon.project_name(daemon.norm(_np)), "Nice_Name")
+check("and asking by the typed spelling gives the same answer",
+      daemon.project_name(_np), "Nice_Name")
+print("   a folder that has gone away has no spelling to read, so the key")
+print("   is all there is - it still answers rather than raising")
+_np_gone = os.path.join(TMP, "deleted_project")
+check("a missing folder still gets a name",
+      daemon.project_name(_np_gone), "deleted_project")
+daemon.CFG["projects"] = _saved_cfg67
+
+print("\n68. a project with no bridge marks is named, not merely called down")
+print("    A project was removed from the watch list on 2026-08-19 at")
+print("    23:32:47 - `/remove-project` called uninstall(), correctly - then")
+print("    came back into config.json without install ever running again.")
+print("    On 2026-08-21 both windows launched into that state and the only")
+print("    thing anybody heard was `window never came up`, ten minutes late,")
+print("    naming neither the cause nor a file. marks_missing() is the half")
+print("    that knows what is absent; it has to say WHICH file, because")
+print("    `not installed` sends the reader to the wrong place")
+import io as _io                                         # noqa: E402
+import json as _js                                       # noqa: E402
+from bridgecore import install as _inst                  # noqa: E402
+from bridgecore import sessions as _sess                 # noqa: E402
+
+# A whole project to compare against, built here rather than borrowed from
+# the machine: a suite that passes only where the bridge happens to be
+# installed is a suite that proves nothing on anybody else's disk.
+_whole = os.path.join(TMP, "whole_project")
+os.makedirs(_whole, exist_ok=True)
+_inst.install(_whole, "executor")
+
+_blind = os.path.join(TMP, "blind_project")
+os.makedirs(os.path.join(_blind, ".claude"), exist_ok=True)
+# exactly what uninstall() leaves behind: the bridge's own allow entry
+# survives, every mark that makes the pair work does not
+_io.open(os.path.join(_blind, ".claude", "settings.json"), "w",
+         encoding="utf-8").write(
+    u'{"permissions": {"allow": ["mcp__bridge__task"]}}')
+_io.open(os.path.join(_blind, ".mcp.json"), "w", encoding="utf-8").write(
+    u'{"mcpServers": {"aftereffects": {"command": "node", "args": ["x"]}}}')
+_gaps = _inst.marks_missing(_blind)
+check("a stripped project reports every kind of missing mark",
+      len(_gaps), 5)
+check("the hooks gap names the settings file it is about",
+      any("settings.json" in g and "no bridge hook" in g for g in _gaps), True)
+check("and it names every one of the eight events, not just the first",
+      all(ev in " ".join(_gaps) for ev in _inst.EVENTS), True)
+check("the channel gap names .mcp.json and says what it costs",
+      any(".mcp.json" in g and "no channel" in g for g in _gaps), True)
+check("PYTHONSAFEPATH is checked too - a stray bridgecore shadows the real one",
+      any("PYTHONSAFEPATH" in g for g in _gaps), True)
+print("   a whole project answers with an empty list, or the gate would fire")
+print("   on every launch for ever and be switched off within the day")
+check("a fully installed project reports nothing missing",
+      _inst.marks_missing(_whole), [])
+print("   it never raises: a folder that is gone, and unreadable JSON, are")
+print("   different answers and neither is an exception")
+check("a folder that is not there says so instead of raising",
+      _inst.marks_missing(os.path.join(TMP, "nope_not_here"))[0].startswith(
+          "the folder itself is gone"), True)
+_bad = os.path.join(TMP, "bad_json_project")
+os.makedirs(os.path.join(_bad, ".claude"), exist_ok=True)
+_io.open(os.path.join(_bad, ".claude", "settings.json"), "w",
+         encoding="utf-8").write(u"{not json at all")
+check("unreadable settings say so rather than reading as 'absent'",
+      any("not valid JSON" in g for g in _inst.marks_missing(_bad)), True)
+
+print("\n69. the gate repairs at launch, and says so where a person will see")
+print("    it. It lives in sessions.launch and not at any of its callers -")
+print("    there are seven of them (panel start, handover, auto-restart,")
+print("    the archive seat, the bridge's own window), and a gate on one of")
+print("    them is a gate with the door left open beside it")
+import inspect as _insp
+_src = _insp.getsource(_sess.launch)
+check("launch calls the gate before it builds anything",
+      "ensure_marks(project, role)" in _src, True)
+check("and it does so before the command is built",
+      _src.index("ensure_marks") < _src.index("build_command"), True)
+_gsrc = _insp.getsource(_sess.ensure_marks)
+check("the gate repairs rather than refusing",
+      "installer.install(" in _gsrc, True)
+check("it journals at warn, so the repair cannot be silent",
+      '"warn"' in _gsrc, True)
+check("it re-checks after installing rather than assuming it worked",
+      _gsrc.count("marks_missing") >= 2, True)
+print("   it repairs a real stripped project and leaves the project's OWN")
+print("   mcp server alone - this is the aftereffects case, byte for byte")
+_saved_j = store.journal
+_lines = []
+store.journal = lambda *a, **k: _lines.append(a[1] if len(a) > 1 else "")
+_sess.ensure_marks(_blind, "executor")
+store.journal = _saved_j
+check("after the gate runs, nothing is missing any more",
+      _inst.marks_missing(_blind), [])
+_srv = _js.load(_io.open(os.path.join(_blind, ".mcp.json"),
+                         encoding="utf-8"))["mcpServers"]
+check("the project's own aftereffects server survived the merge",
+      "aftereffects" in _srv, True)
+check("and the bridge server is there beside it, not instead of it",
+      "bridge" in _srv, True)
+check("the warning named the project and what was wrong",
+      any("missing bridge marks" in ln for ln in _lines), True)
+check("a whole project makes the gate say nothing at all",
+      _sess.ensure_marks(_whole, "executor"), [])
+print("   the watchdog now names what it waited for. `never came up` on its")
+print("   own sent everybody to look at the window, which was alive")
+_wsrc = _insp.getsource(daemon)
+check("the watchdog line says what it waited for",
+      "waited %d min for" in _wsrc, True)
+check("and offers the missing marks as the likely reason",
+      "carries no bridge marks" in _wsrc, True)
+print("   and /config, the way a project re-enters the list without install,")
+print("   reports it - repair there would be writing into somebody's project")
+print("   as a side effect of saving settings")
+check("_warn_unmarked_projects reports and does not repair",
+      "installer.install(" not in _insp.getsource(
+          daemon._warn_unmarked_projects), True)
+_lines2 = []
+store.journal = lambda *a, **k: _lines2.append(a[1] if len(a) > 1 else "")
+_blind2 = os.path.join(TMP, "blind_two")
+os.makedirs(_blind2, exist_ok=True)
+daemon._warn_unmarked_projects({_blind2: {}})
+store.journal = _saved_j
+check("a blind project entering the watch list is named at that moment",
+      any("carries no bridge marks" in ln for ln in _lines2), True)
+
 print("\n" + ("-" * 60))
 if FAILED:
     print("FAILED: %d" % len(FAILED))

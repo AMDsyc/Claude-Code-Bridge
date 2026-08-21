@@ -362,6 +362,75 @@ def migrate_project_keys():
     return merged
 
 
+def migrate_ghost_records():
+    """Drop the records of a folder that was never a pair and is now gone.
+
+    On 2026-08-19 STATE["loops"] still held an entry for the package folder
+    of the old layout - not a project anybody added, but a path the daemon
+    had once been started from. It sat there inactive at iteration 0, and
+    when the folder was finally deleted it became a record pointing at
+    nothing at all.
+
+    Three conditions together, because any one of them alone would throw
+    away something real: the folder does not exist, the loop is not
+    running, and it has never completed a single iteration. A project on a
+    drive that happens to be unplugged keeps its record - it has iterations
+    behind it. So does a paused one. What goes is only a row that never was
+    a pair.
+
+    The same path leaves notes in the other path-keyed dictionaries, and
+    the first cut of this cleaned only `loops` - so a `loop_off` entry from
+    3 August survived, saying why a loop nobody ever ran had been stopped.
+    Those are swept too, under a rule of their own: no folder, not a
+    configured project, and no `loops` row to belong to. That last clause
+    is what keeps a real project's notes safe while its drive is away.
+
+    `loop_off` is worth a word, because it looks like history and is not.
+    It records when a loop was stopped and why, but the daemon DELETES it
+    the moment the loop is started again (see the "/loop" handler), which
+    no record of an event would be. It describes a present condition, and
+    it is read in exactly one place: the panel, for the project a person
+    is looking at. A folder that is gone has no present condition and can
+    never be the project on screen. What the journal holds stays; that is
+    where the history of this actually lives.
+    """
+    dropped, notes = [], []
+    with _lock:
+        loops = STATE.get("loops") or {}
+        for key in list(loops):
+            row = loops.get(key) or {}
+            if (not os.path.isdir(key) and not row.get("active")
+                    and not row.get("iteration")):
+                loops.pop(key, None)
+                dropped.append(key)
+        configured = {norm(p) for p in (CFG.get("projects") or {})}
+        for name in PATH_KEYED:
+            if name == "loops":
+                continue
+            d = STATE.get(name)
+            if not isinstance(d, dict):
+                continue
+            for key in list(d):
+                path = key.split("|")[0]
+                if (path and not os.path.isdir(path)
+                        and norm(path) not in configured
+                        and path not in loops):
+                    d.pop(key, None)
+                    notes.append("%s[%s]" % (name, path))
+        if dropped or notes:
+            save_state()
+    if dropped:
+        store.journal("bridge", "Dropped %d loop record(s) for folders that "
+                      "do not exist and never ran a single iteration: %s"
+                      % (len(dropped), ", ".join(sorted(dropped))),
+                      level="log")
+    if notes:
+        store.journal("bridge", "Dropped %d leftover note(s) about folders "
+                      "that are gone and are not projects: %s"
+                      % (len(notes), ", ".join(sorted(notes))), level="log")
+    return dropped, notes
+
+
 def migrate_note():
     """Turn a pre-multipair note into the per-project form.
 
@@ -485,6 +554,36 @@ def session_key(event):
     return "%s:%s" % (role or "session", sid[:8])
 
 
+def _warn_unmarked_projects(projects):
+    """Say, at the moment a watch list is written, which entries are blind.
+
+    Reports and does not repair, deliberately - the repair belongs at
+    `sessions.ensure_marks`, where a window is actually about to start and
+    the person is present to see it happen. Writing into somebody's project
+    as a side effect of saving settings is a different and worse thing.
+
+    The point is timing: this fires when the project ENTERS the list, not
+    ten minutes after a pair has already launched into it.
+    """
+    try:
+        from . import install as installer
+    except Exception:
+        return
+    for key in list(projects or {}):
+        try:
+            gaps = installer.marks_missing(key)
+        except Exception:
+            continue
+        if gaps:
+            store.journal(
+                "project",
+                "%s is on the watch list but carries no bridge marks - a "
+                "pair started here would be blind until install runs: %s"
+                % (os.path.basename(str(key).rstrip("\\/")) or key,
+                   "; ".join(gaps)),
+                level="warn")
+
+
 def project_name(event_or_path):
     """The project's name as you spell it, not as the key was folded.
 
@@ -500,6 +599,24 @@ def project_name(event_or_path):
         if norm(key) == want:
             d = key
             break
+    # The config used to be the only witness to the spelling, and on
+    # 2026-08-19 it stopped being one: migrate_project_keys folds duplicate
+    # keys to norm(), which on Windows is lower case, so every name in the
+    # panel lost its capitals in a single restart - a folder spelled with
+    # them was suddenly shown all in lower case.
+    # The folding is right - two spellings of one folder were two projects -
+    # but it left this function reading the very thing it had flattened.
+    #
+    # The disk is the better witness anyway, and it always was: it holds the
+    # one spelling the folder actually has, whatever anybody typed.
+    # realpath returns it with its real case, and only a folder that has
+    # gone away falls through to whatever the key says.
+    try:
+        real = os.path.realpath(d)
+        if os.path.isdir(real):
+            d = real
+    except Exception:
+        pass
     return os.path.basename(d.rstrip("\\/")) or "unknown"
 
 
@@ -3257,7 +3374,27 @@ def check_sessions(grace):
             if not meta.get("gave_up"):
                 meta["gave_up"] = True
                 save_state()
-                store.journal("session", "%s window never came up" % role,
+                # "never came up" on its own sent everybody looking at the
+                # window, which was alive and working. Say what was waited
+                # for and what is missing, so the next reader starts where
+                # the fault is. A pair burned ten minutes on this
+                # exact line on 2026-08-21 while its real fault - no bridge
+                # marks in the project at all - was on disk the whole time.
+                why = ""
+                try:
+                    from . import install as installer
+                    gaps = installer.marks_missing(path)
+                    if gaps:
+                        why = (" - and this project carries no bridge "
+                               "marks, which is very likely the whole "
+                               "reason: %s" % "; ".join(gaps))
+                except Exception:
+                    pass
+                store.journal("session",
+                              "%s window never came up: waited %d min for "
+                              "its SessionStart and its channel to register,"
+                              " and got neither%s"
+                              % (role, int(wait // 60), why),
                               project_name(path), role, "sound",
                               project_dir=path)
                 notify("session_died",
@@ -7553,6 +7690,31 @@ class Handler(BaseHTTPRequestHandler):
                                 "presence_file", "custom_models"):
                         if key in body:
                             CFG[key] = body[key]
+                    if "projects" in body:
+                        # This endpoint writes the whole projects dict, so a
+                        # project can enter the watch list here without ever
+                        # passing handle_add_project - which is the only
+                        # path that runs install. That is how
+                        # one project came back into config.json after
+                        # its 2026-08-19 removal with no marks on disk, and
+                        # then launched blind two days later.
+                        #
+                        # Keys are normed for the same reason
+                        # handle_add_project norms them: one folder, one
+                        # key. This endpoint was the last way left to put a
+                        # second spelling of one project into the config.
+                        folded = {}
+                        for k, v in (CFG.get("projects") or {}).items():
+                            nk = norm(k)
+                            if nk in folded and isinstance(folded[nk], dict) \
+                                    and isinstance(v, dict):
+                                merged = dict(folded[nk])
+                                merged.update(v)
+                                folded[nk] = merged
+                            else:
+                                folded[nk] = v
+                        CFG["projects"] = folded
+                        _warn_unmarked_projects(folded)
                     store.save_config(CFG)
                 return self._send(200, {"ok": True})
             if p.startswith("/remove-project"):
@@ -7916,6 +8078,7 @@ def main():
 
     migrate_note()
     migrate_project_keys()
+    migrate_ghost_records()
     # The retired tree stays on disk by the owner's decision, but
     # nothing is meant to USE it. Saying so in a document is not a
     # check: the first census found a live process running out of it.

@@ -73,11 +73,93 @@ def build_command(project, role, resume_id=None, permission_mode=None,
     return cmd
 
 
+def ensure_marks(project, role=""):
+    """Never launch a pair into a project that cannot answer.
+
+    This sits inside launch() rather than at any of its callers because
+    there are seven of them - the panel's start, a handover, an automatic
+    restart, the archive seat, the bridge's own window - and a gate that
+    only covers the one that was in mind when it was written is a gate with
+    the door left open beside it. One place, every path.
+
+    It REPAIRS rather than refusing, and the two are not obviously the same
+    call. `relayout.retired_tree_users` deliberately reports and does not
+    repair, because a setting pointing at an old tree is somebody's
+    decision. This is the opposite case: the bridge's own marks are not
+    anybody's decision, install() merges and never overwrites (a project's
+    own hooks and its other MCP servers survive - checked on the project
+    this was written for, whose own server came through untouched), and
+    refusing here would leave the human with a pair that will not start and
+    no way to start it. So it repairs, and it says so loudly enough that
+    nobody has to guess it happened: the warn names every mark and its
+    file, before and after.
+
+    Refusing to launch was considered and rejected for one more reason: the
+    failure this exists to prevent was already silent for ten minutes and
+    then produced a message that named nothing. Trading a silent blind pair
+    for a silent refusal is not a fix.
+
+    Never raises. A launch that cannot be checked still happens - losing the
+    loop to a permissions error while inspecting a settings file would be a
+    worse bug than the one being fixed.
+    """
+    try:
+        from . import install as installer
+    except Exception:
+        return []
+    try:
+        missing = installer.marks_missing(project)
+        if not missing:
+            return []
+        store.journal(
+            "session",
+            "%s is missing bridge marks, so this %s window would have "
+            "started blind - repairing before launch: %s"
+            % (os.path.basename(project.rstrip("\\/")) or project,
+               role or "session", "; ".join(missing)),
+            os.path.basename(project.rstrip("\\/")), role, "warn",
+            project_dir=project)
+        installer.install(project, role or None)
+        left = installer.marks_missing(project)
+        if left:
+            # Repaired what it could and says what it could not. The launch
+            # goes ahead: a half-installed pair that reports some events is
+            # worth more than no pair, and the line below is what a person
+            # needs in order to finish the job by hand.
+            store.journal(
+                "session",
+                "%s: install ran but these marks are still absent, so the "
+                "pair may still be partly blind: %s"
+                % (os.path.basename(project.rstrip("\\/")) or project,
+                   "; ".join(left)),
+                os.path.basename(project.rstrip("\\/")), role, "warn",
+                project_dir=project)
+        else:
+            store.journal(
+                "session",
+                "%s: bridge marks restored, launching a %s that can answer"
+                % (os.path.basename(project.rstrip("\\/")) or project,
+                   role or "session"),
+                os.path.basename(project.rstrip("\\/")), role, "log",
+                project_dir=project)
+        return missing
+    except Exception as exc:
+        try:
+            store.journal("session",
+                          "could not check the bridge marks of %s: %s"
+                          % (project, exc), "", role, "warn")
+        except Exception:
+            pass
+        return []
+
+
 def launch(project, role, resume_id=None, permission_mode=None, model=None,
            disallow=None, autocompact_pct=None):
     """Start a session in its own minimised console. Returns pid."""
     if not os.path.isdir(project):
         raise ValueError("no such folder: %s" % project)
+
+    ensure_marks(project, role)
 
     env = dict(os.environ)
     env["BRIDGE_ROLE"] = role

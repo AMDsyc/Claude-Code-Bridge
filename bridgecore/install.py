@@ -184,6 +184,86 @@ def already_there(group, entry):
     return False
 
 
+def marks_missing(project):
+    """Name every bridge mark this project is missing, or [] when whole.
+
+    Inspection only - it writes nothing and it never raises. A pair whose
+    project carries no marks starts BLIND: no hooks means no events reach
+    the daemon, no `bridge` server in .mcp.json means no channel, and the
+    window looks perfectly alive while none of it works. That is not a
+    theory. On 2026-08-19 at 23:32:47 a watched project was removed from
+    the watch list, `/remove-project` called uninstall() - correctly - and
+    the marks went. The project came back into config.json afterwards without
+    install ever running again, and on 2026-08-21 04:26:57 both windows
+    launched into that state. The only thing anybody heard was the startup
+    watchdog ten minutes later saying the windows "never came up", which
+    named neither the cause nor the file.
+
+    Each string is written to be read out in a warning: it says what is
+    absent and which file it is absent from, because "not installed" sends
+    the reader looking in the wrong place.
+    """
+    gone = []
+    try:
+        project = os.path.abspath(project)
+        if not os.path.isdir(project):
+            return ["the folder itself is gone: %s" % project]
+
+        s_path = os.path.join(project, ".claude", "settings.json")
+        cfg = {}
+        if os.path.exists(s_path):
+            try:
+                with open(s_path, "r", encoding="utf-8") as fh:
+                    cfg = json.load(fh)
+            except Exception:
+                # Unreadable is not the same as absent, and the difference
+                # decides what a person does next: repair the file by hand,
+                # or let install merge into it.
+                return ["%s is not valid JSON, so nothing can be merged "
+                        "into it" % s_path]
+        else:
+            gone.append("%s does not exist" % s_path)
+
+        hooks = cfg.get("hooks") or {}
+        absent = []
+        for ev in EVENTS:
+            groups = hooks.get(ev) or []
+            if not any(list(h.get("args") or []) == ["-m", "bridgecore.hook"]
+                       for g in groups for h in (g.get("hooks") or [])):
+                absent.append(ev)
+        if absent:
+            gone.append("%s: no bridge hook on %s"
+                        % (s_path, ", ".join(absent)))
+
+        if "bridge" not in json.dumps(cfg.get("statusLine", "")):
+            gone.append("%s: no bridge status line" % s_path)
+
+        env = cfg.get("env") or {}
+        if env.get("PYTHONPATH") != ROOT:
+            gone.append("%s: env PYTHONPATH is not %s" % (s_path, ROOT))
+        if env.get("PYTHONSAFEPATH") != "1":
+            # Without it a stray bridgecore/ next to the session shadows the
+            # installed one and the hook that runs is that copy.
+            gone.append("%s: env PYTHONSAFEPATH is not 1" % s_path)
+
+        m_path = os.path.join(project, ".mcp.json")
+        data = {}
+        if os.path.exists(m_path):
+            try:
+                with open(m_path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except Exception:
+                return gone + ["%s is not valid JSON, so the channel cannot "
+                               "be declared" % m_path]
+        else:
+            gone.append("%s does not exist" % m_path)
+        if "bridge" not in (data.get("mcpServers") or {}):
+            gone.append("%s: no `bridge` server, so no channel" % m_path)
+    except Exception as exc:                       # never break a launch
+        return ["could not be checked: %s" % exc]
+    return gone
+
+
 def install(project, role=None, python=None, statusline=True):
     """Merge the bridge hooks into a project. Returns how many were added."""
     python = python or sys.executable

@@ -8066,6 +8066,14 @@ class Handler(BaseHTTPRequestHandler):
                         "notify": CFG.get("notify", {}),
                         "thresholds": CFG.get("thresholds", {}),
                         "retention": CFG.get("retention", {}),
+                        # The defaults a project falls back to, sent rather
+                        # than copied into the panel. panel.html carried its
+                        # own `||80` and went on showing 80 after the real
+                        # default became 70 - one number in two places, and
+                        # the copy was the one on screen.
+                        "defaults": {
+                            "autocompact_pct":
+                                store.PROJECT_DEFAULTS.get("autocompact_pct")},
                         "projects": CFG.get("projects", {})}})
             if self.path.startswith("/projects"):
                 rows = discover.scan()

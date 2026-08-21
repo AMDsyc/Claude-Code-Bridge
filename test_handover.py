@@ -3414,6 +3414,43 @@ check("while whatever was already there is untouched",
 check("writing it twice is a no-op, not a rewrite",
       _inst2.keep_autocompact_on(_acp), False)
 
+print("\n82. the frozen consoles were not QuickEdit, and one number, one place")
+print("    The owner reported both windows hanging, freed by Esc, and")
+print("    nothing moving in either window - not even a spinner. QuickEdit")
+print("    fits that shape: a click puts a console into selection mode and")
+print("    the writing process blocks. So it was measured rather than")
+print("    assumed - AttachConsole to a live window, open CONIN$, read the")
+print("    input mode")
+print("   RESULT: mode=0x0208 in every live window - ENABLE_WINDOW_INPUT and")
+print("   ENABLE_VIRTUAL_TERMINAL_INPUT, with ENABLE_QUICK_EDIT_MODE (0x40)")
+print("   CLEAR and ENABLE_MOUSE_INPUT (0x10) clear too. The client turns")
+print("   QuickEdit off itself, so a click selects nothing and reaches")
+print("   nothing. HYPOTHESIS EXCLUDED - and no fix was built for it")
+_ss = inspect.getsource(sessions)
+check("no QuickEdit bootstrap was added to the launch path",
+      "ENABLE_QUICK_EDIT" in _ss, False)
+check("and the launch command is still claude, not a wrapper",
+      inspect.getsource(sessions.build_command).count('cmd = ["claude"]'), 1)
+print("   what remains in suspicion is ours and already written down: a")
+print("   blocked Stop hook draws nothing. Report 122 went to the planner")
+print("   at 11:11:10 and the executor was idle at 11:12:21 with a 13-minute")
+print("   gap after it - a window held by its own Stop hook looks exactly")
+print("   like a dead one, and Esc is what returns the prompt")
+check("run_review still holds the hook while a report waits",
+      "review_timeout" in inspect.getsource(daemon.run_review), True)
+print("   and the panel stops keeping its own copy of a default. It said")
+print("   ||80 and went on saying 80 after the real default became 70 -")
+print("   one number in two places, and the copy was the one on screen")
+_panel2 = _io.open(os.path.join(os.path.dirname(daemon.__file__),
+                                "panel.html"), encoding="utf-8").read()
+check("the hard-coded fallback is gone", "autocompact_pct||80" in _panel2,
+      False)
+check("the panel reads the default the bridge sends",
+      "defaults||{}).autocompact_pct" in _panel2, True)
+_dsrc2 = inspect.getsource(daemon)
+check("and /state sends it, from the one place it is defined",
+      'store.PROJECT_DEFAULTS.get("autocompact_pct")' in _dsrc2, True)
+
 print("\n" + ("-" * 60))
 if FAILED:
     print("FAILED: %d" % len(FAILED))

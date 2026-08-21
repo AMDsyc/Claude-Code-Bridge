@@ -1189,7 +1189,11 @@ function renderSessions(){
   $("#thHandoverV").textContent=$("#thHandover").value+"%";
   if(!window._acTouched){
     var pcy=((D.config||{}).projects||{})[CUR]||{};
-    $("#acPct").value=pcy.autocompact_pct||80;
+    /* the default comes from the bridge, never a second copy here:
+       this said ||80 and kept saying it after the real default
+       became 70 */
+    $("#acPct").value=pcy.autocompact_pct
+      ||(((D.config||{}).defaults||{}).autocompact_pct)||"";
   }
   $("#acPctV").textContent=$("#acPct").value+"%";
   if(!window._polTouched){

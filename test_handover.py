@@ -4070,6 +4070,91 @@ finally:
     daemon.notify = _realn90
     daemon.deliver = _reald90
 
+print("\n91. how long a half has been quiet is an epoch question")
+print("    2026-08-22, 00:03. test_wall_handover had passed at 23:49 and")
+print("    failed at 23:59 with nothing changed but the date. situation()")
+print("    measured silence as now - _clock_of(last_seen), and last_seen is")
+print("    \"%H:%M:%S\" with no date, so _clock_of put 23:58 on TODAY - five")
+print("    minutes ago came out as MINUS 86 084 seconds")
+print("   every caller reads a small number as 'answered recently', so the")
+print("   blind poll stood down for every pair last seen before midnight -")
+print("   and would have gone on doing it for the next 24 hours")
+_ss = inspect.getsource(daemon.situation)
+check("silence comes from the epoch now",
+      '"silent_for": (time.time() - at) if at else None' in _ss, True)
+check("and not from the clock stamp", "_clock_of(seen)" in _ss, False)
+check("_clock_of is left for rendering, not for durations",
+      "ON TODAY'S CLOCK" in inspect.getsource(daemon._clock_of), True)
+
+print("   the arithmetic itself, on the two stamps that broke it")
+_before_midnight = time.mktime((2026, 8, 21, 23, 58, 41, 0, 0, -1))
+_after_midnight = time.mktime((2026, 8, 22, 0, 3, 23, 0, 0, -1))
+check("five minutes apart, in truth",
+      int(_after_midnight - _before_midnight), 282)
+check("and the clock reading is negative and enormous",
+      (_after_midnight - time.mktime((2026, 8, 22, 23, 58, 41, 0, 0, -1)))
+      < -86000, True)
+
+print("   the record a real session carries has both fields - touch_session")
+print("   writes them together - and only the epoch one may be measured")
+_ts = inspect.getsource(daemon.touch_session)
+check("touch_session writes the clock for a person to read",
+      'sess["last_seen"] = now()' in _ts, True)
+check("and the epoch for the bridge to measure",
+      'sess["seen_at"] = time.time()' in _ts, True)
+
+print("   a record too old to have the epoch answers 'cannot say', not a")
+print("   duration read off somebody else's day")
+daemon.STATE.clear()
+daemon.STATE.update({"sessions": {}, "windows": {}, "inflight": {},
+                     "loops": {}, "paused": {}, "pids": {}, "last_session": {}})
+daemon.PROCTRACK.clear()
+_k91 = daemon.norm(PATH)
+daemon.STATE["sessions"]["executor:old91"] = {
+    "role": "executor", "path": _k91, "session_id": "old91",
+    "model": "Opus 5", "window": 1000000, "context_tokens": 100000,
+    "state": "idle", "last_seen": "23:58:41"}
+_sit91 = daemon.situation(PATH)
+check("no seen_at, no claim about silence",
+      _sit91["roles"]["executor"]["silent_for"], None)
+daemon.STATE["sessions"]["executor:old91"]["seen_at"] = time.time() - 900
+_sit91 = daemon.situation(PATH)
+check("with the epoch, fifteen minutes reads as fifteen minutes",
+      880 < _sit91["roles"]["executor"]["silent_for"] < 920, True)
+check("and it is never negative",
+      _sit91["roles"]["executor"]["silent_for"] > 0, True)
+
+print("   the same rule broken twice in already_up: it string-sorted the")
+print("   clock stamps to pick the newest record, and measured recency off")
+print("   _clock_of. At 00:03 \"23:58:41\" sorts above \"00:03:22\"")
+check("yesterday's stamp really does sort above today's",
+      "23:58:41" >= "00:03:22", True)
+_au = inspect.getsource(daemon.already_up)
+check("the newest record is picked by epoch", "seen_at(sess) >= newest" in _au,
+      True)
+check("not by string order", 'if seen >= when:' in _au, False)
+check("and recency is measured against the epoch too",
+      "abs(time.time() - newest) < 300" in _au, True)
+
+print("   a gate on the class, not just on the two places it was found:")
+print("   nothing in the package may measure a DURATION from a clock stamp")
+_dsrc = inspect.getsource(daemon)
+_bad = [ln.strip() for ln in _dsrc.splitlines()
+        if "_clock_of" in ln and not ln.strip().startswith("#")
+        and ("time.time() -" in ln or "- _clock_of" in ln)]
+check("no subtraction against _clock_of anywhere", _bad, [])
+print("   the ledgers that ARE sorted by time carry an epoch to sort by")
+check("session_roles stamps an epoch", '"at": time.time()}' in _dsrc, True)
+check("telemetry keeps the clock for reading and an epoch beside it",
+      '"at": time.strftime("%H:%M:%S"), "epoch": time.time()' in _dsrc, True)
+print("   and the two date readers in store are date-stamped strings, not")
+print("   clocks: a full \"%Y-%m-%d ...\" prefix and a folder name")
+_ssrc = inspect.getsource(store)
+check("the once-a-day guard compares a dated stamp",
+      '(e.get("at") or "").startswith(today)' in _ssrc, True)
+check("and the archiver measures age by mtime, not by name",
+      "os.path.getmtime(full) < cutoff" in _ssrc, True)
+
 print("\n" + ("-" * 60))
 if FAILED:
     print("FAILED: %d" % len(FAILED))

@@ -270,10 +270,19 @@ def finish_turn(role, sid, msg, verdict="done", feedback=OKFB):
 
 
 def backdate(role, minutes=15):
-    """Make a session look silent, which is what assess() waits for."""
+    """Make a session look silent, which is what assess() waits for.
+
+    Both fields, because touch_session writes both and nothing in the bridge
+    produces a record with only one. Setting just the clock stamp was a
+    fixture no code path makes, and on 2026-08-22 it cost a false red: the
+    suite passed at 23:49 and failed at 23:59 on nothing but the date rolling
+    over, because silence used to be measured off "%H:%M:%S" mapped onto
+    today (-> DECISIONS.md 5.27 and rule 6.5). Silence is an EPOCH question.
+    """
     s = sess_of(role)
-    s["last_seen"] = time.strftime(
-        "%H:%M:%S", time.localtime(time.time() - minutes * 60))
+    when = time.time() - minutes * 60
+    s["last_seen"] = time.strftime("%H:%M:%S", time.localtime(when))
+    s["seen_at"] = when
     daemon.save_state()
 
 
@@ -758,7 +767,7 @@ with daemon._lock:
         "model": MODEL, "window": WINDOW, "window_observed": True,
         "context_tokens": 941000,
         "turn_costs": [60000, 75000, 52000], "state": "idle",
-        "last_seen": daemon.now()}
+        "last_seen": daemon.now(), "seen_at": time.time()}
     daemon.STATE.setdefault("last_session", {})[
         "%s|executor" % daemon.norm(STRANGE)] = sid
     daemon.save_state()

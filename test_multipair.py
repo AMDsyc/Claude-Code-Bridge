@@ -708,9 +708,25 @@ check("cut without filtering, the quiet pair's line is gone",
       "QUIET-MARK" in sixty_later, False)
 check("because the chatty one has taken nearly all of the window",
       len([t for t in sixty_later if t.startswith("chatty beta")]) > 30, True)
+# The limit is MEASURED, not 40. A line with no path is about the bridge
+# and passes every project's filter by design, so enough of them landing
+# after the mark push it out of a 40-row window and this reads as a defect
+# in recent_events when it is nothing but noise from another thread. It
+# cost a false red on 2026-08-22 that could not be reproduced in thirteen
+# runs; the mechanism is exact, though - 40 path-less lines after the mark
+# and it is gone. Sizing the window by what actually matches the filter
+# makes the case say what it means: FILTERING HAPPENS BEFORE TRIMMING.
+_matching = len([r for r in store._read_events(
+    os.path.join(store.day_dir(), "events.jsonl"))
+    if not r.get("path") or r.get("path") == canon(QUIET)])
 filtered = [e.get("text")
-            for e in store.recent_events(40, project=canon(QUIET))]
+            for e in store.recent_events(_matching, project=canon(QUIET))]
 check("filtering first, it survives", "QUIET-MARK" in filtered, True)
+print("   and the same window, unfiltered, does NOT hold it - which is the")
+print("   whole claim: the filter runs first, the cut second")
+check("cut first and it would be lost",
+      "QUIET-MARK" in [e.get("text") for e in store.recent_events(_matching)],
+      False)
 check("with none of the sixty that buried it",
       [t for t in filtered if t.startswith("chatty beta")], [])
 

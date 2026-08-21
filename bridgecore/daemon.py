@@ -3414,22 +3414,32 @@ def already_up(path, role):
     entry = (STATE.get("pids") or {}).get("%s|%s" % (norm(path), role)) or {}
     if isinstance(entry, dict) and sessions.pid_alive(entry.get("pid")):
         return "its window is still running"
-    latest, when = None, ""
+    # seen_at, not last_seen. Both lines below used to read the clock stamp:
+    # the freshest record was picked by comparing "%H:%M:%S" as STRINGS, and
+    # the recency test measured against _clock_of. Rule 6.5 says exactly this
+    # and it was broken here twice - at 00:03 on 2026-08-22, "23:58:41" sorted
+    # above "00:03:22" so the newest record was yesterday's, and the same
+    # stamp measured 86 084 seconds away instead of five minutes.
+    latest, newest = None, 0.0
     for sess in (STATE.get("sessions") or {}).values():
         if norm(sess.get("path")) != norm(path) or sess.get("role") != role:
             continue
-        seen = sess.get("last_seen") or ""
-        if seen >= when:
-            latest, when = sess, seen
+        if latest is None or seen_at(sess) >= newest:
+            latest, newest = sess, seen_at(sess)
     if latest and latest.get("state") in ("ended", "died"):
         return None                      # said goodbye and nothing disputes it
-    if latest and when and abs(time.time() - _clock_of(when)) < 300:
-        return "it reported activity at %s" % when
+    if latest and newest and abs(time.time() - newest) < 300:
+        return "it reported activity at %s" % (latest.get("last_seen") or "?")
     return None
 
 
 def _clock_of(hhmmss):
-    """Turn a HH:MM:SS stamp back into an epoch on today's clock."""
+    """Turn a HH:MM:SS stamp back into an epoch ON TODAY'S CLOCK.
+
+    Only ever correct for a stamp written today, which is why nothing
+    measures a DURATION with it any more - see seen_at() and rule 6.5. Kept
+    for rendering a stamp a person is about to read.
+    """
     try:
         h, m, sec = (int(x) for x in hhmmss.split(":"))
         now = time.localtime()
@@ -3694,11 +3704,24 @@ def situation(path):
         sid = last_session_id(path, role) or sess.get("session_id")
         tp = sessions.transcript_of(sid) if sid else None
         tail = sessions.tail_of_transcript(tp) if tp else []
-        seen = sess.get("last_seen") or ""
+        # How long this half has been quiet, from the EPOCH and never from
+        # the clock stamp. `last_seen` is "%H:%M:%S" with no date, so
+        # _clock_of puts it on today - and a session last seen at 23:58
+        # measured at 00:03 came out at MINUS 86 084 seconds. Every caller
+        # treats a small number as "answered recently", so assess() stood
+        # down for every pair whose executor was last seen before midnight,
+        # and would have gone on doing it for the next 24 hours. Found on
+        # 2026-08-22 by test_wall_handover, which had passed ten minutes
+        # earlier and failed on nothing but the date rolling over.
+        #
+        # No seen_at means a record older than the field, and the honest
+        # answer there is "cannot say" rather than a duration read off
+        # somebody else's day.
+        at = seen_at(sess)
         out["roles"][role] = {
             "alive": bool(already_up(path, role)), "sess": sess,
             "state": sess.get("state"), "tail": tail,
-            "silent_for": (time.time() - _clock_of(seen)) if seen else None,
+            "silent_for": (time.time() - at) if at else None,
             "plan": plan_for(sess, path) if sess else {"do": "unknown"},
         }
     return out

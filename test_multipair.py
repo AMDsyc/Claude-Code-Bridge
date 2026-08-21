@@ -1157,10 +1157,19 @@ check("keeping the beginning, which is the part that identifies it",
       daemon.brief(huge).startswith('cd "D:/work/project"'), True)
 check("and saying it was cut", daemon.brief(huge).endswith("…"), True)
 psrc17 = inspect.getsource(daemon.process_watch)
-check("the stuck-process alert goes through it",
-      "brief(meta[\"cmd\"])" in psrc17, True)
+# This used to assert that the chat alert passed the command through
+# brief(). It goes further now: since 2026-08-21 the phone gets a short
+# NAME and no command tail at all - the owner called the raw version
+# feed pollution, so the assertion here is the stronger one.
+check("the stuck-process alert carries no raw command tail",
+      'brief(meta["cmd"]))' in psrc17, False)
+check("only a short name of what is running",
+      'brief(meta.get("cmd"), 40)' in psrc17, True)
 check("while the sessions still get the whole thing - they act on it",
       'deliver(path, "executor", ev' in psrc17, True)
+check("and the pair's planner is asked before any human is",
+      psrc17.index('deliver(path, "planner"')
+      < psrc17.index('notify("process_stuck"'), True)
 
 print("   a button press is answered over the chat, not into it")
 tg_reset()

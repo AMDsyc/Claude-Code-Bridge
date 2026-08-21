@@ -219,6 +219,21 @@ NAMEWAIT = {}   # path -> {"event": Event, "name": str, "suggested": str}
 PROCTRACK = {}  # path -> {sig: {"cmd", "started", "session"}}
 DURATIONS = {}  # (path, sig) -> [seconds, ...]
 
+# Events whose text belongs in the journal and the panel, and nowhere
+# near the chat.
+#
+#   PreCompact   compaction is routine and says nothing a person acts on.
+#                The owner asked not to be told about compaction at
+#                all - only about the approach to the wall, which is
+#                a different message and still goes out.
+#   StopFailure  it fires the instant a turn errors, with the raw reason
+#                and nothing to do about it. Three minutes later
+#                check_lost_turn says the same thing usefully - that no
+#                report followed and the pair is stopped, not working -
+#                and that one names the next move. Two messages about one
+#                event; this is the one that goes.
+CHAT_SILENT_EVENTS = ("PreCompact", "StopFailure")
+
 EVENT_MAP = {
     "SessionStart": ("session_start", "Session started"),
     "SessionEnd": ("session_end", "Session ended"),
@@ -663,8 +678,21 @@ def presence_quiet():
     return bool(path and os.path.exists(path))
 
 
-SOUND_DEFAULT = ("crash", "session_died", "needs_you", "process_stuck",
-                 "rotation_name", "limit_low", "run_finished")
+# One thing is worth a sound: the work is finished and wants checking.
+# The owner asked for exactly one thing to make a noise: work is
+# finished and it needs checking. Everything else goes quiet.
+# Everything else still ARRIVES - it is simply quiet, which is the
+# difference between a phone that can be left on the table and one that
+# cannot. A level set deliberately in config.json still wins; what is
+# dropped at startup is the old default written back by the panel.
+SOUND_DEFAULT = ("run_finished",)
+
+# What SOUND_DEFAULT used to be. migrate_notify_levels drops saved levels
+# equal to this, on the same reasoning as migrate_executor_mode: the panel
+# wrote the default of the day into config, and a saved copy of an old
+# default would shadow the new one for ever.
+SOUND_DEFAULT_WAS = ("crash", "session_died", "needs_you", "process_stuck",
+                     "rotation_name", "limit_low", "run_finished")
 
 # What is allowed to reach the chat at all.
 #
@@ -848,6 +876,69 @@ def brief(text, limit=CHAT_BRIEF):
     return one if len(one) <= limit else one[:limit - 1] + "…"
 
 
+def notify_seen_recently(kind, text, path):
+    """Has this exact fact already been said, and recently?
+
+    One event, one message. The fingerprint is (project, kind, substance),
+    so DIFFERENT facts about one pair are never swallowed - only the same
+    one said twice. That distinction is the whole care here: a guard on
+    (project, kind) alone would silence a real second problem because a
+    first one had been reported.
+
+    The window is measured, not chosen. Across every journal this bridge
+    has written there are 1275 repeats of the same (project, kind): 4%
+    inside a minute, 37% inside five, and the median gap is 555s. The
+    owner's example was a pair three minutes apart. thresholds
+    notify_repeat_sec defaults to 300 - it covers his case and the 37%,
+    and sits below the median so a genuinely spaced repeat still gets
+    through.
+    """
+    win = float((CFG.get("thresholds") or {}).get("notify_repeat_sec", 300))
+    if win <= 0:
+        return False
+    fp = "%s|%s|%s" % (norm(path or ""), kind,
+                       hashlib.sha256((text or "").encode("utf-8", "replace"))
+                       .hexdigest()[:16])
+    now_ts = time.time()
+    with _lock:
+        book = STATE.setdefault("said", {})
+        when = float(book.get(fp) or 0)
+        if now_ts - when < win:
+            return True
+        book[fp] = now_ts
+        if len(book) > 400:                     # keep it from growing for ever
+            for k in sorted(book, key=lambda k: book[k])[:200]:
+                book.pop(k, None)
+        save_state()
+    return False
+
+
+def migrate_notify_levels():
+    """Drop saved notify levels that are only yesterday's default.
+
+    The panel writes the current defaults into config.json, so a level
+    equal to the OLD default is not a decision - it is a copy of one, and
+    it would shadow the new default for ever. Exactly the case
+    migrate_executor_mode was written for. A level the owner actually
+    chose differs from the old default and is left alone.
+    """
+    levels = (CFG.get("notify") or {})
+    dropped = []
+    for kind in list(levels):
+        if kind in SOUND_DEFAULT_WAS and kind not in SOUND_DEFAULT \
+                and levels.get(kind) == "sound":
+            levels.pop(kind, None)
+            dropped.append(kind)
+    if dropped:
+        CFG["notify"] = levels
+        store.save_config(CFG)
+        store.journal("bridge", "Dropped saved notify level 'sound' for %s - "
+                      "it was the default of the day, not a choice, and only "
+                      "run_finished makes a sound now" % ", ".join(dropped),
+                      level="log")
+    return dropped
+
+
 def notify(kind, text, level=None, buttons=None, path=None):
     """Say something, and decide where it is allowed to be said.
 
@@ -863,6 +954,8 @@ def notify(kind, text, level=None, buttons=None, path=None):
         lvl = "log"
     if lvl == "sound" and presence_quiet():
         lvl = "silent"
+    if lvl != "log" and notify_seen_recently(kind, text, path):
+        return "log"      # said already, and recently - the journal has it
     if buttons is None and kind in ("needs_you", "crash", "limit_low"):
         # "resume" only lifts a pause; it does nothing for a loop that was
         # stopped. Offering it under a message that says to start the loop
@@ -4886,10 +4979,63 @@ def note_stop_seen(path, role):
 # ---------------------------------------------------------------------
 
 
-def note_task_sent(path):
-    """Remember when work last went out, so a turn can be missed."""
+def note_task_sent(path, text="", mid_turn=False):
+    """Remember when work last went out, and whether it may have been missed.
+
+    A task delivered WHILE a turn is running is the dangerous one. The turn
+    already has its subject; it ends with a report about that, the planner
+    accepts it, and the task that arrived in the middle is nobody's - the
+    executor waits for work it was already given, the planner waits for a
+    report on work it thinks was taken. Both wait for ever.
+
+    That is not a guess about what happened: on 2026-08-21 four tasks were
+    delivered mid-turn, the turn ended with report 120, the verdict was
+    done, and the pair stood still until a person noticed.
+
+    The bridge does not have to guess either - it delivered them, so it can
+    keep the ones that landed mid-turn and hand the oldest back the moment
+    a verdict says the previous piece is finished. Only mid-turn ones are
+    kept: a task delivered to an idle executor IS the next piece and needs
+    no help.
+    """
     with _lock:
         STATE.setdefault("last_task", {})[norm(path)] = time.time()
+        if mid_turn:
+            book = STATE.setdefault("tasks_open", {}).setdefault(norm(path), [])
+            book.append({"at": time.time(), "text": text[:9000]})
+            del book[:-5]           # a queue, not an archive
+        save_state()
+
+
+def task_arrived_mid_turn(path):
+    """Was the executor in the middle of something when this arrived?"""
+    try:
+        if PENDING.get(norm(path)):
+            return True             # a report is already awaiting a verdict
+        if (STATE.get("inflight") or {}).get(norm(path)):
+            return True
+        sess = best_session(path, "executor") or {}
+        sid = last_session_id(path, "executor") or sess.get("session_id")
+        tp = sessions.transcript_of(sid) if sid else None
+        return bool(looks_busy(sessions.tail_of_transcript(tp) if tp else []))
+    except Exception:
+        return False                # never block a delivery to ask this
+
+
+def take_open_task(path):
+    """The oldest task that was delivered mid-turn and never taken up."""
+    with _lock:
+        book = (STATE.get("tasks_open") or {}).get(norm(path)) or []
+        if not book:
+            return None
+        item = book.pop(0)
+        save_state()
+    return item
+
+
+def clear_open_tasks(path):
+    with _lock:
+        (STATE.get("tasks_open") or {}).pop(norm(path), None)
         save_state()
 
 
@@ -5741,6 +5887,7 @@ def run_review(event, path, lp, msg, project, role):
     git_commit_iteration(path, n, verdict)
 
     if verdict == "stop":
+        clear_open_tasks(path)      # the run is over; nothing is owed
         deactivate_loop(path, "the planner called the whole job finished on "
                               "iteration %d" % n)
         notify("run_finished", "%s: the planner says the job is finished "
@@ -5756,17 +5903,41 @@ def run_review(event, path, lp, msg, project, role):
         store.journal("loop", "Iteration %d accepted - asking the planner "
                       "what comes next" % n, project, "planner", "log",
                       project_dir=path)
-        notify("verdict_changes", "%s: iteration %d accepted. The loop stays "
-               "on; the planner is being asked for the next piece."
-               % (project, n), level="silent")
-        threading.Timer(1.5, deliver, args=(
-            path, "planner",
-            "You accepted iteration %d. The loop is still on, so the "
-            "executor is waiting for its next piece of work. Give it one "
-            "with the task tool. If there is genuinely nothing left to do, "
-            "answer the next report with the 'stop' verdict instead and the "
-            "loop will be switched off." % n,
-            {"kind": "info"})).start()
+        # Work already in the bridge's hands comes first. A task that
+        # landed mid-turn was never taken up by that turn, and asking the
+        # planner for "the next piece" when the next piece has already been
+        # given is how a pair stands still with its work in the postbox.
+        # There is nothing to wait for here - the fact is known at the
+        # moment of the verdict, so clinch() is not the mechanism, it is
+        # only the backstop for everything this cannot see.
+        held = take_open_task(path)
+        if held:
+            store.journal("loop", "Iteration %d accepted, and a task "
+                          "delivered while the last turn was running had "
+                          "not been taken up - handing it over again "
+                          "instead of asking for a new one" % n,
+                          project, "executor", "log", project_dir=path)
+            notify("verdict_changes", "%s: iteration %d accepted; a task "
+                   "that arrived mid-turn is being handed over again."
+                   % (project, n), level="silent")
+            threading.Timer(1.5, deliver, args=(
+                path, "executor",
+                "This was delivered while your last turn was still running, "
+                "so it was never picked up. It is still the work in hand:"
+                "\n\n%s" % held.get("text", ""),
+                {"kind": "task"})).start()
+        else:
+            notify("verdict_changes", "%s: iteration %d accepted. The loop "
+                   "stays on; the planner is being asked for the next piece."
+                   % (project, n), level="silent")
+            threading.Timer(1.5, deliver, args=(
+                path, "planner",
+                "You accepted iteration %d. The loop is still on, so the "
+                "executor is waiting for its next piece of work. Give it one "
+                "with the task tool. If there is genuinely nothing left to "
+                "do, answer the next report with the 'stop' verdict instead "
+                "and the loop will be switched off." % n,
+                {"kind": "info"})).start()
     elif verdict == "wait":
         touch_session(event, state="waiting on a process")
         notify("waiting_process", "%s: planner says wait - %s"
@@ -6058,8 +6229,12 @@ def handle_event(event):
                                  args=(path, "rate limit", nxt),
                                  daemon=True).start()
             else:
+                # About one pair, so it carries that pair's colour. This
+                # IS the wall arriving - the chain has nothing left to drop
+                # to - so it stays in the chat.
                 notify("limit_low", "%s: rate limit hit and no model left in "
-                       "the chain. Waiting for the reset." % project)
+                       "the chain. Waiting for the reset." % project,
+                       path=path)
 
     elif name == "PreCompact":
         sess = touch_session(event, state="compacting")
@@ -6388,8 +6563,12 @@ def handle_event(event):
     store.journal(name, text or phrase, project, role,
                   CFG.get("notify", {}).get(setting or "", "log"),
                   project_dir=path if os.path.isdir(path) else None)
-    if text and setting:
-        notify(setting, text)
+    if text and setting and name not in CHAT_SILENT_EVENTS:
+        # path names the pair, which is what puts its colour on the
+        # message. This tail is where most event messages are sent from,
+        # and it never passed one - so every one of them arrived in the
+        # chat with no colour at all, in a chat that carries four pairs.
+        notify(setting, text, path=path)
     refresh_pin()
     return hook_output, text
 
@@ -6438,9 +6617,10 @@ def deliver_task_later(path, text, tries=3):
     """
     body = "Task from the planner:\n\n%s" % text
     for attempt in range(1, tries + 1):
+        mid = task_arrived_mid_turn(path)
         ok, why = deliver_ex(path, "executor", body, {"kind": "task"})
         if ok:
-            note_task_sent(path)
+            note_task_sent(path, text, mid)
         if ok:
             store.journal("task", "Task delivered to the executor%s"
                           % ("" if attempt == 1 else
@@ -6646,10 +6826,18 @@ def handle_status(body):
             with _lock:
                 STATE[key] = True
                 save_state()
-            notify("limit_low", "%s / executor context at %d%% - the handoff "
-                   "is kept fresh; it compacts and carries on, and is only "
-                   "replaced once its compactions are spent."
-                   % (project_name(path), int(cpct)))
+            # This one says "it is compacting and carrying on", which is
+            # the routine case the owner asked not to be told about. It
+            # stays in the journal and on the panel. The messages that DO
+            # go out are the ones about the wall itself: a model chain
+            # running out, and a rotation.
+            store.journal("limit_low",
+                          "%s / executor context at %d%% - the handoff is "
+                          "kept fresh; it compacts and carries on, and is "
+                          "only replaced once its compactions are spent."
+                          % (project_name(path), int(cpct)),
+                          project_name(path), "executor", "log",
+                          project_dir=path)
     refresh_pin()
 
 
@@ -6739,6 +6927,27 @@ def maybe_auto_probe():
 # ---------------------------------------------------------------------------
 # stuck-process watchdog
 
+# No command is called slow before this, whatever its own history says.
+# Measured 2026-08-21 over every journal this bridge has written: 5 400
+# tracked commands, median 3s, p95 58s, p99 311s. A threshold of
+# "usual x 3" has no floor, so a command that usually takes 2s was being
+# called stuck after SIX SECONDS - which is where "a process has run 0 min
+# (usual: 2s)" came from, and it is nonsense on the face of it.
+STUCK_FLOOR_SEC = 311
+
+
+def stuck_limit(usual):
+    """When a running command becomes worth mentioning.
+
+    Its own history can only make the answer LATER, never earlier: the
+    floor is absolute. That is the whole lesson of the 2s command - a
+    multiple of a small number is a small number.
+    """
+    floor = float((CFG.get("thresholds") or {}).get("stuck_floor_sec",
+                                                    STUCK_FLOOR_SEC))
+    return max(floor, (usual * 3) if usual else 900)
+
+
 def process_watch():
     while True:
         time.sleep(30)
@@ -6747,28 +6956,57 @@ def process_watch():
                 run = time.time() - meta["started"]
                 hist = DURATIONS.get((path, sig), [])
                 usual = (sum(hist) / len(hist)) if len(hist) >= 5 else None
-                limit = (usual * 3) if usual else 900
+                limit = stuck_limit(usual)
+                grace = float((CFG.get("thresholds") or {})
+                              .get("stuck_planner_grace", 600))
                 if run > limit and not meta.get("flagged"):
-                    meta["flagged"] = True
+                    # Step one: the pair. Its planner holds the project, has
+                    # `wait` and `task`, and can decide this without waking
+                    # anybody - so it is asked first and the human is not
+                    # troubled at all if the pair sorts it out. The sessions
+                    # get the command itself, because they need it to act.
+                    meta["flagged"] = time.time()
                     ev = ("Process %s has run %.0f min (usual: %s). "
                           "Decide whether it is stuck."
                           % (meta["cmd"], run / 60,
                              ("%.0f s over %d runs" % (usual, len(hist)))
                              if usual else "no history yet"))
-                    if not deliver(path, "executor", ev, {"kind": "info"}):
-                        deliver(path, "planner", ev, {"kind": "info"})
-                    # The sessions get the whole thing - they need the
-                    # command to act on it. The chat gets the decision:
-                    # what, how long, what to do. A tracked "command" is
-                    # whatever was run, and one of them was a heredoc
-                    # writing a markdown file, so the untrimmed version put
-                    # the entire file on the phone.
+                    told = deliver(path, "planner", ev, {"kind": "info"})
+                    if not told:
+                        told = deliver(path, "executor", ev, {"kind": "info"})
+                    meta["asked_pair"] = bool(told)
+                    store.journal("process",
+                                  "A process has run %.0f min (usual: %s) - "
+                                  "asked the pair to decide"
+                                  % (run / 60,
+                                     ("%.0fs" % usual) if usual
+                                     else "no history"),
+                                  project_name(path), "planner", "log",
+                                  project_dir=path)
+                    if told:
+                        continue          # the pair has it; the human sleeps
+                # Step two: the pair was asked and the thing is still
+                # running, or there was nobody to ask. Now it is worth a
+                # person. No raw command tail - that put an entire heredoc
+                # on somebody's phone - just what it is, how long, against
+                # what, and what happens next.
+                asked_at = meta.get("flagged") or 0
+                if (asked_at and run > limit
+                        and not meta.get("told_human")
+                        and (time.time() - asked_at >= grace
+                             or not meta.get("asked_pair"))):
+                    meta["told_human"] = True
                     notify("process_stuck",
-                           "%s: a process has run %.0f min (usual: %s) - "
-                           "decide whether it is stuck: %s"
-                           % (project_name(path), run / 60,
-                              ("%.0fs" % usual) if usual else "no history",
-                              brief(meta["cmd"])), path=path)
+                           "%s: \"%s\" has been running %.0f min (usually "
+                           "%s)%s. The bridge keeps waiting and will say "
+                           "when it ends - stop it in that window if it is "
+                           "wedged."
+                           % (project_name(path), brief(meta.get("cmd"), 40),
+                              run / 60,
+                              ("%.0fs" % usual) if usual else "unknown",
+                              "" if meta.get("asked_pair")
+                              else " and the pair could not be reached"),
+                           path=path)
 
 
 # ---------------------------------------------------------------------------
@@ -8627,6 +8865,7 @@ def main():
                                               for r in _back[:6])),
                       level="warn")
     migrate_executor_mode()
+    migrate_notify_levels()
     moved = migrate_keys()
     if moved:
         store.journal("bridge", "Re-keyed %d stored entries to the canonical "

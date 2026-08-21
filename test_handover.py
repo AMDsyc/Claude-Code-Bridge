@@ -3015,6 +3015,163 @@ check("carrying what the executor actually asked",
       "Do we push to the public repo?" in (_rang[0][1] if _rang else ""),
       True)
 
+print("\n75. the chat is a phone, and it had been turned into a log")
+print("    Seven messages the owner pointed at in one morning, all the same")
+print("    disease. What arrives has to be worth looking up for")
+print("   (A) compaction is routine and says nothing anyone acts on. It")
+print("   stays in the journal and on the panel; only the approach to the")
+print("   wall goes out")
+check("PreCompact never reaches the chat",
+      "PreCompact" in daemon.CHAT_SILENT_EVENTS, True)
+check("and neither does the raw turn-error, which said nothing to do",
+      "StopFailure" in daemon.CHAT_SILENT_EVENTS, True)
+print("   the useful version of that error still goes out three minutes")
+print("   later from check_lost_turn - one event, one message, and this is")
+print("   the one that names the next move")
+check("check_lost_turn still calls a human",
+      'notify("crash"' in inspect.getsource(daemon.check_lost_turn), True)
+print("   (B) every message about ONE pair carries that pair's colour. The")
+print("   event tail sent most of them and never passed the project at all")
+_tail = inspect.getsource(daemon.handle_event)
+check("the event tail names the pair it is about",
+      "notify(setting, text, path=path)" in _tail, True)
+print("   limit_low has three jobs and they part company here: the")
+print("   five-hour limit is the account's and stays colourless; the")
+print("   context-percentage line is compaction and leaves the chat; the")
+print("   chain running out IS the wall and stays, with colour")
+_src = inspect.getsource(daemon)
+check("the five-hour limit is still sent, still without a pair",
+      'notify("limit_low", "Five-hour limit at %d%%." % int(pct))' in _src,
+      True)
+check("the context-percentage line is journalled, not notified",
+      'store.journal("limit_low",' in _src, True)
+check("and the chain running out carries its pair",
+      'the chain. Waiting for the reset." % project,\n                       path=path)'
+      in _src, True)
+print("   (C) the same fact twice is not twice the information. The window")
+print("   is measured: 1275 repeats of one (project, kind) in the journals,")
+print("   4% inside a minute, 37% inside five, median gap 555s")
+daemon.STATE["said"] = {}
+_p = os.path.join(TMP, "noisy_project")
+check("the first time a fact is said, it goes",
+      daemon.notify_seen_recently("crash", "the turn died", _p), False)
+check("the same fact again, straight after, does not",
+      daemon.notify_seen_recently("crash", "the turn died", _p), True)
+print("   but a DIFFERENT fact about the same pair must never be swallowed -")
+print("   a guard on (project, kind) alone would hide a real second problem")
+check("a different message of the same kind still goes",
+      daemon.notify_seen_recently("crash", "the window vanished", _p), False)
+check("and the same words about a different pair go too",
+      daemon.notify_seen_recently("crash", "the turn died",
+                                  os.path.join(TMP, "other_project")), False)
+print("   and it lapses: an hour later the same fact is news again")
+daemon.STATE["said"] = dict(
+    (k, v - 4000) for k, v in daemon.STATE["said"].items())
+check("once the window has passed the fact may be said again",
+      daemon.notify_seen_recently("crash", "the turn died", _p), False)
+print("   (D) a command is not slow because it is slower than usual. With")
+print("   usual=2s the old rule fired after six seconds - that is where")
+print("   \"has run 0 min (usual: 2s)\" came from. The floor is absolute and")
+print("   measured: p99 of 5400 tracked commands is 311s")
+check("a 2s command running 60s is not stuck",
+      60 > daemon.stuck_limit(2.0), False)
+check("nor is it at 300s, still under the measured p99",
+      300 > daemon.stuck_limit(2.0), False)
+check("past the floor it is worth a look",
+      400 > daemon.stuck_limit(2.0), True)
+check("a genuinely long-running command raises the bar, never lowers it",
+      daemon.stuck_limit(600.0), 1800.0)
+check("and with no history at all the old 15 minutes still applies",
+      daemon.stuck_limit(None), 900.0)
+print("   the pair is asked first - its planner has wait and task and can")
+print("   settle this without waking anybody. The human hears only if the")
+print("   pair was unreachable, or the grace passed with it still running")
+_pw = inspect.getsource(daemon.process_watch)
+check("the planner is asked before the human",
+      _pw.index('deliver(path, "planner"') < _pw.index('notify("process_stuck"'),
+      True)
+check("the human is held back by a grace",
+      "stuck_planner_grace" in _pw, True)
+check("and the raw command tail no longer goes to the phone",
+      'brief(meta["cmd"]))' in _pw, False)
+
+print("\n76. one sound, and only one")
+print("    The owner: only \"work finished, needs checking\" should make a")
+print("    noise. Everything else still arrives - it is simply quiet, which")
+print("    is the difference between a phone you can leave on the table")
+check("run_finished is the only kind that sounds by default",
+      daemon.SOUND_DEFAULT, ("run_finished",))
+check("but the quiet ones still reach the chat",
+      all(k in daemon.TELEGRAM_KINDS
+          for k in ("needs_you", "crash", "session_died")), True)
+print("   the panel writes the defaults of the day into config, so a saved")
+print("   level equal to the OLD default is a copy of a default, not a")
+print("   decision - and it would shadow the new one for ever. Same case")
+print("   migrate_executor_mode was written for")
+_saved_cfg75 = daemon.CFG.get("notify")
+daemon.CFG["notify"] = {"needs_you": "sound", "process_stuck": "log",
+                        "run_finished": "sound"}
+_dropped = daemon.migrate_notify_levels()
+check("yesterday's default is dropped",
+      "needs_you" in _dropped, True)
+check("so the new default decides",
+      daemon.CFG["notify"].get("needs_you"), None)
+check("a level chosen deliberately survives",
+      daemon.CFG["notify"].get("process_stuck"), "log")
+check("and run_finished keeps its sound, being the one that still sounds",
+      daemon.CFG["notify"].get("run_finished"), "sound")
+daemon.CFG["notify"] = _saved_cfg75
+
+print("\n77. work already in the bridge's hands comes first")
+print("    A task delivered WHILE a turn is running is nobody's: the turn")
+print("    already has its subject, it ends with a report about that, the")
+print("    planner accepts it - and the task that arrived in the middle is")
+print("    never picked up. The executor waits for work it was already")
+print("    given; the planner waits for a report on work it thinks was")
+print("    taken. On 2026-08-21 four tasks landed mid-turn, the turn ended")
+print("    with report 120, the verdict was done, and the pair stood still")
+print("    until a person noticed")
+_tp = os.path.join(TMP, "held_task_project")
+daemon.STATE["tasks_open"] = {}
+daemon.note_task_sent(_tp, "FIRST piece", mid_turn=True)
+daemon.note_task_sent(_tp, "SECOND piece", mid_turn=True)
+check("a task that lands mid-turn is kept",
+      len(daemon.STATE["tasks_open"][daemon.norm(_tp)]), 2)
+print("   and the OLDEST comes back first - a queue, not a stack")
+check("the oldest is handed back first",
+      (daemon.take_open_task(_tp) or {}).get("text"), "FIRST piece")
+check("then the next",
+      (daemon.take_open_task(_tp) or {}).get("text"), "SECOND piece")
+check("and then there is nothing held",
+      daemon.take_open_task(_tp), None)
+print("   a task delivered to an IDLE executor is the next piece already -")
+print("   holding it would hand the same work over twice")
+daemon.note_task_sent(_tp, "given to an idle executor", mid_turn=False)
+check("a task delivered between turns is not held",
+      daemon.take_open_task(_tp), None)
+print("   stop ends the run, so nothing is owed any more")
+daemon.note_task_sent(_tp, "held", mid_turn=True)
+daemon.clear_open_tasks(_tp)
+check("stop empties the queue",
+      daemon.take_open_task(_tp), None)
+print("   the queue is a queue and not an archive - five is plenty")
+for _i in range(9):
+    daemon.note_task_sent(_tp, "piece %d" % _i, mid_turn=True)
+check("it keeps the last five, not everything ever sent",
+      len(daemon.STATE["tasks_open"][daemon.norm(_tp)]), 5)
+check("and the oldest kept is the sixth of the nine",
+      (daemon.take_open_task(_tp) or {}).get("text"), "piece 4")
+print("   the done branch hands held work over BEFORE asking the planner")
+print("   for something new - there is nothing to wait for, the fact is")
+print("   known at the moment of the verdict, so clinch is only the backstop")
+_dv = inspect.getsource(daemon)
+check("done takes held work first",
+      "held = take_open_task(path)" in _dv, True)
+check("and only asks the planner when there is none",
+      _dv.index("held = take_open_task(path)")
+      < _dv.index("You accepted iteration %d. The loop is still on"), True)
+daemon.STATE["tasks_open"] = {}
+
 print("\n" + ("-" * 60))
 if FAILED:
     print("FAILED: %d" % len(FAILED))

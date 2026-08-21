@@ -1156,7 +1156,9 @@ check("a command with a file inside it is cut to one line",
 check("keeping the beginning, which is the part that identifies it",
       daemon.brief(huge).startswith('cd "D:/work/project"'), True)
 check("and saying it was cut", daemon.brief(huge).endswith("…"), True)
-psrc17 = inspect.getsource(daemon.process_watch)
+# the deciding moved into check_processes on 2026-08-21 so that it
+# could be run in a test; process_watch is now only the loop
+psrc17 = inspect.getsource(daemon.check_processes)
 # This used to assert that the chat alert passed the command through
 # brief(). It goes further now: since 2026-08-21 the phone gets a short
 # NAME and no command tail at all - the owner called the raw version

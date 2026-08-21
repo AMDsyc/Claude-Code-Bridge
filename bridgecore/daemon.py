@@ -3785,6 +3785,29 @@ def stall_watch():
             pass
 
 
+def executor_is_working(path):
+    """Is this executor writing right now? Not "did it finish", but "is it on".
+
+    The same witnesses stalled() uses, asked the other way round, so there is
+    one idea of "working" in this file and not two. Transcript growth is the
+    honest one: a model turn writes as it goes, so a window that has written
+    inside the stall grace is a window that took its work.
+
+    Cannot tell -> False, and that is deliberate the opposite way from
+    tool_in_flight: there, being wrongly told "busy" costs one skipped check;
+    here, wrongly answering "working" would silence the stall watcher, which
+    is the only thing that notices a verdict nobody took.
+    """
+    try:
+        grace = float(CFG.get("thresholds", {}).get("stall_grace", 180))
+        if inflight_live(path):
+            return True
+        frozen, _ = transcript_frozen(path, "executor", grace)
+        return not frozen
+    except Exception:
+        return False
+
+
 def check_stalls():
     grace = float(CFG.get("thresholds", {}).get("stall_grace", 180))
     for path, w in list((STATE.get("awaiting") or {}).items()):
@@ -3795,6 +3818,27 @@ def check_stalls():
             continue
         waited = time.time() - w.get("since", 0)
         if waited < grace:
+            continue
+        # "Picked it up" is not "finished a turn", and this used to be unable
+        # to tell them apart. STATE["awaiting"] is cleared at the executor's
+        # next Stop, which is the END of the turn - so a turn that takes
+        # longer than stall_grace (180s) is indistinguishable here from one
+        # that never started, and the ordinary case is the long one.
+        #
+        # 2026-08-21, 23:13:26: a verdict went out and the executor picked it
+        # up at 23:13:27 - its transcript shows unbroken work from there to
+        # 23:28:34. This nudged it anyway at 23:16:55 and 23:19:55, then at
+        # 23:22:55 woke the owner with "the executor never started a turn.
+        # Type anything in its window to wake it." He was reading that about
+        # a session that was working, while the turn that HAD died - the
+        # planner's, at 23:21:09 - went unreported.
+        #
+        # The witness already exists and costs nothing: a window that is
+        # writing is not a window that never woke.
+        if executor_is_working(path):
+            with _lock:
+                w["since"] = time.time()      # start the clock again
+                save_state()
             continue
         tries = w.get("nudges", 0)
         name = project_name(path)
@@ -5643,8 +5687,14 @@ def pair_moved_since(path, role, when):
             return True
         if float((STATE.get("last_task") or {}).get(norm(path)) or 0) > when:
             return True
-        if (STATE.get("inflight") or {}).get(norm(path)) \
-                or PROCTRACK.get(norm(path)):
+        # inflight_live, not the raw dict. This was MISSED when the other
+        # three readers were routed through it on 2026-08-21, and the miss
+        # cost the same night: a planner's turn died at 23:21:09 with an API
+        # error, check_lost_turn came to speak at 23:23:42, and this function
+        # answered "moving" on the strength of a `mkdir` record that had been
+        # leaking since 2026-08-18. The message became a journal line and the
+        # pair stood still until a person typed into the window.
+        if inflight_live(path):
             return True
         sess = best_session(path, role) or {}
         if float(sess.get("seen_at") or 0) > when:
@@ -5873,6 +5923,73 @@ def outage_watch():
             pass
 
 
+# How many times the bridge picks a dead turn back up before it calls a
+# person, and how the wait grows between attempts. Bounded on purpose: an
+# API error that keeps happening must not become an endless restart loop,
+# and the human who is finally called deserves to be told what was already
+# tried rather than asked to guess.
+LOST_TURN_TRIES = 3
+LOST_TURN_BACKOFF = 2.0
+
+
+def revive_lost_turn(path, role):
+    """Hand a dead turn back its own work. Returns what was done, or "".
+
+    A turn that ends in an API error is a BREAKAGE, not a question, and the
+    difference decides who acts. The owner said it plainly on 2026-08-21,
+    after being messaged to go and type something into a window:
+
+        the loop has to solve this kind of problem itself
+
+    So this is the healing half, and its boundary is exact: **the bridge
+    re-delivers only what it is already holding.** It never writes a verdict,
+    never writes a report, and never decides anything either half was in the
+    middle of deciding - that would be the bridge doing the planner's job,
+    which rule 8 forbids in the other direction and common sense forbids in
+    this one. Re-delivery loses no work: the task or the report still exists,
+    it simply never got read.
+
+    Nothing here is new machinery. It is resume_after_outage's (a) and (b)
+    for one pair, reached from a different cause, which is why the outage
+    pass and this one cannot drift apart.
+
+    The other class - the planner explicitly handing something back with
+    "this is the owner's decision" - is untouched and still rings a human
+    once per wait (-> DECISIONS.md 5.10). That one IS a question. Telling
+    the two apart is the whole point: a question goes to a person, a
+    breakage gets fixed.
+    """
+    try:
+        if role == "planner":
+            pend = PENDING.get(norm(path))
+            if pend and pend.get("content"):
+                ok, _ = deliver_ex(path, "planner", pend["content"],
+                                   {"kind": "report"})
+                if ok:
+                    return ("handed report %s back to the planner"
+                            % pend.get("n", "?"))
+                return ""
+            # Nothing is waiting on it: the pair is not stuck on this half,
+            # so there is nothing to hand back and nothing to invent.
+            return ""
+        held = take_open_task(path)
+        if held:
+            if deliver(path, "executor",
+                       "This turn ended in an error before it was picked up, "
+                       "so the work was never started. It is still the work "
+                       "in hand:\n\n%s" % held.get("text", ""),
+                       {"kind": "task"}):
+                return "handed back the task it never started"
+            return ""
+        sess = best_session(path, "executor") or {}
+        if deliver(path, "executor", state_report(path, "executor", sess),
+                   {"kind": "task"}):
+            return "woke the executor with its state"
+    except Exception:
+        return ""
+    return ""
+
+
 def check_lost_turn(path):
     """A turn that ended in an error and never came back.
 
@@ -5920,22 +6037,58 @@ def check_lost_turn(path):
                                            time.localtime(rec.get("at", 0)))),
                           project_name(path), role, "log", project_dir=path)
             continue
+        name = project_name(path)
+        # The pair is genuinely stopped. Before anybody's phone rings, the
+        # bridge picks the turn back up itself - that is what the owner asked
+        # for, and it is a repair rather than a decision (see
+        # revive_lost_turn for where the line is drawn). A person is called
+        # only when the bridge has tried and failed, and is told what it
+        # tried.
+        tries = int(rec.get("revives") or 0)
+        if tries < LOST_TURN_TRIES:
+            did = revive_lost_turn(path, role)
+            with _lock:
+                r = STATE["stopfail"].get(key)
+                if r is not None:
+                    r["revives"] = tries + 1
+                    r["tried"] = (r.get("tried") or []) + [did or "nothing"]
+                    # Restart the grace, longer each time, so a fault that
+                    # keeps recurring backs off instead of spinning.
+                    r["at"] = time.time() + grace * (
+                        LOST_TURN_BACKOFF ** tries - 1)
+                    save_state()
+            store.journal("turn_lost",
+                          "%s / %s: the turn died at %s (%s) and nothing came "
+                          "back - %s (attempt %d of %d, no one woken)"
+                          % (name, role,
+                             time.strftime("%H:%M:%S",
+                                           time.localtime(rec.get("at", 0))),
+                             rec.get("reason") or "-",
+                             did or "found nothing to hand back",
+                             tries + 1, LOST_TURN_TRIES),
+                          name, role, "warn", project_dir=path)
+            continue
         with _lock:
             STATE["stopfail"][key]["told"] = True
             save_state()
-        name = project_name(path)
+        tried = ", ".join(rec.get("tried") or []) or "nothing it could reach"
         store.journal("turn_lost",
                       "%s / %s: the turn ended with an error and no report "
                       "followed within %ds, so this pair is not waiting for "
-                      "anything - it is stopped. Reason given: %s"
-                      % (name, role, int(grace), rec.get("reason") or "-"),
+                      "anything - it is stopped. Reason given: %s. The bridge "
+                      "tried %d time%s first: %s"
+                      % (name, role, int(grace), rec.get("reason") or "-",
+                         LOST_TURN_TRIES, "" if LOST_TURN_TRIES == 1 else "s",
+                         tried),
                       name, role, "warn", project_dir=path)
         notify("crash",
                "%s: the %s's turn died (%s) and no report came back. The "
-               "pair is idle, not working - send it a task, or press "
-               "'hand over %s' if the window is unresponsive."
+               "bridge picked it back up %d times itself (%s) and it is "
+               "still stopped, so this one needs you - send it a task, or "
+               "press 'hand over %s' if the window is unresponsive."
                % (name, role, brief(rec.get("reason") or "no reason given",
-                                    140), role),
+                                    100), LOST_TURN_TRIES, brief(tried, 120),
+                  role),
                path=path)
 
 # ---- the planner runs it, because the planner cannot ----------------------
@@ -7580,64 +7733,91 @@ def stuck_limit(usual):
 
 
 def process_watch():
+    """The loop. All the deciding is in check_processes, so it can be run.
+
+    Same split as stall_watch/check_stalls, and for the same reason: a
+    watcher that is a `while True` around its own logic cannot be tested,
+    and this one had a hole in it that only a test would have caught.
+    """
     while True:
         time.sleep(30)
-        for path, procs in list(PROCTRACK.items()):
-            for sig, meta in list(procs.items()):
-                run = time.time() - meta["started"]
-                hist = DURATIONS.get((path, sig), [])
-                usual = (sum(hist) / len(hist)) if len(hist) >= 5 else None
-                limit = stuck_limit(usual)
-                grace = float((CFG.get("thresholds") or {})
-                              .get("stuck_planner_grace", 600))
-                if run > limit and not meta.get("flagged"):
-                    # Step one: the pair. Its planner holds the project, has
-                    # `wait` and `task`, and can decide this without waking
-                    # anybody - so it is asked first and the human is not
-                    # troubled at all if the pair sorts it out. The sessions
-                    # get the command itself, because they need it to act.
-                    meta["flagged"] = time.time()
-                    ev = ("Process %s has run %.0f min (usual: %s). "
-                          "Decide whether it is stuck."
-                          % (meta["cmd"], run / 60,
-                             ("%.0f s over %d runs" % (usual, len(hist)))
-                             if usual else "no history yet"))
-                    told = deliver(path, "planner", ev, {"kind": "info"})
-                    if not told:
-                        told = deliver(path, "executor", ev, {"kind": "info"})
-                    meta["asked_pair"] = bool(told)
-                    store.journal("process",
-                                  "A process has run %.0f min (usual: %s) - "
-                                  "asked the pair to decide"
-                                  % (run / 60,
-                                     ("%.0fs" % usual) if usual
-                                     else "no history"),
-                                  project_name(path), "planner", "log",
-                                  project_dir=path)
-                    if told:
-                        continue          # the pair has it; the human sleeps
-                # Step two: the pair was asked and the thing is still
-                # running, or there was nobody to ask. Now it is worth a
-                # person. No raw command tail - that put an entire heredoc
-                # on somebody's phone - just what it is, how long, against
-                # what, and what happens next.
-                asked_at = meta.get("flagged") or 0
-                if (asked_at and run > limit
-                        and not meta.get("told_human")
-                        and (time.time() - asked_at >= grace
-                             or not meta.get("asked_pair"))):
-                    meta["told_human"] = True
-                    notify("process_stuck",
-                           "%s: \"%s\" has been running %.0f min (usually "
-                           "%s)%s. The bridge keeps waiting and will say "
-                           "when it ends - stop it in that window if it is "
-                           "wedged."
-                           % (project_name(path), brief(meta.get("cmd"), 40),
-                              run / 60,
-                              ("%.0fs" % usual) if usual else "unknown",
-                              "" if meta.get("asked_pair")
-                              else " and the pair could not be reached"),
-                           path=path)
+        try:
+            check_processes()
+        except Exception:
+            pass
+
+
+def check_processes():
+    for path, procs in list(PROCTRACK.items()):
+        for sig, meta in list(procs.items()):
+            run = time.time() - meta["started"]
+            # A record inflight_live has already aged out is not a slow
+            # command, it is a leak - and the bridge has said so once, at
+            # warn, which is where a thing like that belongs. Saying it
+            # again down here would put it on somebody's phone, and the
+            # chat is a telephone rather than a journal.
+            #
+            # 2026-08-21 23:01: two process_stuck messages went out about
+            # records of 84 h and 6 h that inflight_live had already
+            # decided were not work. They were fresh to this watcher
+            # because reseed_proctrack had just handed them back after a
+            # restart, so nothing here had flagged them yet. One idea of
+            # "too long to be real", not two: the same constant decides.
+            if run > INFLIGHT_MAX_SEC:
+                continue
+            hist = DURATIONS.get((path, sig), [])
+            usual = (sum(hist) / len(hist)) if len(hist) >= 5 else None
+            limit = stuck_limit(usual)
+            grace = float((CFG.get("thresholds") or {})
+                          .get("stuck_planner_grace", 600))
+            if run > limit and not meta.get("flagged"):
+                # Step one: the pair. Its planner holds the project, has
+                # `wait` and `task`, and can decide this without waking
+                # anybody - so it is asked first and the human is not
+                # troubled at all if the pair sorts it out. The sessions
+                # get the command itself, because they need it to act.
+                meta["flagged"] = time.time()
+                ev = ("Process %s has run %.0f min (usual: %s). "
+                      "Decide whether it is stuck."
+                      % (meta["cmd"], run / 60,
+                         ("%.0f s over %d runs" % (usual, len(hist)))
+                         if usual else "no history yet"))
+                told = deliver(path, "planner", ev, {"kind": "info"})
+                if not told:
+                    told = deliver(path, "executor", ev, {"kind": "info"})
+                meta["asked_pair"] = bool(told)
+                store.journal("process",
+                              "A process has run %.0f min (usual: %s) - "
+                              "asked the pair to decide"
+                              % (run / 60,
+                                 ("%.0fs" % usual) if usual
+                                 else "no history"),
+                              project_name(path), "planner", "log",
+                              project_dir=path)
+                if told:
+                    continue          # the pair has it; the human sleeps
+            # Step two: the pair was asked and the thing is still
+            # running, or there was nobody to ask. Now it is worth a
+            # person. No raw command tail - that put an entire heredoc
+            # on somebody's phone - just what it is, how long, against
+            # what, and what happens next.
+            asked_at = meta.get("flagged") or 0
+            if (asked_at and run > limit
+                    and not meta.get("told_human")
+                    and (time.time() - asked_at >= grace
+                         or not meta.get("asked_pair"))):
+                meta["told_human"] = True
+                notify("process_stuck",
+                       "%s: \"%s\" has been running %.0f min (usually "
+                       "%s)%s. The bridge keeps waiting and will say "
+                       "when it ends - stop it in that window if it is "
+                       "wedged."
+                       % (project_name(path), brief(meta.get("cmd"), 40),
+                          run / 60,
+                          ("%.0fs" % usual) if usual else "unknown",
+                          "" if meta.get("asked_pair")
+                          else " and the pair could not be reached"),
+                       path=path)
 
 
 # ---------------------------------------------------------------------------

@@ -1989,11 +1989,27 @@ try:
     check("nothing is said while the turn might still come back", _told, [])
     daemon.STATE["stopfail"]["%s|executor" % _sfn]["at"] = time.time() - 200
     daemon.check_lost_turn(_sf)
-    check("after the grace, the human is told once", len(_told), 1)
+    print("   since 2026-08-21 the bridge picks it back up ITSELF before it")
+    print("   rings anybody: a turn that died of an API error is a breakage,")
+    print("   not a question, and the owner asked for the loop to solve this")
+    print("   kind of problem on its own")
+    check("the first pass past the grace wakes nobody", len(_told), 0)
+    check("it counted an attempt instead",
+          daemon.STATE["stopfail"]["%s|executor" % _sfn]["revives"], 1)
+    check("and wrote down what it tried",
+          len(daemon.STATE["stopfail"]["%s|executor" % _sfn]["tried"]), 1)
+    print("   the wait grows between attempts, so a fault that keeps")
+    print("   happening backs off instead of spinning")
+    for _i in range(daemon.LOST_TURN_TRIES):
+        daemon.STATE["stopfail"]["%s|executor" % _sfn]["at"] = time.time() - 200
+        daemon.check_lost_turn(_sf)
+    check("after the attempts run out, the human is told once", len(_told), 1)
     check("and told what it means - the pair is stopped, not working",
-          "idle, not working" in _told[0][1], True)
+          "still stopped, so this one needs you" in _told[0][1], True)
     check("with the reason in it, not 'unknown'",
           "Connection closed" in _told[0][1], True)
+    check("and with what the bridge already tried, so he is not guessing",
+          "picked it back up" in _told[0][1], True)
     daemon.check_lost_turn(_sf)
     check("and not told again on every pass", len(_told), 1)
 
@@ -3099,7 +3115,10 @@ check("and with no history at all the old 15 minutes still applies",
 print("   the pair is asked first - its planner has wait and task and can")
 print("   settle this without waking anybody. The human hears only if the")
 print("   pair was unreachable, or the grace passed with it still running")
-_pw = inspect.getsource(daemon.process_watch)
+print("   the deciding lives in check_processes; process_watch is the loop")
+print("   around it, split the same way as stall_watch/check_stalls so it")
+print("   can be run in a test at all")
+_pw = inspect.getsource(daemon.check_processes)
 check("the planner is asked before the human",
       _pw.index('deliver(path, "planner"') < _pw.index('notify("process_stuck"'),
       True)
@@ -3879,8 +3898,8 @@ print("   both are right to - what was wrong was the value they were given")
 print("   fourth: the only sweeper walks memory, which a restart empties")
 print("   while the record itself lives on disk and survives. After the")
 print("   21:56:07 restart nothing could report the leak any more")
-_pw = inspect.getsource(daemon.process_watch)
-check("process_watch walks PROCTRACK", "PROCTRACK.items()" in _pw, True)
+_pw = inspect.getsource(daemon.check_processes)
+check("the process watcher walks PROCTRACK", "PROCTRACK.items()" in _pw, True)
 check("not the persisted record", 'STATE.get("inflight")' in _pw, False)
 daemon.PROCTRACK.clear()
 daemon.STATE["inflight"][_k] = {
@@ -3898,6 +3917,158 @@ check("a record already in memory is not doubled",
 _rs = inspect.getsource(daemon.reseed_proctrack)
 check("nothing is dropped here - ageing is INFLIGHT_MAX_SEC's job",
       "pop(" in _rs or "clear()" in _rs, False)
+
+print("\n89. a turn that died of an API error is a breakage, not a question")
+print("    2026-08-21, third time in one day. A planner's turn died at")
+print("    23:21:09 with \"API Error: The response stopped arriving\". What")
+print("    ended the five-minute stop was the owner typing into the window")
+print("    by hand. His words: the loop has to solve this kind of problem")
+print("    itself")
+print("   part one, and it is a miss in the fix of the same morning:")
+print("   pair_moved_since read the RAW inflight dict, so the leaked record")
+print("   that case 88 is about still answered 'moving' and turned the")
+print("   lost-turn message into a journal line")
+_pms = inspect.getsource(daemon.pair_moved_since)
+check("it goes through inflight_live now", "inflight_live(path)" in _pms, True)
+check("and not through the raw dict",
+      'STATE.get("inflight") or {}).get(norm(path))' in _pms, False)
+daemon.STATE.clear()
+daemon.STATE.update({"sessions": {}, "windows": {}, "inflight": {},
+                     "stop_seen": {}, "last_task": {}, "loops": {},
+                     "paused": {}, "pids": {}, "stopfail": {}})
+daemon.PROCTRACK.clear()
+daemon._INFLIGHT_STALE_TOLD.clear()
+_k89 = daemon.norm(PATH)
+_when = time.time() - 300
+daemon.STATE["inflight"][_k89] = {
+    "mkdir": {"cmd": "mkdir -p tools", "started": time.time() - 84 * 3600}}
+check("a leaked record no longer counts as the pair moving",
+      daemon.pair_moved_since(PATH, "planner", _when), False)
+daemon.STATE["inflight"][_k89]["mkdir"]["started"] = time.time() - 60
+check("a real running command still does",
+      daemon.pair_moved_since(PATH, "planner", _when), True)
+
+print("   part two: the message the owner actually got, and why it was")
+print("   wrong. A verdict went out at 23:13:26, the executor picked it up")
+print("   at 23:13:27 and its transcript shows unbroken work to 23:28:34 -")
+print("   yet at 23:22:55 the bridge told him \"the executor never started a")
+print("   turn. Type anything in its window to wake it\"")
+_cs = inspect.getsource(daemon.check_stalls)
+check("check_stalls asks whether it is working before nudging",
+      "executor_is_working(path)" in _cs, True)
+_ew = inspect.getsource(daemon.executor_is_working)
+check("and 'working' means writing, not 'has finished a turn'",
+      "transcript_frozen(path, \"executor\", grace)" in _ew, True)
+print("   awaiting is cleared at the executor's next Stop - the END of the")
+print("   turn - so a long turn and a dead one looked identical here")
+check("cannot tell answers False, so the watcher is never silenced",
+      "return False" in _ew.split("except Exception:")[-1], True)
+
+print("   part three: the bridge picks a dead turn back up itself, and")
+print("   only calls a person after that has failed")
+check("three attempts", daemon.LOST_TURN_TRIES, 3)
+check("with the wait growing between them", daemon.LOST_TURN_BACKOFF, 2.0)
+_rl = inspect.getsource(daemon.revive_lost_turn)
+print("   the boundary is exact: it re-delivers what the bridge already")
+print("   holds, and writes nothing either half was in the middle of")
+check("a held task goes back to the executor", "take_open_task(path)" in _rl,
+      True)
+check("a held report goes back to the planner",
+      'deliver_ex(path, "planner", pend["content"]' in _rl, True)
+check("it never writes a verdict", "verdict" in _rl.lower().replace(
+    "never writes a verdict", ""), False)
+check("and never invents a report",
+      "report %s back to the planner" in _rl, True)
+print("   a planner with nothing pending gets nothing invented for it")
+daemon.PENDING.pop(_k89, None)
+check("nothing to hand back means nothing done",
+      daemon.revive_lost_turn(PATH, "planner"), "")
+
+print("   and the escalation says what was already tried, so the person is")
+print("   not asked to guess")
+_cl89 = inspect.getsource(daemon.check_lost_turn)
+check("the attempts are counted on the record", 'r["revives"] = tries + 1' in
+      _cl89, True)
+check("what was tried is kept", 'r["tried"]' in _cl89, True)
+check("the backoff is applied to the grace",
+      "LOST_TURN_BACKOFF ** tries" in _cl89, True)
+check("and the message carries it", 'brief(tried, 120)' in _cl89, True)
+print("   the OTHER class is untouched: a planner saying 'this is the")
+print("   owner's decision' is a real question and still rings a person")
+_ch = inspect.getsource(daemon.call_human_about)
+check("the hand-back still calls the owner", "yours to decide" in _ch, True)
+check("still on the needs_you kind", 'notify("needs_you"' in _ch, True)
+print("   two classes, two functions, and neither one does the other's job")
+check("the breakage path never rings on its own attempts",
+      'notify(' in inspect.getsource(daemon.revive_lost_turn), False)
+
+print("\n90. a record already aged out is not reported again")
+print("    2026-08-21 23:01: two process_stuck messages went to the owner's")
+print("    phone about records of 84 h and 6 h that inflight_live had")
+print("    already decided were not work. They were fresh to this watcher")
+print("    because reseed_proctrack had just handed them back after a")
+print("    restart, so nothing here had flagged them yet")
+print("   the owner's decision: one warn when it ages out is enough. The")
+print("   chat is a telephone, not a journal")
+daemon.STATE.clear()
+daemon.STATE.update({"sessions": {}, "windows": {}, "inflight": {},
+                     "loops": {}, "paused": {}, "pids": {}})
+daemon.PROCTRACK.clear()
+daemon.DURATIONS.clear()
+daemon._INFLIGHT_STALE_TOLD.clear()
+_k90 = daemon.norm(PATH)
+_said90 = []
+_sent90 = []
+_realn90, daemon.notify = daemon.notify, \
+    lambda kind, text, **kw: _said90.append(kind)
+_reald90, daemon.deliver = daemon.deliver, \
+    lambda *a, **kw: _sent90.append(a[1] if len(a) > 1 else "?") or True
+
+try:
+    print("   a genuinely slow command is still reported, exactly as before")
+    daemon.PROCTRACK[_k90] = {"godot": {
+        "cmd": "godot --headless --export", "session": "s",
+        "started": time.time() - 1000}}
+    daemon.check_processes()
+    check("the pair is asked about a 16-minute command", len(_sent90), 1)
+    check("and it went to the planner first", _sent90[0], "planner")
+    check("nobody's phone rang yet", _said90, [])
+
+    print("   the same record once it is past the ageing ceiling: nothing")
+    _sent90[:] = []
+    _said90[:] = []
+    daemon.PROCTRACK[_k90] = {"cat": {
+        "cmd": "cat >> notes.md <<'ZZEOF'", "session": "s",
+        "started": time.time() - 84 * 3600}}
+    daemon.check_processes()
+    check("the pair is not asked about a leaked record", _sent90, [])
+    check("and the human is not woken about it either", _said90, [])
+    check("nothing was flagged on it, so nothing can escalate later",
+          daemon.PROCTRACK[_k90]["cat"].get("flagged"), None)
+
+    print("   run it again, the way the 30-second loop would: still nothing")
+    daemon.check_processes()
+    daemon.check_processes()
+    check("no message on any later pass", _said90 + _sent90, [])
+
+    print("   the ceiling is the SAME constant inflight_live uses - one idea")
+    print("   of 'too long to be real' in this file, not two")
+    _cp90 = inspect.getsource(daemon.check_processes)
+    check("check_processes reads INFLIGHT_MAX_SEC",
+          "run > INFLIGHT_MAX_SEC" in _cp90, True)
+    check("and inflight_live agrees the record is not work",
+          len(daemon.inflight_live(PATH)), 0)
+    print("   a record just under the ceiling is still ordinary work")
+    _said90[:] = []
+    _sent90[:] = []
+    daemon.PROCTRACK[_k90] = {"pytest": {
+        "cmd": "pytest -q", "session": "s",
+        "started": time.time() - (daemon.INFLIGHT_MAX_SEC - 60)}}
+    daemon.check_processes()
+    check("just under the ceiling, the pair is still asked", len(_sent90), 1)
+finally:
+    daemon.notify = _realn90
+    daemon.deliver = _reald90
 
 print("\n" + ("-" * 60))
 if FAILED:

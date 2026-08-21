@@ -939,6 +939,43 @@ def migrate_notify_levels():
     return dropped
 
 
+def migrate_compaction_points():
+    """Recompute every stored compaction point from its own samples.
+
+    The value used to be a ratchet (see compaction_point), so a file written
+    before 2026-08-21 can hold a number no evidence can lift - and it stays
+    on disk until that model and project compact again, which for a pair
+    that only runs at weekends is a long time to be blind. The samples are
+    already there, so the honest value is already derivable; this just
+    derives it.
+
+    Entries with no samples are left exactly as they are: a value with
+    nothing behind it is still the only thing that machine ever measured.
+    """
+    cal = store.load_calibration()
+    fixed = []
+    for key, entry in cal.items():
+        if not isinstance(entry, dict):
+            continue
+        samples = entry.get("compact_samples") or []
+        if not samples:
+            continue
+        point = compaction_point(samples)
+        if point and point != entry.get("compact_at_tokens"):
+            fixed.append((key, entry.get("compact_at_tokens"), point))
+            entry["compact_at_tokens"] = point
+    if fixed:
+        store.save_calibration(cal)
+        store.journal("bridge", "Recomputed %d compaction point%s from the "
+                      "samples on disk - the old value was a running minimum "
+                      "a manual /compact could set for ever: %s"
+                      % (len(fixed), "" if len(fixed) == 1 else "s",
+                         "; ".join("%s %s -> %d" % (k, old, new)
+                                   for k, old, new in fixed[:6])),
+                      level="warn")
+    return fixed
+
+
 def notify(kind, text, level=None, buttons=None, path=None):
     """Say something, and decide where it is allowed to be said.
 
@@ -1626,6 +1663,49 @@ def calib_clean(model, path):
     if streak and streak % 10 == 0:
         fields["ceiling_pct"] = round(min(cal["ceiling_pct"] + 1.0, 97.0), 1)
     store.calib_update(model, path, **fields)
+
+
+# The largest single turn this bridge has ever measured: 200 274 tokens, the
+# one that killed a session on 2026-08-20 (DECISIONS.md §5.16, where the
+# arithmetic that lowered autocompact_pct to 70 is worked through). It is
+# used below as the widest an overshoot can honestly be.
+LARGEST_TURN_SEEN = 200274
+
+
+def compaction_point(samples):
+    """Where compaction fires, from the sizes it was seen firing at.
+
+    Every sample is an OVERSHOOT: compaction is checked at the turn boundary
+    and the turn itself runs unchecked, so the context crosses the threshold
+    somewhere inside a turn and the size recorded afterwards is the far side
+    of it. The threshold is therefore at or below the smallest sample, which
+    is why this returns a minimum.
+
+    What it may not do is take the minimum of ALL of them. A person typing
+    /compact produces a sample too, and that one has nothing to do with the
+    threshold - it is wherever the conversation happened to be. Until
+    2026-08-21 the stored value was `min(previous, this)`, a ratchet that
+    only ever fell and could never be outvoted, so one manual compaction
+    owned the number for ever.
+
+    It did. One model-and-project entry here held 776 393 from a manual
+    compaction on 2026-07-30 while its nine later samples all sat between
+    996 305 and 999 920 - and the bridge, believing a compaction was due
+    220 000 tokens before it really was, stood down at every turn boundary
+    and let two sessions run into the wall on 2026-08-21.
+
+    So: automatic samples of one threshold all lie in [T, T + one turn], and
+    the largest turn ever seen here is LARGEST_TURN_SEEN. A sample further
+    than that below the largest one cannot be an overshoot of the same
+    threshold, and is dropped. With one sample, or with samples that agree,
+    this is exactly the old minimum.
+    """
+    good = [int(s) for s in (samples or []) if s]
+    if not good:
+        return None
+    anchor = max(good)
+    kept = [s for s in good if anchor - s <= LARGEST_TURN_SEEN]
+    return min(kept)
 
 
 # Claude Code holds part of the window back so that compaction - which is
@@ -2685,6 +2765,69 @@ def plan_for(sess, path):
                 "why": "it has compacted %d times, which is the wall for "
                        "this bridge; a fresh session with the handoff is "
                        "what comes next" % done}
+
+    # 1b. Past the wall, "it compacts at the end of the turn" is a promise
+    #     the session can no longer keep. The wall is defined a few hundred
+    #     lines up as the point where the compaction REQUEST - the whole
+    #     conversation plus the summariser's prompt plus room for the summary
+    #     - no longer fits; past it the conversation is at once too long to
+    #     continue and too long to summarise. Answering "compacting" there
+    #     tells the bridge to stand down and wait for something that cannot
+    #     happen, and rule 2 below has no upper bound of its own.
+    #
+    #     So: past the wall is a handover, UNLESS an ordinary compaction is
+    #     genuinely still coming. Two things have to be true for that, and
+    #     both are facts rather than forecasts:
+    #
+    #       the point is BELOW the wall  - otherwise the compaction it is
+    #                                      waiting for cannot fit either, and
+    #                                      waiting for it is waiting to die
+    #       within one turn of the point - an overshoot is at most one turn
+    #                                      wide (that is the whole of
+    #                                      compaction_point's reasoning), so
+    #                                      further than that means the point
+    #                                      is refuted: no compaction is coming
+    #
+    #     Case 22 is why the exception exists: a planner at 168k of a 200k
+    #     window is a thousand tokens past the wall and one ordinary turn
+    #     past a point it really does compact at. That is routine and stays
+    #     routine. It is also why the exception is this narrow.
+    #
+    #     One pair here, 2026-08-21, twice in one day. The calibration held a
+    #     compaction point of 776k (see compaction_point above); the session
+    #     passed it and kept going. Every turn boundary from 776k to 996k the
+    #     answer here was "compacting - it compacts at the end of the turn",
+    #     and every time it did not. At 996 305 of a 1 000 000 window the
+    #     client finally tried, the request did not fit, and the session died
+    #     with invalid_request - 11:05:18 and again at 20:50:36, taking a
+    #     nine-hour investigation with it. The last turn ended at 20:40:06,
+    #     ten minutes before the compaction that killed it: a handover
+    #     decided at that boundary had time to run.
+    #
+    #     Both halves of the exception are load-bearing, and the second was
+    #     found by testing the first. Repairing that calibration puts the
+    #     point at 996k - honest, and ABOVE the 967k wall - and a "refuted"
+    #     test on its own then never fires again, because a session cannot
+    #     get one turn past 996k without already being dead. A point above
+    #     the wall is not a plan; it is the pair's real problem, and it is
+    #     what autocompact_pct exists to move (-> DECISIONS.md 5.16, 5.22).
+    wall = wv.get("wall")
+    if compact and wall and used >= wall:
+        coming = compact < wall and used - compact <= LARGEST_TURN_SEEN
+        if not coming:
+            why = ("%dk past a compaction point of %dk that never fired - "
+                   "further than any one turn, so none is coming"
+                   % ((used - compact) // 1000, compact // 1000)
+                   if compact < wall else
+                   "its compaction point (%dk) is itself past the wall, so "
+                   "the compaction it would wait for cannot fit either"
+                   % (compact // 1000))
+            return {"do": "handover", "pct": pct, "compactions": done,
+                    "why": "carrying %dk, past the %dk wall (%s); %s. It can "
+                           "neither continue nor summarise itself, and a "
+                           "fresh session with the handoff is the only way on"
+                           % (used // 1000, wall // 1000,
+                              wv.get("wall_source") or "", why)}
 
     # 2. At or near the compaction point: routine, and the bridge says
     #    nothing. Compaction is checked at the turn boundary, so the session
@@ -6631,22 +6774,28 @@ def handle_event(event):
             # unchecked, so the context crosses the point somewhere inside
             # the turn and keeps going. Every sample is therefore an
             # overshoot, and the threshold is at or below the smallest one
-            # ever seen - which is why the minimum is kept, and why it is
+            # ever seen - which is why a minimum is kept, and why it is
             # labelled an upper bound rather than a measurement.
+            #
+            # It used to be `min(prev, at)` written straight into the file: a
+            # ratchet that only fell, so one manual /compact set the number
+            # for ever and no amount of later evidence could lift it. That is
+            # what compaction_point is for - it is given the samples and
+            # drops the ones that cannot be overshoots of the same threshold.
+            # See its docstring for what the ratchet cost on 2026-08-21.
             cal_now = store.calib_get(model, path, ref.get("window") or 1)
-            prev = cal_now.get("compact_at_tokens")
+            samples = (cal_now.get("compact_samples") or [])[-9:] + [int(at)]
+            point = compaction_point(samples)
             store.calib_update(model, path,
-                               compact_at_tokens=min(prev or at, at),
+                               compact_at_tokens=point,
                                compact_at_window=ref.get("window"),
-                               compact_samples=(cal_now.get("compact_samples")
-                                                or [])[-9:] + [int(at)])
+                               compact_samples=samples)
             store.journal("loop", "Compaction fired on %s after a turn that "
                           "ended at %dk. The threshold is at or below that - "
                           "the turn ran unchecked past it, so this is an "
                           "upper bound, not the point itself. Smallest seen "
                           "here: %dk"
-                          % (model, at // 1000,
-                             min(prev or at, at) // 1000),
+                          % (model, at // 1000, (point or at) // 1000),
                           project, role, "log", project_dir=path)
             # This used to conclude "the setting is not reaching the
             # session" whenever the size after a compaction sat far above
@@ -9248,6 +9397,7 @@ def main():
                       level="warn")
     migrate_executor_mode()
     migrate_notify_levels()
+    migrate_compaction_points()
     moved = migrate_keys()
     if moved:
         store.journal("bridge", "Re-keyed %d stored entries to the canonical "

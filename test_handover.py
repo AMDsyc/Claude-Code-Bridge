@@ -3663,6 +3663,144 @@ print("   and the whole pass is one summary line, not a burst of messages")
 check("one journal line for the pass",
       _ow.count("store.journal") , 1)
 
+
+print("\n86. one manual /compact may not own the compaction point for ever")
+print("    Until 2026-08-21 the stored point was min(previous, this): a")
+print("    ratchet that only fell. One entry here held 776,393 from a")
+print("    manual compaction on 2026-07-30 while its nine later samples all")
+print("    sat between 996,305 and 999,920 - and nothing could lift it")
+_poisoned = [776393, 998975, 998619, 999875, 999887,
+             999920, 999595, 999648, 999729, 996305]
+check("the old ratchet answered with the outlier", min(_poisoned), 776393)
+check("the samples are read instead, and the outlier is dropped",
+      daemon.compaction_point(_poisoned), 996305)
+print("   'dropped' means: further below the largest sample than the")
+print("   largest turn ever seen here, so it cannot be an overshoot of the")
+print("   same threshold")
+check("the largest turn seen here is the 2026-08-20 one",
+      daemon.LARGEST_TURN_SEEN, 200274)
+check("999920 - 776393 is further than that",
+      999920 - 776393 > daemon.LARGEST_TURN_SEEN, True)
+check("one sample is still just that sample",
+      daemon.compaction_point([150000]), 150000)
+check("samples that agree still give the minimum",
+      daemon.compaction_point([700100, 712000, 705000]), 700100)
+check("nothing measured is still nothing", daemon.compaction_point([]), None)
+print("   and a file written before today is repaired at startup rather")
+print("   than waiting for the pair to compact again")
+_mg = inspect.getsource(daemon.migrate_compaction_points)
+check("the migration recomputes from the samples",
+      "compaction_point(samples)" in _mg, True)
+check("an entry with no samples is left alone",
+      "if not samples:" in _mg, True)
+check("and it runs from main", "migrate_compaction_points()"
+      in inspect.getsource(daemon.main), True)
+
+print("\n87. past the wall, 'it compacts at the end of the turn' is a lie")
+print("    A pair here died twice on 2026-08-21 - 11:05:18 and 20:50:36 -")
+print("    both with invalid_request, both four to fifteen seconds after")
+print("    PreCompact. The bridge believed a compaction was due at 776k,")
+print("    the session passed it and kept going, and plan_for answered")
+print("    'compacting' at every turn boundary from 776k to 996,305")
+daemon.STATE.clear()
+daemon.STATE.update({"sessions": {}, "windows": {},
+    "compactions": {}, "last_session": {},
+    "pids": {"%s|executor" % daemon.norm(PATH):
+             {"pid": 1, "at": time.time(), "registered": True,
+              "autocompact": 70, "model_req": "opus"}}})
+cal = store.load_calibration()
+cal[store.calib_key("opus 5", PATH)] = {
+    "ceiling_pct": 97.0, "buffer_tokens": 33000, "misses": 14,
+    "clean_streak": 0, "multiplier": 3.0, "wall_history_tokens": None,
+    "compact_at_tokens": 776393, "compact_at_window": 1000000,
+    "how": "the poisoned value, as it stood that evening"}
+store.save_calibration(cal)
+
+
+def _sj(used):
+    s = {"role": "executor", "path": daemon.norm(PATH), "session_id": "sj-1",
+         "model": "Opus 5", "window": 1000000, "window_observed": True,
+         "context_tokens": used, "turn_costs": [33877, 15151, 39330, 32199]}
+    daemon.STATE["sessions"]["executor:sj-1"] = s
+    return s
+
+
+_w = daemon.wall_view(_sj(850000), PATH)
+check("the wall is the window minus the compaction reserve",
+      _w["wall"], 1000000 - daemon.RESERVED_TOKENS)
+print("   at 850k it is past the believed point but still below the wall,")
+print("   and nothing changes: this is the routine answer and stays one")
+check("850k is still routine", daemon.plan_for(_sj(850000), PATH)["do"],
+      "compacting")
+check("and so is 900k", daemon.plan_for(_sj(900000), PATH)["do"],
+      "compacting")
+check("and 966k, one token below the wall",
+      daemon.plan_for(_sj(966999), PATH)["do"], "compacting")
+print("   past the wall the answer changes - but only once the compaction")
+print("   point is REFUTED as well, which is being further past it than any")
+print("   one turn could carry a session. Both, or neither")
+check("past the wall but only 190k past the point is still routine",
+      daemon.plan_for(_sj(967000), PATH)["do"], "compacting")
+_pl = daemon.plan_for(_sj(976668), PATH)
+check("one token past both, and it is a handover", _pl["do"], "handover")
+check("and it says why, with the wall",
+      "past the 967k wall" in _pl["why"], True)
+check("and with the point that never fired", "776k" in _pl["why"], True)
+check("where it actually died is a handover too",
+      daemon.plan_for(_sj(996305), PATH)["do"], "handover")
+print("   and the other half of the exception, which the first half needs:")
+print("   repairing that calibration puts the point at 996k - honest, and")
+print("   ABOVE the 967k wall. 'Refuted' alone would then never fire again,")
+print("   because nothing gets one turn past 996k and lives")
+cal[store.calib_key("opus 5", PATH)]["compact_at_tokens"] = 996305
+store.save_calibration(cal)
+_w2 = daemon.wall_view(_sj(970000), PATH)
+check("the repaired point is above the wall",
+      _w2["compact"] > _w2["wall"], True)
+check("960k, below the wall, is still routine",
+      daemon.plan_for(_sj(960000), PATH)["do"], "compacting")
+_ab = daemon.plan_for(_sj(967000), PATH)
+check("but at the wall it is a handover", _ab["do"], "handover")
+check("and it names the reason, which is a different one",
+      "itself past the wall" in _ab["why"], True)
+print("   so the session is replaced at the boundary BEFORE the compaction")
+print("   that would have killed it - which is the whole point")
+check("and at the size it died at, still a handover",
+      daemon.plan_for(_sj(996305), PATH)["do"], "handover")
+cal[store.calib_key("opus 5", PATH)]["compact_at_tokens"] = 776393
+store.save_calibration(cal)
+print("   case 22 is the reason both are needed: a planner one ordinary")
+print("   turn past a point it really does compact at is not in trouble")
+check("168k of a 200k window, 18k past a real point, stays routine",
+      daemon.plan_for({"role": "planner", "path": daemon.norm(PATH),
+                       "session_id": "c22", "model": "Fable 5",
+                       "window": 200000, "window_observed": True,
+                       "context_tokens": 168000,
+                       "turn_costs": [4000, 5000]}, PATH)["do"] != "handover",
+      True)
+print("   the turn before the fatal one ended at 20:40:06, ten minutes")
+print("   before the compaction that killed the session - a handover")
+print("   decided at that boundary had time to run")
+print("   this is not the 'distance to an unmeasured wall' rule 1 refuses:")
+print("   it fires on being PAST the line, never on approaching it")
+_ps = inspect.getsource(daemon.plan_for)
+check("no margin of turns in the test", "worst_turn" in _ps, False)
+check("it reads the wall the same view already computed",
+      'wall = wv.get("wall")' in _ps and "used >= wall" in _ps, True)
+check("and the exception needs the point below the wall as well",
+      "compact < wall and used - compact <= LARGEST_TURN_SEEN" in _ps, True)
+print("   and a session with no compaction point at all decides nothing")
+print("   from this: rule 8 says an unknown point is reported, not guessed.")
+print("   Nothing measured AND no threshold passed at launch is the case -")
+print("   with a threshold passed the point is known and the branch applies")
+cal[store.calib_key("opus 5", PATH)]["compact_at_tokens"] = None
+store.save_calibration(cal)
+daemon.STATE["pids"]["%s|executor" % daemon.norm(PATH)]["autocompact"] = None
+_np = daemon.plan_for(_sj(996305), PATH)
+check("no point, no handover from this branch", _np["do"] != "handover", True)
+check("and the view says the point is unknown rather than guessing it",
+      daemon.wall_view(_sj(996305), PATH)["compact"], None)
+
 print("\n" + ("-" * 60))
 if FAILED:
     print("FAILED: %d" % len(FAILED))

@@ -86,6 +86,14 @@ class _TG(BaseHTTPRequestHandler):
 
     def do_POST(self):
         method = self._record()
+        # getChat is how the bridge asks "is our message still the pinned
+        # one". TG_PINNED[0] is what this chat answers: None for "nothing
+        # pinned", or a message_id.
+        if method == "getChat":
+            res = {}
+            if TG_PINNED[0] is not None:
+                res["pinned_message"] = {"message_id": TG_PINNED[0]}
+            return self._reply({"ok": True, "result": res})
         # TG_FAIL names methods that should answer as Telegram does when it
         # is unreachable rather than unwilling: no "ok", no description.
         # That is the shape a timeout takes by the time _call_ex has caught
@@ -106,6 +114,7 @@ class _TG(BaseHTTPRequestHandler):
 TG_CALLS = []
 TG_IDS = [1000]
 TG_FAIL = set()
+TG_PINNED = [None]
 _tg_srv = ThreadingHTTPServer(("127.0.0.1", 0), _TG)
 threading.Thread(target=_tg_srv.serve_forever, daemon=True).start()
 os.environ["BRIDGE_TELEGRAM_API"] = "http://127.0.0.1:%d" \
@@ -1900,6 +1909,108 @@ check("and the daemon it drove was never the live one", PORT != 8765, True)
 note("windows opened in the whole run", len(launches()))
 
 SRV.shutdown()
+print("\n30. the pinned links stay fresh without a word in the chat")
+print("    The owner: the links have to BE current, and he does not want a")
+print("    message about it. Editing a pinned message is silent, so the")
+print("    whole job is making sure the edit happens - and that the pin is")
+print("    still where a thumb can reach it")
+
+
+def _tg_of(kind):
+    return [p for m, p in TG_CALLS if m == kind]
+
+
+LP = A
+daemon.CFG.setdefault("telegram", {})
+daemon.CFG["telegram"].update({"token": "t", "chat_id": "1"})
+daemon.STATE["rc"] = {
+    "%s|executor" % canon(LP): {"url": "https://claude.ai/code/session_AAA"},
+    "%s|planner" % canon(LP): {"url": "https://claude.ai/code/session_BBB"},
+}
+daemon.CFG["telegram"].pop("links_message_id", None)
+daemon.CFG["telegram"].pop("links_text", None)
+TG_PINNED[0] = None
+TG_CALLS[:] = []
+daemon.sync_links("first")
+_sent = _tg_of("sendMessage")
+check("with no pin yet, one message is sent and pinned",
+      (len(_sent), len(_tg_of("pinChatMessage"))), (1, 1))
+check("and it carries both live links",
+      all(s in (_sent[0].get("text") or "") for s in ("session_AAA",
+                                                      "session_BBB")), True)
+check("silently - the pin must never buzz a phone",
+      _sent[0].get("disable_notification"), True)
+_mid = daemon.CFG["telegram"].get("links_message_id")
+TG_PINNED[0] = _mid
+
+print("   (d) nothing changed, so nothing is sent. An editMessageText that")
+print("   answers 'not modified' is a wasted call, and the owner asked for")
+print("   a check, not for chatter")
+TG_CALLS[:] = []
+daemon.sync_links("unchanged")
+check("no edit goes out when the text is identical",
+      len(_tg_of("editMessageText")), 0)
+check("and no new message either",
+      len(_tg_of("sendMessage")), 0)
+
+print("   (a) a link dies -> the pin is rebuilt without it. This is what")
+print("   the owner calls stale: a link in the pin to a session that is")
+print("   gone. The registry already forgot it; the pin never used to be")
+print("   told, so it kept the dead one until some other session started")
+TG_CALLS[:] = []
+daemon.STATE["rc"].pop("%s|planner" % canon(LP), None)
+daemon.sync_links("planner ended")
+_ed = _tg_of("editMessageText")
+check("the pinned message is edited in place, not re-sent",
+      (len(_ed), len(_tg_of("sendMessage"))), (1, 0))
+check("the dead link is gone from it",
+      "session_BBB" in (_ed[0].get("text") or "") if _ed else True, False)
+check("and the live one is still there",
+      "session_AAA" in (_ed[0].get("text") or "") if _ed else False, True)
+
+print("   (b) the pin itself is lost - unpinned by hand. Edits keep landing")
+print("   correctly in a message that has drifted up the chat where nobody")
+print("   will find it: fresh links, unreachable, which from a phone is the")
+print("   same thing as stale")
+TG_CALLS[:] = []
+TG_PINNED[0] = 999999                      # somebody else's message is pinned
+daemon.sync_links("pin lost")
+check("ours is pinned again",
+      len(_tg_of("pinChatMessage")), 1)
+check("silently, and without sending anything new",
+      len(_tg_of("sendMessage")), 0)
+print("   and it does NOT re-pin while our message is still the pinned one")
+TG_PINNED[0] = daemon.CFG["telegram"].get("links_message_id")
+TG_CALLS[:] = []
+daemon.sync_links("pin fine")
+check("a healthy pin is left alone",
+      len(_tg_of("pinChatMessage")), 0)
+
+print("   (c) telegram goes away and comes back. Edits during the outage")
+print("   are dropped on purpose rather than queued, so the pin can be")
+print("   behind by exactly the changes that happened while it was down")
+TG_CALLS[:] = []
+daemon.STATE["rc"]["%s|planner" % canon(LP)] = {
+    "url": "https://claude.ai/code/session_CCC"}
+daemon.telegram_note(False, "down")        # it goes down
+daemon.telegram_note(True)                 # ... and comes back
+check("coming back reconciles the pin at once",
+      len(_tg_of("editMessageText")) >= 1, True)
+check("with the link that appeared while it was away",
+      any("session_CCC" in (p.get("text") or "")
+          for p in _tg_of("editMessageText")), True)
+
+print("   the boundary, written down so nobody 'finishes' it: valid means")
+print("   the link matches a session the bridge still holds. The URLs are")
+print("   never fetched - claude.ai needs authentication, and this bridge")
+print("   makes exactly one kind of outbound call, to Telegram")
+check("sync_links says so in as many words",
+      "not fetched" in (inspect.getsource(daemon.sync_links).lower()
+                        .replace("are not", "not")), True)
+check("and it opens no connection of its own to check them",
+      any(w in inspect.getsource(daemon.sync_links)
+          for w in ("urlopen", "urllib", "http.client", "requests")), False)
+
 print("\n" + ("-" * 60))
 if FAILED:
     print("FAILED: %d" % len(FAILED))

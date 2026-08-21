@@ -241,6 +241,58 @@ def status_message(cfg, text):
     return _upsert(cfg, "status", text)
 
 
+def ensure_pinned(cfg, key="links"):
+    """Is OUR message still the pinned one? Put it back if not.
+
+    _upsert keeps one message and edits it in place, which is silent and
+    right for everything automatic - but editing says nothing about whether
+    the message is still PINNED. Unpin it by hand and the edits keep
+    landing, correctly, in a message that has drifted up the chat where
+    nobody will find it. The links were fresh and unreachable, which is the
+    same thing as stale from the phone.
+
+    getChat carries the chat's current pinned_message, so the question can
+    simply be asked. Three answers:
+      ours          -> nothing to do, and nothing is sent
+      somebody else -> pin ours again, silently
+      ours is gone  -> forget the id, so the next _upsert sends a fresh
+                       message and pins it
+
+    Returns (cfg, what) where `what` is "" when nothing was needed - the
+    caller journals only when something actually happened, because a
+    check that announces itself hourly is noise, not a check.
+
+    Never raises: an unreachable Telegram answers "nothing to do" and the
+    hourly sweep tries again later.
+    """
+    tg = cfg.get("telegram", {})
+    token, chat = tg.get("token"), tg.get("chat_id")
+    mid = tg.get(key + "_message_id") or 0
+    if not token or not chat or not mid:
+        return cfg, ""
+    try:
+        ok, body = _call_ex(token, "getChat", {"chat_id": chat})
+        if not ok:
+            return cfg, ""
+        pinned = ((body or {}).get("result") or {}).get("pinned_message") or {}
+        if pinned.get("message_id") == mid:
+            return cfg, ""
+        out = _call(token, "pinChatMessage",
+                    {"chat_id": chat, "message_id": mid,
+                     "disable_notification": True})
+        if out:
+            return cfg, "pinned the links again"
+        # Could not pin it: the usual reason is that the message itself is
+        # gone. Drop the id and let the next write send a new one - that is
+        # the ONE case where this machinery sends a message rather than
+        # editing, and it is a lost pin, never a session starting.
+        cfg.setdefault("telegram", {}).pop(key + "_message_id", None)
+        cfg.setdefault("telegram", {}).pop(key + "_text", None)
+        return cfg, "the pinned message is gone - a fresh one will be sent"
+    except Exception:
+        return cfg, ""
+
+
 def pin_links(cfg, text, force=False):
     """The pinned message: how to reach the sessions from the phone.
 

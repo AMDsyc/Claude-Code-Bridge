@@ -2776,6 +2776,84 @@ def push_links(force=False):
     return True
 
 
+def sync_links(reason=""):
+    """Make the pinned links match what the bridge believes, and stay pinned.
+
+    WHAT "VALID" MEANS HERE, and the boundary is deliberate: a link is
+    valid when it matches a session this bridge still holds in its own
+    registry (STATE["rc"], emptied when a session ends, dies, is retired
+    or is replaced). The URLs themselves are NOT fetched. claude.ai needs
+    authentication, and this bridge makes exactly one kind of outbound
+    call - Telegram - which is a hard rule of the project. Anyone reading
+    this later and reaching for a HEAD request against those links would
+    be breaking that rule, not finishing the job.
+
+    Two things can make the pin stale, and only one of them was watched:
+      the text changed   - a link appeared or died
+      the pin was lost   - somebody unpinned or deleted the message, and
+                           edits kept landing in it, out of sight
+
+    Both are checked here. Nothing is sent when nothing changed:
+    telegram._upsert returns early on identical text, so the quiet case
+    costs no API call at all, and ensure_pinned costs one getChat.
+
+    Silent by design. This never notifies - the pinned message is edited
+    in place, which produces no notification, and the whole point of the
+    exercise is that the links are fresh without the chat filling up.
+    """
+    global CFG
+    if not (CFG.get("telegram") or {}).get("chat_id"):
+        return ""
+    text = links_text()
+    before = (CFG.get("telegram") or {}).get("links_text")
+    did = []
+    try:
+        was_id = (CFG.get("telegram") or {}).get("links_message_id")
+        if text and text != before:
+            CFG = telegram.pin_links(CFG, text)
+            did.append("links rewritten")
+        now_id = (CFG.get("telegram") or {}).get("links_message_id")
+        if now_id and now_id == was_id:
+            # Only worth asking when the message we hold is the one we
+            # already had. If pin_links has just sent a new one it pinned
+            # it on the way out, and a getChat here would be a wasted call
+            # to confirm something done a millisecond ago.
+            CFG, what = telegram.ensure_pinned(CFG, "links")
+            if what:
+                did.append(what)
+        if did:
+            store.save_config(CFG)
+            store.journal("bridge", "Pinned links: %s%s"
+                          % ("; ".join(did),
+                             (" (%s)" % reason) if reason else ""),
+                          level="log")
+    except Exception:
+        # An edge that never raises: a stale pin is worth far less than a
+        # daemon, and the hourly sweep will come round again.
+        return ""
+    return "; ".join(did)
+
+
+def links_watch():
+    """The hourly belt to the event-driven braces.
+
+    The events cover every staleness the bridge can see coming. This
+    catches what it could not: an edit that failed while Telegram was
+    down (those are deliberately not retried), a pin removed by hand, a
+    registry that drifted for a reason nobody predicted.
+    """
+    while True:
+        mins = float((CFG.get("thresholds") or {}).get("links_check_min",
+                                                       CFG.get(
+                                                           "links_check_min",
+                                                           60)) or 60)
+        time.sleep(max(60.0, mins * 60.0))
+        try:
+            sync_links("hourly check")
+        except Exception:
+            pass
+
+
 def watch_rc_link(path, role, transcript_path, session_id=None, tries=24):
     """The link appears a moment after the session starts, so look again."""
     key = "%s|%s" % (norm(path), role)
@@ -3543,6 +3621,17 @@ def handle_session_death(path, role, rec):
     name = project_name(path)
     sid = (rec or {}).get("session_id") or         (STATE.get("pids", {}).get("%s|%s" % (path, role)) or {}).get("sid")
     with _lock:
+        # A window that dies never fires SessionEnd, so nothing else drops
+        # its remote-control link: it sat in the pinned message pointing at
+        # a session that no longer exists. A dead link in the pin is exactly
+        # what "not fresh" means from a phone.
+        #
+        # Only death and a clean end are handled this way. retire_sessions -
+        # a window REPLACED by a handover - is deliberately left alone: rc
+        # holds one entry per path|role, and watch_rc_link overwrites it
+        # with the new window's link, so that case heals itself. Popping it
+        # there would race the replacement and could drop a live link.
+        (STATE.get("rc") or {}).pop("%s|%s" % (norm(path), role), None)
         STATE.setdefault("down", {})["%s|%s" % (path, role)] = {
             "at": time.time(), "sid": sid}
         if rec is not None:
@@ -3568,6 +3657,7 @@ def handle_session_death(path, role, rec):
                           project_dir=path)
     store.journal("session_died", "%s / %s: the window process is gone"
                   % (name, role), name, role, "sound", project_dir=path)
+    sync_links("a session died")
     pconf = store.project_config(CFG, path)
     _wdbg("hsd auto=%s cfg_projects=%s" % (pconf.get("auto_restart_dead_sessions"), list((CFG.get("projects") or {}).keys())))
     if pconf.get("auto_restart_dead_sessions"):
@@ -6284,6 +6374,10 @@ def handle_event(event):
             STATE.get("pids", {}).pop("%s|%s" % (path, role), None)
             (STATE.get("down") or {}).pop("%s|%s" % (path, role), None)
             save_state()
+        # The registry forgot the link here and always did; the pinned
+        # message was never told, so a dead link sat in it until some other
+        # session happened to produce a new one.
+        sync_links("a session ended")
         text = "%s / %s session ended." % (project, role)
         _, lp0 = loop_state(path)
         if role == "executor" and lp0.get("active"):
@@ -7002,6 +7096,14 @@ def telegram_note(ok, why="", code=None):
                       "", "", "log")
     elif prev is False and ok:
         store.journal("session", "Telegram is answering again.", "", "", "log")
+        # Anything that failed while it was down was dropped on purpose
+        # rather than queued, so the pin may be behind by exactly the
+        # changes that happened during the outage. Reconcile now instead
+        # of waiting up to an hour.
+        try:
+            sync_links("telegram came back")
+        except Exception:
+            pass
     return ok
 
 
@@ -8622,6 +8724,7 @@ def main():
     threading.Thread(target=session_watch, daemon=True).start()
     threading.Thread(target=stall_watch, daemon=True).start()
     threading.Thread(target=idle_watch, daemon=True).start()
+    threading.Thread(target=links_watch, daemon=True).start()
     threading.Thread(target=disk_watch, daemon=True).start()
     threading.Timer(2.0, lambda: reconcile()).start()
     maybe_auto_probe()   # fill the model registry before anyone launches

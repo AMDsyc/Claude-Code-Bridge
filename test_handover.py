@@ -2781,6 +2781,77 @@ store.journal = _saved_j
 check("a blind project entering the watch list is named at that moment",
       any("carries no bridge marks" in ln for ln in _lines2), True)
 
+print("\n70. an edit to a launch chain survives the render that follows it")
+print("    The panel re-read the saved chains at the top of renderLaunch(),")
+print("    and every edit called renderLaunch() one line after making it -")
+print("    so add and x both wrote to CHAINS and threw the write away.")
+print("    tick() repeated it every 2.5s. saveChains() runs on every launch,")
+print("    so any project ever started had pc.chains and could not be edited")
+print("    at all: remove the head, press start, and the head still started")
+_panel = _io.open(os.path.join(os.path.dirname(daemon.__file__), "panel.html"),
+                  encoding="utf-8").read()
+check("the saved chains are only re-read when the user has not edited",
+      "if(pc.chains&&!window._launchTouched)" in _panel, True)
+check("adding a model counts as an edit",
+      "CHAINS[role].indexOf(sel.value)<0){window._launchTouched=true;"
+      in _panel, True)
+check("removing a chip counts as an edit too - it is a click, not an input",
+      "window._launchTouched=true;" in _panel
+      and "CHAINS[b.dataset.r].splice" in _panel, True)
+print("   the latch is per project. Carrying it across a switch would show -")
+print("   and launch - the previous project's models")
+check("renderLaunch drops the latch when the project changes",
+      "if(CUR!==window._launchProj){window._launchProj=CUR;"
+      "window._launchTouched=false}" in _panel, True)
+check("and a switch re-renders even mid-edit, or the old chain would stay",
+      "(!window._launchTouched||CUR!==window._launchProj)" in _panel, True)
+print("   once saved, the config agrees with the screen, so the panel may")
+print("   follow it again - a latch left set freezes the window for ever")
+check("saveChains clears the latch after the config is written",
+      "window._launchTouched=false;return r})}" in _panel, True)
+print("   and the thing the button sends is still the head of the chain")
+print("   that is on screen")
+check("launch sends the head of the chain",
+      "model:(CHAINS[role]||[])[0]||null" in _panel, True)
+
+print("\n71. the model the panel chose reaches the command line, both roles")
+print("    The panel was the whole bug; this half was always honest, and")
+print("    that is worth pinning so a later change cannot quietly drop it")
+_caught = []
+
+
+class _FakePopen(object):
+    def __init__(self, cmd, **kw):
+        _caught.append(list(cmd))
+        self.pid = 4242
+
+    def poll(self):
+        return None
+
+
+_real_popen = _sess.subprocess.Popen
+_real_probe = daemon.maybe_auto_probe
+_sess.subprocess.Popen = _FakePopen
+daemon.maybe_auto_probe = lambda *a, **k: None
+_lp = os.path.join(TMP, "launch_model_project")
+os.makedirs(os.path.join(_lp, ".claude"), exist_ok=True)
+for _role, _want in (("executor", "opus"), ("planner", "sonnet")):
+    _caught[:] = []
+    daemon.handle_session({"action": "launch", "project": _lp,
+                           "role": _role, "model": _want})
+    _cmd = _caught[0] if _caught else []
+    check("%s: --model is on the command line" % _role, "--model" in _cmd, True)
+    check("%s: and it is the alias that was asked for" % _role,
+          _cmd[_cmd.index("--model") + 1] if "--model" in _cmd else None, _want)
+print("   choosing nothing forces nothing - the client keeps its own default")
+_caught[:] = []
+daemon.handle_session({"action": "launch", "project": _lp,
+                       "role": "planner", "model": None})
+check("no model chosen means no --model flag",
+      "--model" in (_caught[0] if _caught else []), False)
+_sess.subprocess.Popen = _real_popen
+daemon.maybe_auto_probe = _real_probe
+
 print("\n" + ("-" * 60))
 if FAILED:
     print("FAILED: %d" % len(FAILED))

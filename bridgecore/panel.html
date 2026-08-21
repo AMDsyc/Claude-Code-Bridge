@@ -1039,7 +1039,18 @@ $("#addBtn").onclick=function(){post("/add-project",{path:$("#addPath").value}).
 var CHAINS={executor:["opus","sonnet"],planner:["fable","opus"]},MODE={executor:"auto",planner:"plan",admin:false,adminPlan:false};
 function projConf(){var pc=((D.config||{}).projects||{})[CUR]||{};return pc}
 function renderLaunch(){
-  var pc=projConf(); if(pc.chains)CHAINS=JSON.parse(JSON.stringify(pc.chains));
+  /* The chain on screen is re-read from the saved config on every render,
+     and every edit called renderLaunch() straight after making it - so add
+     and x both wrote to CHAINS and then threw the write away one line
+     later. tick() finished the job every 2.5s. saveChains() runs on every
+     launch, so any project ever started had pc.chains and could not be
+     edited at all: remove fable, press start, and fable started, because
+     CHAINS[0] had been restored before the click was read.
+     The latch is what the config may not overwrite. It was only set on
+     "input", and add/x are clicks, so it never covered the one case it
+     was needed for. */
+  if(CUR!==window._launchProj){window._launchProj=CUR;window._launchTouched=false}
+  var pc=projConf(); if(pc.chains&&!window._launchTouched)CHAINS=JSON.parse(JSON.stringify(pc.chains));
   $("#autoRestart").checked=!!pc.auto_restart_dead_sessions;
   if(pc.modes){
     if(pc.modes.executor){MODE.executor=pc.modes.executor;$("#modeExec").value=pc.modes.executor}
@@ -1059,6 +1070,7 @@ function renderLaunch(){
     sel.innerHTML=(D.models||[]).map(function(m){var lb=mlabel(m);return '<option value="'+esc(m)+'">'+esc(m)+(lb?" — "+esc(lb):"")+'</option>'}).join("");
   });
   $$("#w-launch .chip b").forEach(function(b){b.onclick=function(){
+    window._launchTouched=true;
     CHAINS[b.dataset.r].splice(+b.dataset.i,1);renderLaunch()}});
   var unknown=[].concat(CHAINS.executor||[],CHAINS.planner||[]).filter(function(m){return !mlabel(m)});
   var errs=(D.models_registry||{}).last_errors||{};
@@ -1074,7 +1086,8 @@ function renderLaunch(){
 }
 $$("[data-add]").forEach(function(b){b.onclick=function(){
   var role=b.dataset.add,sel=$(role==="executor"?"#addModelExec":"#addModelPlan");
-  if(sel.value&&CHAINS[role].indexOf(sel.value)<0)CHAINS[role].push(sel.value);renderLaunch()}});
+  if(sel.value&&CHAINS[role].indexOf(sel.value)<0){window._launchTouched=true;
+    CHAINS[role].push(sel.value)}renderLaunch()}});
 $("#modeExec").onchange=function(){MODE.executor=this.value;preview()};
 $("#adminExec").onchange=function(){MODE.admin=this.checked;preview()};
 $("#modePlan").onchange=function(){MODE.planner=this.value;preview()};
@@ -1111,7 +1124,12 @@ function preview(){
 }
 function saveChains(){var pr=((D.config||{}).projects||{});pr[CUR]=pr[CUR]||{};pr[CUR].chains=CHAINS;
   pr[CUR].modes={executor:MODE.executor,planner:MODE.planner};
-  pr[CUR].readonly_planner=MODE.roPlan!==false;return post("/config",{projects:pr})}
+  pr[CUR].readonly_planner=MODE.roPlan!==false;
+  /* saved: the config now says what the screen says, so the panel may go
+     back to following it. Leaving the latch set would freeze this window
+     against every later change made anywhere else. */
+  return post("/config",{projects:pr}).then(function(r){
+    window._launchTouched=false;return r})}
 function launchRole(role){
   if(!CUR){$("#launchMsg").innerHTML='<div class="msgerr">Pick a project first (projects window).</div>';return}
   saveChains().then(function(){return post("/session",{action:"launch",project:CUR,role:role,model:(CHAINS[role]||[])[0]||null,mode:role==="executor"?MODE.executor:MODE.planner})})
@@ -1454,7 +1472,12 @@ function tick(){
     var tg=(D.config||{}).telegram||{};
     var fp=String(!!tg.token_set)+"|"+String(!!tg.connected);
     if(window._tgFp!==fp){window._tgFp=fp;renderTelegram()}
-    if($("#w-launch").classList.contains("on")&&!window._launchTouched){renderLaunch()}
+    /* a project switch always re-renders, even mid-edit: the latch
+       protects THIS project's chain, and carrying it onto the next one
+       would show - and launch - the wrong models. renderLaunch() clears
+       the latch itself when it sees CUR change. */
+    if($("#w-launch").classList.contains("on")&&
+       (!window._launchTouched||CUR!==window._launchProj)){renderLaunch()}
   }).catch(function(){});
 }
 window._launchTouched=false;

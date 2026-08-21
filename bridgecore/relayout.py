@@ -631,9 +631,24 @@ def start_daemon(base=None, wait=180, port=None):
     # batch file itself, and when it is handed one with a relative name it
     # resolves it against the PARENT's working directory rather than the cwd
     # given here. Measured - Popen(["hello.bat"], cwd=...) raises WinError 2.
+    # A bridge is very often restarted from inside somebody's Claude Code
+    # session - `relayout --now` is a command a pair runs. Without this the
+    # daemon inherits that session's client markers and hands them down to
+    # every window it later opens, which the client reads as a nested run
+    # and answers by not saving a transcript. That happened on 2026-08-21:
+    # a rotated window came up with "Transcript saving is off", so the
+    # bridge could read neither its rc link nor its context size, and the
+    # damage outlived the restart that caused it. The cure has to be at the
+    # spawn, or the next restart-from-a-session brings it straight back.
+    try:
+        from . import sessions as _sessions
+        clean = _sessions.clean_env()
+    except Exception:
+        clean = None
     try:
         subprocess.Popen(["cmd", "/c", bat] if os.name == "nt" else [bat],
-                         cwd=base, creationflags=flags, close_fds=True)
+                         cwd=base, creationflags=flags, close_fds=True,
+                         env=clean)
     except OSError as exc:
         return False, "could not start it: %s" % exc
     end = time.time() + wait

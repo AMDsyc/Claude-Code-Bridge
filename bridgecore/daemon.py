@@ -3709,6 +3709,34 @@ def check_sessions(grace):
         handle_session_death(path, role, rec)
 
 
+def refuse_replacement(path, role, pid, what):
+    """A window that would not die is not a seat to start a replacement in.
+
+    Both places that replace a window - a rotation and a handover - used
+    to stop the old one, sleep two seconds and launch, without ever
+    looking at whether the stop had worked. sessions.stop() now answers
+    honestly, and this is what that answer is for.
+
+    Starting anyway is not a smaller failure than not starting: two live
+    processes on one seat is how a pair spent four and a half hours dark
+    on 2026-08-21, the replacements trying to resume conversations the old
+    windows still held. Leaving the old window alive and saying so keeps a
+    working session and one clear message; the alternative keeps neither.
+    """
+    name = project_name(path)
+    store.journal("session",
+                  "%s / %s: pid %s would not die, so the %s is being "
+                  "abandoned rather than started on top of it - close that "
+                  "window by hand and start the pair again"
+                  % (name, role, pid, what), name, role, "warn",
+                  project_dir=path)
+    notify("needs_you",
+           "%s: the %s window (pid %s) did not close when it was asked, so "
+           "the %s was stopped rather than started over a live one. Close "
+           "that window and start the pair again."
+           % (name, role, pid, what), path=path)
+
+
 def handle_session_death(path, role, rec):
     _wdbg("hsd enter %s/%s rec=%s" % (path, role, bool(rec)))
     name = project_name(path)
@@ -3881,7 +3909,15 @@ def rotate_executor(path, reason, next_model=None):
     threading.Thread(target=ask_name_later, args=(path, title),
                      daemon=True).start()
 
-    sessions.stop(path, "executor", pid=pid_of(path, "executor"))
+    _pid = pid_of(path, "executor")
+    sessions.stop(path, "executor", pid=_pid)
+    # Refuse only when a KNOWN process is STILL THERE. stop() answers False
+    # for "there was no pid to stop" as well, and that is not a failure -
+    # it is nothing in the way. Treating the two alike would block every
+    # rotation the bridge does not happen to hold a pid for.
+    if _pid and sessions.pid_alive(_pid):
+        refuse_replacement(path, "executor", _pid, "rotation")
+        return False
     retire_sessions(path, "executor")
     time.sleep(2)
 
@@ -4058,7 +4094,19 @@ def handover(path, reason, roles=("executor", "planner")):
         save_state()
 
     for role in roles:
-        sessions.stop(path, role, pid=pid_of(path, role))
+        _pid = pid_of(path, role)
+        sessions.stop(path, role, pid=_pid)
+        # Same distinction as in the rotation: a pid we never had is not a
+        # window that refused to die. Only a known, still-living process
+        # stops this.
+        if _pid and sessions.pid_alive(_pid):
+            # One stuck window stops the whole handover. Replacing only the
+            # other half would leave the pair mismatched - a fresh window
+            # talking to one that was meant to be gone - and that is harder
+            # to see than a handover that plainly did not happen.
+            refuse_replacement(path, role, _pid, "handover")
+            return {"ok": False, "error":
+                    "%s pid %s would not close" % (role, _pid)}
         retire_sessions(path, role)
     prune_sessions()
     time.sleep(2)

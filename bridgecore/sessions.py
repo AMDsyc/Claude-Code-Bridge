@@ -49,6 +49,49 @@ ROLE_DEFAULTS = {
 PROCS = {}
 
 
+# Markers the CLIENT puts in the environment of anything it spawns. They
+# say "you are running inside a Claude Code session", and a window that
+# inherits them is treated as a nested run: on 2026-08-21 that showed up as
+# "Transcript saving is off", and a window with no transcript is one the
+# bridge cannot read an rc link OR a context size from - blind for the
+# whole of its life, with the wall accounting silently guessing.
+#
+# How it got in: the daemon was restarted at 10:57 with
+# `python -m bridgecore.relayout --now` typed INSIDE a Claude Code session,
+# so the daemon inherited that session's environment, and launch() copies
+# os.environ wholesale into every window it opens.
+#
+# The list is narrow on purpose - NOT everything matching CLAUDE_*. Two of
+# those are ours and must survive: CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, which
+# is how the compaction point stops being a guess, and
+# CLAUDE_CODE_STOP_HOOK_BLOCK_CAP. Stripping by prefix would take them too.
+INHERITED_CLIENT_MARKS = (
+    "CLAUDECODE",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_BRIDGE_SESSION_ID",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+)
+
+
+def clean_env(env=None):
+    """A copy of the environment with another session's marks taken out.
+
+    Used for every window the bridge opens and for the daemon itself, so
+    that a bridge restarted from inside somebody's session does not pass
+    that session's identity down to everything it later starts.
+    """
+    out = dict(os.environ if env is None else env)
+    for name in INHERITED_CLIENT_MARKS:
+        out.pop(name, None)
+    return out
+
+
 def _bridge_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -161,7 +204,7 @@ def launch(project, role, resume_id=None, permission_mode=None, model=None,
 
     ensure_marks(project, role)
 
-    env = dict(os.environ)
+    env = clean_env()
     env["BRIDGE_ROLE"] = role
     if autocompact_pct:
         # Where compaction fires stops being a guess the moment we set it.
@@ -194,39 +237,110 @@ def launch(project, role, resume_id=None, permission_mode=None, model=None,
     return proc.pid
 
 
-def stop(project, role, pid=None):
-    """End a session process (and its children). Best effort, never raises."""
+# How long to wait for a force-killed window to actually go. The
+# precedent is relayout.stop_daemon, which waits on the PROCESS and not on
+# what the process was holding: it gives a polite close 45s and then at
+# least 20s more after the forced kill. Nothing polite is tried here - a
+# session window has no clean-shutdown handler to honour it - so only that
+# second figure applies. A process that has taken a /F and is still there
+# 20 seconds later is not slow, it is stuck, and saying so is the point.
+STOP_WAIT_SEC = 20
+
+
+def stop(project, role, pid=None, wait=None):
+    """End a session process (and its children), and WAIT for it to go.
+
+    It used to issue the kill and return True on the strength of having
+    issued it, swallowing taskkill's exit code on the way. Both halves of
+    that were wrong, and the same mistake relayout.stop_daemon exists to
+    avoid: wait on the PROCESS, not on the request.
+
+    What it cost, 2026-08-21. At 05:02 a pair was stopped and immediately
+    relaunched with --resume onto its own session ids. stop() said True,
+    the windows were still alive, and the replacements sat trying to resume
+    conversations the old processes still held. Both halves stayed dark for
+    four and a half hours; the SessionEnd events of the sessions "stopped"
+    at 05:02 only reached the journal at 09:41:41, when something else
+    finally cleared them - and the pair came up ten seconds later.
+
+    So the return value now means what every caller already assumed it
+    meant: the process is gone. False means it is still there, and a caller
+    that is about to start a replacement must not.
+
+    Never raises. False on anything unexpected, because False is a fact a
+    caller can act on and True would be a guess wearing its clothes.
+    """
     key = (store.norm(project), role)
     proc = PROCS.pop(key, None)
     target = pid or (proc.pid if proc else None)
     if not target:
         return False
+    if not pid_alive(target):
+        return True                     # already gone; nothing to wait for
     try:
         if os.name == "nt":
-            subprocess.run(["taskkill", "/PID", str(target), "/T", "/F"],
-                           capture_output=True, timeout=15)
+            r = subprocess.run(["taskkill", "/PID", str(target), "/T", "/F"],
+                               capture_output=True, timeout=15)
+            # A non-zero code here is a refusal - access denied, or a pid
+            # that has already gone. It was swallowed, so "stopped" came
+            # back even when nothing had been stopped. It is not fatal on
+            # its own (the process may still die, or may already be dead),
+            # so the wait below decides; what matters is that it can no
+            # longer be mistaken for success by itself.
+            if r.returncode and not pid_alive(target):
+                return True
         else:
             try:
                 os.killpg(os.getpgid(target), signal.SIGTERM)
             except Exception:
                 os.kill(target, signal.SIGTERM)
-        return True
     except Exception:
-        return False
+        return not pid_alive(target)
+    end = time.time() + (STOP_WAIT_SEC if wait is None else max(0.0, wait))
+    while time.time() < end:
+        if not pid_alive(target):
+            return True
+        time.sleep(0.1)
+    return not pid_alive(target)
 
 
 def pid_alive(pid):
-    """Is this pid still a live process? Cross-platform, best effort."""
+    """Is this pid still a RUNNING process? Cross-platform, best effort.
+
+    On Windows this used to ask only whether OpenProcess succeeded, and
+    that is not the same question. A process that has exited but whose
+    handle is still held - by its own parent, which is exactly what the
+    bridge is for every window it launches - remains openable. So a killed
+    child reported itself alive until somebody reaped it.
+
+    That mattered the moment stop() began waiting for death instead of
+    assuming it: every rotation and every handover would have waited the
+    full timeout and then refused to start a replacement, for a window
+    that had died on time. A repair that blocks the thing it repairs.
+
+    WaitForSingleObject with a zero timeout asks the right question: the
+    handle is signalled when the process ends, so WAIT_OBJECT_0 means gone
+    and WAIT_TIMEOUT means still running. GetExitCodeProcess would have
+    done too, except that a process exiting with code 259 is indisinguishable
+    from STILL_ACTIVE, and 259 is a real exit code somebody will hit one day.
+
+    POSIX keeps os.kill(pid, 0), which has the same blind spot for zombies;
+    the bridge's children are reaped by Popen there, and nothing has yet
+    depended on the difference. Said plainly rather than left to be found.
+    """
     if not pid:
         return False
     try:
         if os.name == "nt":
             import ctypes
-            h = ctypes.windll.kernel32.OpenProcess(0x100000, False, int(pid))
-            if h:
-                ctypes.windll.kernel32.CloseHandle(h)
-                return True
-            return False
+            k32 = ctypes.windll.kernel32
+            h = k32.OpenProcess(0x100000, False, int(pid))   # SYNCHRONIZE
+            if not h:
+                return False
+            try:
+                return k32.WaitForSingleObject(h, 0) != 0    # 0 = signalled
+            finally:
+                k32.CloseHandle(h)
         os.kill(int(pid), 0)
         return True
     except Exception:

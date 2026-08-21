@@ -3172,6 +3172,139 @@ check("and only asks the planner when there is none",
       < _dv.index("You accepted iteration %d. The loop is still on"), True)
 daemon.STATE["tasks_open"] = {}
 
+print("\n78. stopping a window means it stopped, not that it was asked")
+print("    stop() issued the kill and returned True on the strength of")
+print("    having issued it, swallowing taskkill\'s exit code on the way.")
+print("    On 2026-08-21 a pair was stopped at 05:02 and relaunched with")
+print("    --resume onto its own session ids: stop() said True, the windows")
+print("    were still alive, and the replacements sat trying to resume")
+print("    conversations the old processes still held. Four and a half")
+print("    hours dark. The SessionEnd of those sessions reached the journal")
+print("    at 09:41:41, and the pair came up ten seconds later")
+print("   (a) a process that really dies - the answer comes after the death,")
+print("   not after the request")
+import subprocess as _sp                                  # noqa: E402
+from bridgecore import sessions                           # noqa: E402,F811
+_proc = _sp.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+check("the process is running before we start",
+      sessions.pid_alive(_proc.pid), True)
+_t0 = time.time()
+_said = sessions.stop(TMP, "executor", pid=_proc.pid)
+_took = time.time() - _t0
+check("stop says it stopped", _said, True)
+check("and by then the process is actually gone",
+      sessions.pid_alive(_proc.pid), False)
+print("       (it took %.2fs, and the answer came after the death)" % _took)
+
+print("   (b) a process that survives the kill. This is the case the old")
+print("   code could not express at all: it had no way to say no")
+_saved_alive = sessions.pid_alive
+_saved_run = sessions.subprocess.run
+
+
+class _Refused(object):
+    returncode = 1
+    stdout = b""
+    stderr = b"ERROR: Access is denied."
+
+
+sessions.pid_alive = lambda pid: True          # nothing can kill it
+sessions.subprocess.run = lambda *a, **k: _Refused()
+_t1 = time.time()
+_answer = sessions.stop(TMP, "planner", pid=999999, wait=0.4)
+_waited = time.time() - _t1
+sessions.pid_alive = _saved_alive
+sessions.subprocess.run = _saved_run
+check("a process that will not die is reported as not stopped",
+      _answer, False)
+check("and it waited rather than answering at once",
+      _waited >= 0.3, True)
+print("   the shipped code could not fail this check - it returned True")
+print("   without looking, which is why the case is worth having")
+_ssrc = inspect.getsource(sessions.stop)
+check("the answer is taken from the process, not from the request",
+      "pid_alive(target)" in _ssrc, True)
+check("and taskkill's exit code is no longer swallowed",
+      "r.returncode" in _ssrc, True)
+check("the wait has the relayout precedent behind it",
+      "STOP_WAIT_SEC" in _ssrc, True)
+
+print("   (c) nobody starts a replacement over a live window. Two processes")
+print("   on one seat is what made that morning dark, and starting anyway")
+print("   is not the smaller failure")
+_rot = inspect.getsource(daemon.rotate_executor)
+_hand = inspect.getsource(daemon.handover)
+check("a rotation refuses when the old window would not die",
+      "refuse_replacement(path, \"executor\", _pid, \"rotation\")" in _rot,
+      True)
+print("   and it refuses on the right question. stop() answers False for")
+print("   'there was no pid to stop' as well, which is not a failure - it")
+print("   is nothing in the way. Conflating them blocked every handover the")
+print("   suite drives, where no real process exists at all")
+check("the rotation asks whether a KNOWN process is still alive",
+      "_pid and sessions.pid_alive(_pid)" in _rot, True)
+check("and so does the handover",
+      "_pid and sessions.pid_alive(_pid)" in _hand, True)
+check("a handover that refuses still answers in its own shape, a dict",
+      '"ok": False, "error":' in _hand, True)
+check("and returns before launching anything",
+      _rot.index("refuse_replacement") < _rot.index("sessions.launch"), True)
+check("a handover refuses too",
+      "refuse_replacement(path, role, _pid, \"handover\")" in _hand, True)
+check("and it refuses the WHOLE handover, not just the stuck half",
+      _hand.index("refuse_replacement") < _hand.index("sessions.launch"), True)
+print("   and the refusal is not silent - it names the pid that would not")
+print("   die, at warn, and calls a person, because a window nobody can")
+print("   close is not something the bridge can solve on its own")
+_ref = inspect.getsource(daemon.refuse_replacement)
+check("the refusal journals at warn", '"warn"' in _ref, True)
+check("names the pid", "pid %s" in _ref, True)
+check("and rings a human", 'notify("needs_you"' in _ref, True)
+
+print("\n79. a window must not inherit somebody else's session")
+print("    The client marks the environment of anything it spawns. A window")
+print("    that inherits those marks is treated as a nested run, and answers")
+print("    by not saving a transcript - and a window with no transcript is")
+print("    one the bridge can read neither an rc link nor a context size")
+print("    from. Blind for the whole of its life, with the wall accounting")
+print("    quietly guessing.")
+print("    How it got in on 2026-08-21: the daemon was restarted with")
+print("    `relayout --now` typed INSIDE a Claude Code session, so it")
+print("    inherited that session, and launch() copied os.environ wholesale")
+print("    into every window it opened afterwards")
+_dirty = dict(os.environ)
+_dirty.update({"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "someone-else",
+               "CLAUDE_CODE_CHILD_SESSION": "1", "CLAUDE_PID": "4242",
+               "CLAUDE_CODE_MESSAGING_TOKEN": "secret",
+               "CLAUDE_CODE_ENTRYPOINT": "cli"})
+_clean = sessions.clean_env(_dirty)
+for _m in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
+           "CLAUDE_PID", "CLAUDE_CODE_MESSAGING_TOKEN",
+           "CLAUDE_CODE_ENTRYPOINT"):
+    check("%s does not pass through" % _m, _m in _clean, False)
+print("   but the two the bridge sets ITSELF must survive - stripping by")
+print("   prefix would have taken them, and the compaction point would go")
+print("   back to being a guess")
+_dirty["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = "80"
+_dirty["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"] = "200"
+_clean2 = sessions.clean_env(_dirty)
+check("the compaction override survives",
+      _clean2.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"), "80")
+check("and the stop-hook cap survives",
+      _clean2.get("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"), "200")
+check("while the rest of the environment is untouched",
+      bool(_clean2.get("PATH")), True)
+print("   launch() opens every window through it")
+check("launch builds its environment clean",
+      "env = clean_env()" in inspect.getsource(sessions.launch), True)
+print("   and the daemon itself is spawned clean, or the next restart from")
+print("   inside a session brings the whole thing straight back")
+from bridgecore import relayout as _rl
+check("start_daemon hands the daemon a cleaned environment",
+      "env=clean" in inspect.getsource(_rl.start_daemon), True)
+check("built from the same one list, not a second copy of it",
+      "clean_env()" in inspect.getsource(_rl.start_daemon), True)
+
 print("\n" + ("-" * 60))
 if FAILED:
     print("FAILED: %d" % len(FAILED))

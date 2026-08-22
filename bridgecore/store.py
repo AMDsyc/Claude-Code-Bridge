@@ -574,21 +574,41 @@ def calib_key(model, project):
 
 
 def calib_get(model, project, window):
+    """A COMPLETE calibration record for this model and project.
+
+    The defaults are filled in for a partial entry, not only for a missing
+    one, and that is the whole of the change made on 2026-08-22. calib_update
+    creates the key with setdefault, so any caller that writes one field
+    before reading - and the wall handling does exactly that, recording
+    wall_history_tokens and then calling calib_miss - left an entry holding
+    that one field. The next read handed it back as if it were a record, and
+    `cal["ceiling_pct"]` raised KeyError inside the branch that replaces a
+    session: the crash landed precisely where the bridge was trying to
+    rescue a pair. Never seen live only because every real project already
+    had a full entry by the time it got there.
+    """
     cal = load_calibration()
     key = calib_key(model, project)
-    if key not in cal:
-        buffer_t = 33000
-        if window and window > buffer_t:
-            ceiling = max(50.0, (window - buffer_t) * 100.0 / window - 3.0)
-        else:
-            ceiling = 80.0
-        cal[key] = {"ceiling_pct": round(ceiling, 1), "buffer_tokens": buffer_t,
-                    "measured_at": "", "how": "initial estimate",
-                    "misses": 0, "clean_streak": 0, "multiplier": 1.5,
-                    "wall_history_tokens": None,
-                    "compact_at_tokens": None}
+    buffer_t = 33000
+    if window and window > buffer_t:
+        ceiling = max(50.0, (window - buffer_t) * 100.0 / window - 3.0)
+    else:
+        ceiling = 80.0
+    blank = {"ceiling_pct": round(ceiling, 1), "buffer_tokens": buffer_t,
+             "measured_at": "", "how": "initial estimate",
+             "misses": 0, "clean_streak": 0, "multiplier": 1.5,
+             "wall_history_tokens": None,
+             "compact_at_tokens": None}
+    entry = cal.get(key)
+    if not isinstance(entry, dict):
+        cal[key] = blank
         save_calibration(cal)
-    return cal[key]
+        return cal[key]
+    missing = {k: v for k, v in blank.items() if k not in entry}
+    if missing:
+        entry.update(missing)
+        save_calibration(cal)
+    return entry
 
 
 def calib_update(model, project, **fields):

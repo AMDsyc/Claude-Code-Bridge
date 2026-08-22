@@ -2332,7 +2332,233 @@ check("and the branch stands down when nothing is owed",
       "nothing_owed(path, sit)" in inspect.getsource(daemon.assess), True)
 
 
-print("\n33. this suite leaves nothing behind in anybody's real state")
+print("\n33. a compaction is not a wall - driven through the real endpoints")
+print("    2026-08-22 18:19:54 PreCompact at 998k; 18:19:56 StopFailure")
+print("    invalid_request carrying 'prompt is too long: 1000401 tokens >")
+print("    1000000 maximum'; 18:19:56 'Rotating executor: hit the wall'.")
+print("    Two seconds. The client had begun its own compaction and the")
+print("    bridge shot the session in the middle of it - five sessions in")
+print("    36 hours, and the owner's 'what did you break?'")
+print("   what proves it was survivable: at 01:28 the SAME day the Space")
+print("   Junk PLANNER hit the identical error at 999 717 on the same")
+print("   client and LIVED, because rotate_executor is gated on role ==")
+print("   'executor' and nothing touched it. Floor 71 370 at 01:31.")
+print("   so: the real order, POST by POST, never a hand-built snapshot")
+CMP = os.path.join(TMP, "compaction-project")
+os.makedirs(CMP, exist_ok=True)
+post("/config", {"projects": {A: {}, B: {}, C: {}, CMP: {}}})
+_csid = "compact-exec-1"
+
+
+def _seat_compactor(tokens=998685):
+    with daemon._lock:
+        daemon.STATE.setdefault("sessions", {})["executor:%s" % _csid[:8]] = {
+            "role": "executor", "path": canon(CMP), "session_id": _csid,
+            "model": "Opus 5", "window": 1000000, "window_observed": True,
+            "context_tokens": tokens, "context_pct": tokens / 10000.0,
+            "state": "idle", "last_seen": daemon.now(),
+            "seen_at": time.time(), "turn_costs": [30000]}
+        daemon.STATE.setdefault("last_session", {})[
+            "%s|executor" % canon(CMP)] = _csid
+        daemon.STATE.setdefault("loops", {})[canon(CMP)] = {
+            "active": True, "iteration": 1}
+        for name in ("compact_wait", "compact_failed"):
+            (daemon.STATE.get(name) or {}).pop(
+                "%s|executor" % canon(CMP), None)
+        daemon.save_state()
+    return daemon.STATE["sessions"]["executor:%s" % _csid[:8]]
+
+
+_seat_compactor()
+_rot35 = []
+_real_rot, daemon.rotate_executor = daemon.rotate_executor, \
+    lambda path, why, *a, **k: _rot35.append((path, why))
+_told35 = []
+_real_n35, daemon.notify = daemon.notify, \
+    lambda kind, text, **kw: _told35.append(kind)
+try:
+    print("   the client says it is compacting - PreCompact over /event")
+    _r = post("/event", {"hook_event_name": "PreCompact", "cwd": CMP,
+                         "role": "executor", "session_id": _csid})
+    check("the bridge took the PreCompact", _r.get("status"), 200)
+    check("and marked the session as compacting",
+          bool((daemon.STATE["sessions"]["executor:%s" % _csid[:8]]
+                ).get("compaction_pending")), True)
+
+    print("   two seconds later the API refuses the turn as too long -")
+    print("   which on this client is the compaction, not the end")
+    _r = post("/event", {"hook_event_name": "StopFailure", "cwd": CMP,
+                         "role": "executor", "session_id": _csid,
+                         "error": "invalid_request",
+                         "error_type": "invalid_request",
+                         "error_details": '400 {"type":"error","error":'
+                         '{"type":"invalid_request_error","message":"prompt '
+                         'is too long: 1000401 tokens > 1000000 maximum"}}'})
+    check("the bridge took the StopFailure", _r.get("status"), 200)
+    check("NOBODY WAS ROTATED", _rot35, [])
+    check("and no crash was announced", _told35, [])
+    check("the session is being waited for instead",
+          bool((daemon.STATE.get("compact_wait") or {}).get(
+              "%s|executor" % canon(CMP))), True)
+    check("the wait remembers what it was carrying",
+          (daemon.STATE["compact_wait"]["%s|executor" % canon(CMP)]
+           ).get("tokens"), 998685)
+
+    print("   the tick, while the compaction is still running: still no")
+    print("   rotation, and the wait is still standing")
+    daemon.check_compaction(CMP)
+    check("nothing happened yet", _rot35, [])
+    check("the wait survives the tick",
+          bool((daemon.STATE.get("compact_wait") or {}).get(
+              "%s|executor" % canon(CMP))), True)
+
+    print("   now the summary lands, the way it really lands: the session")
+    print("   draws itself at a fraction of the size it was carrying")
+    with daemon._lock:
+        _s35 = daemon.STATE["sessions"]["executor:%s" % _csid[:8]]
+        _s35["context_tokens"] = 71370
+        _s35.pop("compaction_pending", None)
+        daemon.save_state()
+    daemon.check_compaction(CMP)
+    check("still nobody rotated", _rot35, [])
+    check("the wait is over", (daemon.STATE.get("compact_wait") or {}).get(
+        "%s|executor" % canon(CMP)), None)
+    check("and no failure was recorded against the client",
+          daemon.compaction_failed_at(CMP, "executor"), None)
+
+    print("   the sabotage: the SAME error with no compaction under way is")
+    print("   still a wall hit, immediately - the branch is not disarmed")
+    _seat_compactor()
+    _r = post("/event", {"hook_event_name": "StopFailure", "cwd": CMP,
+                         "role": "executor", "session_id": _csid,
+                         "error": "invalid_request",
+                         "error_type": "invalid_request"})
+    check("a prompt-too-long out of the blue rotates at once",
+          [w for _p, w in _rot35], ["hit the wall"])
+finally:
+    daemon.rotate_executor = _real_rot
+    daemon.notify = _real_n35
+
+
+print("\n34. a compaction that really fails lowers the ceiling")
+print("    the other half of 35, and the part that must be able to fail:")
+print("    if the summary never lands, the session genuinely cannot")
+print("    summarise itself, and THAT is evidence about the client")
+_rot36 = []
+_real_rot36, daemon.rotate_executor = daemon.rotate_executor, \
+    lambda path, why, *a, **k: _rot36.append((path, why))
+_told36 = []
+_real_n36, daemon.notify = daemon.notify, \
+    lambda kind, text, **kw: _told36.append(kind)
+try:
+    _seat_compactor()
+    post("/event", {"hook_event_name": "PreCompact", "cwd": CMP,
+                    "role": "executor", "session_id": _csid})
+    post("/event", {"hook_event_name": "StopFailure", "cwd": CMP,
+                    "role": "executor", "session_id": _csid,
+                    "error": "invalid_request",
+                    "error_type": "invalid_request"})
+    check("the wait is armed and nothing rotated", _rot36, [])
+
+    print("   the grace runs out with the session still carrying 998k")
+    with daemon._lock:
+        daemon.STATE["compact_wait"]["%s|executor" % canon(CMP)]["at"] = \
+            time.time() - daemon.COMPACT_RECOVERY_SEC - 5
+        daemon.save_state()
+    daemon.check_compaction(CMP)
+    check("NOW it is a wall hit", [w for _p, w in _rot36], ["hit the wall"])
+    check("and the failure is on record at the size it failed at",
+          daemon.compaction_failed_at(CMP, "executor"), 998685)
+
+    print("   and a genuine failure outranks any older success above it:")
+    print("   the client went 2.1.227 -> 2.1.240 in three days, so 'it")
+    print("   compacted at 999k in July' is not evidence about today")
+    with daemon._lock:
+        daemon.STATE.setdefault("compactions", {})[
+            "%s|executor" % canon(CMP)] = [
+                {"at": "2026-07-31 10:27", "tokens": 999875, "after": 159783},
+                {"at": "2026-08-04 02:26", "tokens": 996906, "after": 123518},
+                {"at": "2026-08-07 16:36", "tokens": 910828, "after": 107220}]
+        daemon.save_state()
+    check("the success ABOVE the failure is refuted, the ones below stand",
+          daemon.compaction_survivable(CMP, "executor"), 996906)
+    check("and the ceiling sits below the failure, by a turn",
+          daemon.compaction_too_big(CMP, "executor", 1000000),
+          998685 - daemon.LARGEST_TURN_SEEN)
+
+    print("   the sabotage: take the failure away and the old successes")
+    print("   stand again - which is what the bridge did until today")
+    with daemon._lock:
+        (daemon.STATE.get("compact_failed") or {}).pop(
+            "%s|executor" % canon(CMP), None)
+        daemon.save_state()
+    check("without a failure the highest success rules",
+          daemon.compaction_survivable(CMP, "executor"), 999875)
+    check("and the ceiling is a turn ABOVE it - the zone that killed us",
+          daemon.compaction_too_big(CMP, "executor", 1000000),
+          999875 + daemon.LARGEST_TURN_SEEN)
+finally:
+    daemon.rotate_executor = _real_rot36
+    daemon.notify = _real_n36
+
+
+print("\n35. the death writes the transcript too")
+print("    2026-08-22 18:19:15: 'the turn died at 18:16:00 but the pair is")
+print("    moving again - not telling. Witness: its transcript grew at")
+print("    18:16:00, after the death at 18:16:00'. The same second - and")
+print("    the pair had not moved: the blind poll had to wake it at 18:25.")
+print("   what the file actually held at 15:16:00.867Z was an `assistant`")
+print("   entry with isApiErrorMessage true - 'API Error: Connection lost")
+print("   mid-response' - and a `system` entry ten milliseconds later.")
+print("   Third shape of one bug: a witness the event itself produces")
+TSD = os.path.join(TMP, "transcript-witness")
+os.makedirs(TSD, exist_ok=True)
+_death = time.time() - 300
+
+
+def _iso(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t)) + ".000Z"
+
+
+_tpath = os.path.join(TSD, "session.jsonl")
+with open(_tpath, "w", encoding="utf-8") as fh:
+    fh.write(json.dumps({"type": "assistant", "timestamp": _iso(_death - 60),
+                         "message": {"content": "working"}}) + "\n")
+    fh.write(json.dumps({"type": "assistant", "timestamp": _iso(_death),
+                         "isApiErrorMessage": True,
+                         "message": {"content": "API Error: Connection lost "
+                                     "mid-response."}}) + "\n")
+    fh.write(json.dumps({"type": "system", "timestamp": _iso(_death)}) + "\n")
+    fh.write(json.dumps({"type": "bridge-session"}) + "\n")
+os.utime(_tpath, (_death + 1, _death + 1))
+check("the file's mtime IS past the death - the old witness would fire",
+      os.path.getmtime(_tpath) > _death, True)
+check("but nothing a living turn writes is in it",
+      daemon.transcript_moved_after(_tpath, _death), 0.0)
+
+print("   the sabotage: append one entry only a running turn produces")
+with open(_tpath, "a", encoding="utf-8") as fh:
+    fh.write(json.dumps({"type": "assistant", "timestamp": _iso(_death + 30),
+                         "message": {"content": "back at work"}}) + "\n")
+check("now there is a witness, and it is the entry's own stamp",
+      int(daemon.transcript_moved_after(_tpath, _death)), int(_death + 30))
+print("   and the stamps are read as UTC, not as local time: the client")
+print("   writes Z, and reading it as local would be three hours out")
+print("   here - which on a 150-second grace is the whole answer")
+_utc = daemon._entry_epoch({"timestamp": "2026-08-22T15:16:00.867Z"})
+check("a Z stamp is an epoch in UTC",
+      time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(_utc)),
+      "2026-08-22T15:16:00")
+_as_local = time.mktime(time.strptime("2026-08-22T15:16:00",
+                                      "%Y-%m-%dT%H:%M:%S"))
+check("and reading the same stamp as local time gives another answer",
+      _utc != _as_local or time.timezone == 0, True)
+check("moved_witness no longer asks the file system how big the file got",
+      "getmtime" in inspect.getsource(daemon.moved_witness), False)
+
+
+
+print("\n36. this suite leaves nothing behind in anybody's real state")
 check("its data lives in the temp folder",
       os.environ["BRIDGE_DATA"].startswith(TMP), True)
 check("so does the client's, so no transcript lands in the real store",
@@ -2344,7 +2570,7 @@ note("windows opened in the whole run", len(launches()))
 
 SRV.shutdown()
 
-print("\n34. the pinned links stay fresh without a word in the chat")
+print("\n37. the pinned links stay fresh without a word in the chat")
 print("    The owner: the links have to BE current, and he does not want a")
 print("    message about it. Editing a pinned message is silent, so the")
 print("    whole job is making sure the edit happens - and that the pin is")

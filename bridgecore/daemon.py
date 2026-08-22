@@ -23,6 +23,7 @@ limits, stuck-process tracking, Telegram, the panel.
 Runs on 127.0.0.1 only. Start with bridge.bat or python -m bridgecore.daemon.
 """
 
+import calendar
 import glob
 import hashlib
 import json
@@ -265,7 +266,8 @@ PATH_KEYED = ("loops", "inflight", "awaiting", "loop_off", "loop_off_told",
               "paused", "note", "idle_spin", "noart", "frames", "debt",
               "unanswered", "checks", "handover_failed")
 PAIR_KEYED = ("pids", "down", "launches", "last_session", "channels",
-              "autostart_tried", "autostart_told", "stopfail", "stop_seen")
+              "autostart_tried", "autostart_told", "stopfail", "stop_seen",
+              "compact_wait", "compact_failed")
 
 
 def migrate_keys():
@@ -2367,6 +2369,7 @@ def assess(path):
     is never mistaken for a question.
     """
     expire_handover(path)
+    check_compaction(path)
     check_lost_turn(path)
     sit = situation(path)
     ex = sit["roles"]["executor"]
@@ -2638,12 +2641,22 @@ def compaction_survivable(path, role):
     No margin is added on purpose. A size at or below a proven success is
     proven; above it is simply unproven, and that is where caution belongs.
     """
+    fail = compaction_failed_at(path, role)
     best = None
     hist = (STATE.get("compactions") or {}).get(
         "%s|%s" % (norm(path), role)) or []
     for row in hist:
         if row.get("tokens") and row.get("after"):
             n = int(row["tokens"])
+            # A SUCCESS HAS A SHELF LIFE. One compaction that was given its
+            # time and genuinely did not land refutes every older success at
+            # or above its size, however many there are: those were a
+            # different client. The client here went 2.1.227 -> 2.1.240 in
+            # three days, so "it worked in July" is not evidence about today.
+            # Only failures check_compaction confirmed count - the bridge's
+            # own five kills of 2026-08-22 do not (see note_compaction_failed).
+            if fail and n >= fail:
+                continue
             if best is None or n > best:
                 best = n
     return best
@@ -2657,6 +2670,7 @@ def compaction_too_big(path, role, window):
     is, and it stays as the fallback - but it no longer overrules evidence.
     """
     proven = compaction_survivable(path, role)
+    fail = compaction_failed_at(path, role)
     if proven:
         # One turn above the best proven size, because a sample IS an
         # overshoot: the threshold sits below it and a session ordinarily
@@ -2664,8 +2678,19 @@ def compaction_too_big(path, role, window):
         # any trouble at all. Case 22 is that shape - compacted at 150k,
         # sitting at 168k, entirely routine - and without this allowance
         # the branches would call it doomed.
-        return proven + LARGEST_TURN_SEEN
-    return max(0, int(window or 0) - RESERVED_TOKENS) or None
+        top = proven + LARGEST_TURN_SEEN
+    else:
+        top = max(0, int(window or 0) - RESERVED_TOKENS) or None
+    if fail:
+        # Below the failure, by a turn: the failure is itself an overshoot -
+        # the session ended a turn there and only then tried to summarise -
+        # so the size that cannot be summarised starts somewhere under it.
+        # This is what makes rule 1a fire EARLY and calmly, before the zone
+        # where compaction has actually been seen to fail, which is the whole
+        # of what the owner asked for: do not lose the work.
+        under = max(0, int(fail) - LARGEST_TURN_SEEN)
+        top = under if top is None else min(top, under)
+    return top or None
 
 
 def compaction_sizes(path, role):
@@ -5941,6 +5966,73 @@ def nudge_stalled(path, role, since, owed=""):
     return "called you"
 
 
+def _entry_epoch(row):
+    """The UTC stamp on one transcript entry, as epoch seconds, or 0.
+
+    The client writes `2026-08-22T15:16:00.867Z` - UTC, with a Z. timegm is
+    what turns that into an epoch; time.mktime would read it as local and be
+    three hours out on this machine, which is exactly the size of the
+    mistake this function exists to avoid making.
+    """
+    ts = row.get("timestamp")
+    if not isinstance(ts, str) or len(ts) < 19:
+        return 0.0
+    try:
+        return float(calendar.timegm(
+            time.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")))
+    except (ValueError, OverflowError):
+        return 0.0
+
+
+def transcript_moved_after(tp, when):
+    """When did this transcript last record something only a LIVING turn writes?
+
+    Returns an epoch past `when`, or 0 for "nothing of the sort".
+
+    THE DEATH WRITES THE TRANSCRIPT TOO, and that is the whole reason this
+    is not a call to os.path.getmtime. On 2026-08-22 at 18:19:15 the bridge
+    said of one watched project's executor: "the pair is moving again - not
+    telling. Witness: its transcript grew at 18:16:00, after the death at
+    18:16:00" - the same second, because what grew it was the death's own
+    record. The transcript at that moment held, at 15:16:00.867Z, an
+    `assistant` entry with isApiErrorMessage true reading "API Error:
+    Connection lost mid-response", and a `system` entry ten milliseconds
+    later. Nothing else until the blind poll woke the pair six minutes on.
+
+    That is the third shape of one bug - a witness the event itself can
+    produce (5.30, 5.33) - so the test is not a wider margin, it is asking
+    what was written: an `assistant` or `user` entry that is NOT the api
+    error. A `system` record, an `attachment`, and the untimestamped
+    bookkeeping rows (mode, permission-mode, bridge-session) are all things
+    a dead session still emits, and none of them is a turn.
+
+    Cannot read it -> 0 -> not an alibi, which is the same direction
+    moved_witness takes everywhere else.
+    """
+    best = 0.0
+    try:
+        if not tp or not os.path.isfile(tp):
+            return 0.0
+        for line in _tail_lines(tp, 512):
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("type") not in ("assistant", "user"):
+                continue
+            if row.get("isApiErrorMessage"):
+                continue
+            at = _entry_epoch(row)
+            if at > when and at > best:
+                best = at
+    except OSError:
+        return 0.0
+    return best
+
+
 def moved_witness(path, role, when):
     """WHO says this pair moved since `when`, and when they say it happened.
 
@@ -6003,11 +6095,13 @@ def moved_witness(path, role, when):
         sid = last_session_id(path, role) or \
             (best_session(path, role) or {}).get("session_id")
         tp = sessions.transcript_of(sid) if sid else None
-        if tp and os.path.isfile(tp):
-            mt = os.path.getmtime(tp)
-            if mt > when:
-                return ("its transcript grew at %s, after the death at %s"
-                        % (stamp(mt), stamp(when)))
+        # NOT the file's mtime: the death appends its own error record, so
+        # "the file grew" is true of every death by the width of that
+        # record. transcript_moved_after asks what was written instead.
+        moved = transcript_moved_after(tp, when)
+        if moved:
+            return ("its transcript recorded a turn at %s, after the death "
+                    "at %s" % (stamp(moved), stamp(when)))
     except Exception as exc:
         # Unreadable is not an alibi. It used to be - "cannot tell, say
         # nothing" - which is one more way an unnameable witness silences a
@@ -6258,6 +6352,35 @@ HANDOVER_FAILS_BEFORE_HOLD = 2
 LOST_TURN_TRIES = 3
 LOST_TURN_BACKOFF = 2.0
 
+# How long the bridge stands aside while the client's own compaction runs.
+#
+# 2026-08-22 is the whole reason this constant exists. The client changed
+# how it compacts: it no longer only fires at a threshold, it lets the API
+# answer "prompt is too long: 1000401 tokens > 1000000 maximum" and then
+# compacts REACTIVELY (the 2.1.239 bundle carries the whole subsystem -
+# `tengu_reactive_compact_triggered`, `Reactive compact: attempt N hit
+# prompt-too-long`, and a schema field saying threshold compaction is "not
+# enforced ... when the worker defers to the API's prompt-too-long").
+#
+# So `invalid_request` at the top of the window stopped meaning "this
+# session is finished" and started meaning "the cure has begun". The bridge
+# read it the old way and rotated the executor TWO SECONDS after its own
+# PreCompact - killing the compaction that was about to save it. Five
+# sessions died that way in 36 hours.
+#
+# The measurement that settles it: on 2026-08-22 at 01:28 another pair's
+# PLANNER hit the identical error at 999 717 tokens on the same client, and
+# lived - because rotate_executor is gated on role == "executor" and nothing
+# touched it. PreCompact 01:28:38 -> StopFailure 01:28:54 -> post-compact
+# SessionStart 01:31:31 -> next turn 01:31:43, floor 71 370. Same client,
+# same size, same error: what separated life from death was the bridge.
+#
+# 173 seconds is that one recovery, end to end. 600 is three and a half
+# times it, because the two mistakes are not the same size: waiting too long
+# costs a few idle minutes that check_lost_turn is already watching, and
+# not waiting costs the session and everything in it.
+COMPACT_RECOVERY_SEC = 600
+
 
 def revive_lost_turn(path, role):
     """Hand a dead turn back its own work. Returns what was done, or "".
@@ -6315,6 +6438,179 @@ def revive_lost_turn(path, role):
     except Exception:
         return ""
     return ""
+
+
+def handle_wall_hit(path, role, ref):
+    """The session really cannot go on: calibrate, write the handoff, replace.
+
+    Lifted out of the StopFailure branch unchanged so that it has TWO
+    callers: the immediate one, for a prompt-too-long with no compaction
+    under way, and check_compaction, for one whose compaction was given its
+    time and never landed. Before 2026-08-22 there was only the immediate
+    one, and it fired two seconds after the bridge's own PreCompact.
+    """
+    project = project_name(path)
+    model = ((ref or {}).get("model") or "?").lower()
+    store.calib_update(model, path,
+                       wall_history_tokens=(ref or {}).get("context_tokens"))
+    calib_miss(model, path, (ref or {}).get("context_pct"), "wall hit")
+    _, lp = loop_state(path)
+    mechanical_handoff(path, lp, extra_note="session hit the wall")
+    policy = store.project_config(CFG, path).get("rotate_policy", "compact")
+    if role == "executor" and lp.get("active") and policy == "compact":
+        notify("crash", "%s: the executor hit the context wall - the "
+               "conversation grew too long to compact in a single step. "
+               "Replacing it now with the handoff; the new window needs its "
+               "development-channels dialog answered once." % project,
+               path=path)
+        threading.Thread(target=rotate_executor,
+                         args=(path, "hit the wall"), daemon=True).start()
+    else:
+        notify("crash", "%s: the session hit the context wall - too long to "
+               "compact. The handoff is written; press the hand-over button "
+               "in the panel, or send /rotate here." % project, path=path)
+
+
+def wait_for_compaction(path, role, sess):
+    """Is this prompt-too-long the client's own compaction talking?
+
+    True means "stand aside, it is being dealt with"; the caller does not
+    touch the session. False means there is no compaction to wait for and
+    the wall handling runs at once, exactly as it always did.
+
+    The witness is `compaction_pending`, written by the PreCompact branch and
+    cleared the moment a smaller size is read back - so it says "a compaction
+    started here and has not landed yet" and nothing else. It is not a guess
+    about what the client is doing: PreCompact is the client telling us.
+
+    A record older than COMPACT_RECOVERY_SEC is not a compaction in progress,
+    it is one that already failed and was never cleared, so it grants nothing.
+    """
+    pend = (sess or {}).get("compaction_pending") or {}
+    at = float(pend.get("at") or 0)
+    if not at or time.time() - at > COMPACT_RECOVERY_SEC:
+        return False
+    key = "%s|%s" % (norm(path), role)
+    with _lock:
+        watch = STATE.setdefault("compact_wait", {})
+        if key not in watch:
+            watch[key] = {"at": at, "role": role,
+                          "tokens": int(pend.get("tokens") or 0),
+                          "session": pend.get("session") or ""}
+            save_state()
+    store.journal("loop",
+                  "%s / %s: the API refused the turn as too long while a "
+                  "compaction was already under way (started %s, carrying "
+                  "%dk). That is what a compaction looks like from here on "
+                  "this client, so the session is left alone to finish it - "
+                  "checked again in %d min."
+                  % (project_name(path), role,
+                     time.strftime("%H:%M:%S", time.localtime(at)),
+                     int(pend.get("tokens") or 0) // 1000,
+                     int(COMPACT_RECOVERY_SEC // 60)),
+                  project_name(path), role, "log",
+                  project_dir=path if os.path.isdir(path) else None)
+    return True
+
+
+def note_compaction_failed(path, role, tokens):
+    """Record a compaction that was given its time and did not land.
+
+    THIS is what a failed compaction means, and the distinction is the whole
+    lesson of 2026-08-22: five "failures" that day were the bridge shooting
+    the session two seconds into its own recovery, and counting those as
+    evidence about the client would have been counting our own bug as a
+    measurement. Only a compaction nobody interfered with gets to testify.
+
+    The smallest failure is what is kept: a compaction that failed at 990k
+    says nothing good about 998k, so the lowest one is the honest ceiling.
+    """
+    if not tokens:
+        return
+    key = "%s|%s" % (norm(path), role)
+    with _lock:
+        rec = (STATE.setdefault("compact_failed", {}).get(key)) or {}
+        least = int(rec.get("tokens") or 0)
+        STATE["compact_failed"][key] = {
+            "tokens": min(least, int(tokens)) if least else int(tokens),
+            "at": time.time(),
+            "last": int(tokens)}
+        save_state()
+
+
+def compaction_failed_at(path, role):
+    """The smallest size a compaction is known to have genuinely failed at."""
+    rec = (STATE.get("compact_failed") or {}).get(
+        "%s|%s" % (norm(path), role)) or {}
+    return int(rec.get("tokens") or 0) or None
+
+
+def check_compaction(path):
+    """Did the compaction we stood aside for actually land?
+
+    Runs at the head of assess(), once a minute. Two ways out and no third:
+    the summary arrived - `compaction_pending` is gone - and the record is
+    dropped with a line saying so; or COMPACT_RECOVERY_SEC passed with the
+    session still carrying what it carried, and only THEN is it a session
+    that cannot summarise itself, so the failure is recorded as evidence and
+    the wall handling finally runs.
+    """
+    now = time.time()
+    with _lock:
+        waiting = dict(STATE.get("compact_wait") or {})
+    for key, rec in waiting.items():
+        if not key.startswith(norm(path) + "|"):
+            continue
+        role = rec.get("role") or key.rsplit("|", 1)[-1]
+        sess = compacting_session(path, role, rec.get("session"))
+        landed = not (sess.get("compaction_pending") or {})
+        if landed:
+            with _lock:
+                (STATE.get("compact_wait") or {}).pop(key, None)
+                save_state()
+            store.journal("loop",
+                          "%s / %s: the compaction landed - it went from %dk "
+                          "down to %dk and carried on. Nothing was replaced."
+                          % (project_name(path), role,
+                             int(rec.get("tokens") or 0) // 1000,
+                             int(sess.get("context_tokens") or 0) // 1000),
+                          project_name(path), role, "log", project_dir=path)
+            continue
+        if now - float(rec.get("at") or 0) < COMPACT_RECOVERY_SEC:
+            continue
+        with _lock:
+            (STATE.get("compact_wait") or {}).pop(key, None)
+            save_state()
+        note_compaction_failed(path, role, rec.get("tokens"))
+        store.journal("rotation",
+                      "%s / %s: the compaction that started at %s never "
+                      "landed in %d min - this one really did fail at %dk. "
+                      "Recording that, so the ceiling stops trusting older "
+                      "successes above it, and replacing the session."
+                      % (project_name(path), role,
+                         time.strftime("%H:%M:%S",
+                                       time.localtime(rec.get("at") or 0)),
+                         int(COMPACT_RECOVERY_SEC // 60),
+                         int(rec.get("tokens") or 0) // 1000),
+                      project_name(path), role, "warn", project_dir=path)
+        handle_wall_hit(path, role, sess)
+
+
+def compacting_session(path, role, sid):
+    """The record for the session that was compacting, by id where possible.
+
+    By id and not just by role, because a pair whose window was replaced in
+    the meantime has two records for that role, and the question here is
+    about the old one. Falls back to the freshest record when the id is gone,
+    which is the same answer every other caller would get.
+    """
+    want = (sid or "")[:8]
+    if want:
+        for v in (STATE.get("sessions") or {}).values():
+            if norm(v.get("path")) == norm(path) and v.get("role") == role \
+                    and (v.get("session_id") or "").startswith(want):
+                return v
+    return best_session(path, role) or {}
 
 
 def check_lost_turn(path):
@@ -7329,28 +7625,14 @@ def handle_event(event):
                    "" if where in ("nothing", None) else " [%s]" % where))
         model = (ref.get("model") or "?").lower()
         if "invalid" in etype or "context" in etype:
-            store.calib_update(model, path,
-                               wall_history_tokens=ref.get("context_tokens"))
-            calib_miss(model, path, ref.get("context_pct"), "wall hit")
-            _, lp = loop_state(path)
-            mechanical_handoff(path, lp, extra_note="session hit the wall")
-            policy = store.project_config(CFG, path).get("rotate_policy",
-                                                         "compact")
-            if role == "executor" and lp.get("active") and \
-                    policy == "compact":
-                notify("crash", "%s: the executor hit the context wall - the "
-                       "conversation grew too long to compact in a single "
-                       "step. Replacing it now with the handoff; the new "
-                       "window needs its development-channels dialog "
-                       "answered once." % project, path=path)
-                threading.Thread(target=rotate_executor,
-                                 args=(path, "hit the wall"),
-                                 daemon=True).start()
-            else:
-                notify("crash", "%s: the session hit the context wall - too "
-                       "long to compact. The handoff is written; press 'hand "
-                       "over executor' in the panel, or send /rotate here."
-                       % project, path=path)
+            # THE CURE IS NOT THE DISEASE. On the current client a
+            # prompt-too-long at the top of the window is what STARTS a
+            # compaction, not what ends the session. wait_for_compaction
+            # holds the wall handling back while the client summarises;
+            # check_compaction runs it later if the summary never lands.
+            # The measurement is in COMPACT_RECOVERY_SEC.
+            if not wait_for_compaction(path, role, sess):
+                handle_wall_hit(path, role, ref)
         elif "rate" in etype:
             pconf = store.project_config(CFG, path)
             chain = pconf["chains"].get(role) or []

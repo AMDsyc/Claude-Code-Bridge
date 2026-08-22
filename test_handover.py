@@ -4499,13 +4499,27 @@ check("and at 996k too - it has survived that size",
       daemon.plan_for(_s96(996000), PATH)["do"] != "handover", True)
 print("   which is the whole point: the bridge stands aside again, and the")
 print("   session gets to do the thing everybody wants it to do")
-print("   a replacement is still earned by a compaction that really fails -")
-print("   StopFailure with an invalid/context error rotates there and then")
+print("   a replacement is still earned by a compaction that really")
+print("   fails - but 2026-08-22 moved WHERE that is decided, and this")
+print("   check moved with it deliberately. It used to read: the")
+print("   StopFailure branch rotates there and then. That is exactly")
+print("   what killed five sessions: on this client a prompt-too-long")
+print("   at the top of the window is the compaction STARTING, and the")
+print("   bridge was firing two seconds after its own PreCompact")
 _he = inspect.getsource(daemon.handle_event)
-check("a real failed compaction still rotates immediately",
-      'args=(path, "hit the wall")' in _he, True)
-check("on the error type, not on a size",
+check("the error type is still what the branch turns on",
       '"invalid" in etype or "context" in etype' in _he, True)
+check("but it now asks first whether a compaction is under way",
+      "wait_for_compaction(path, role, sess)" in _he, True)
+check("and the StopFailure branch no longer rotates by itself",
+      'args=(path, "hit the wall")' in _he, False)
+check("the replacement lives in handle_wall_hit instead",
+      'args=(path, "hit the wall")'
+      in inspect.getsource(daemon.handle_wall_hit), True)
+check("with two callers: the immediate one and the timed-out one",
+      ("handle_wall_hit(path, role, ref)" in _he,
+       "handle_wall_hit(path, role, sess)"
+       in inspect.getsource(daemon.check_compaction)), (True, True))
 
 print("   and with NO proven history the caution is unchanged, so a fresh")
 print("   pair is no worse off than before")

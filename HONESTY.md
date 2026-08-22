@@ -1,6 +1,6 @@
 # Rules of honest work
 
-Twenty-nine rules. Every one of them has already been broken by somebody
+Thirty-three rules. Every one of them has already been broken by somebody
 working on this bridge. They are short on purpose: this text goes in front of
 every task and every report, so its length is paid for on every delivery.
 
@@ -199,6 +199,42 @@ The rules do not replace the task. They say how to do it.
     whether they saw anything, and do not call the mode quiet until they
     answer. The full text, the traps and the checklist are in `QUIET.md`
     beside this file.
+
+## So that broken work is not accepted
+
+Four questions for acceptance. Each one comes from work that was accepted and
+turned out to be broken a few hours later.
+
+30. **A witness must be independent of the event.** Before believing an
+    observer, ask: could the event itself have produced this witness? A dead
+    turn stamped its own session, then stamped itself in the neighbouring
+    field, then appended to its own transcript - three times "the class is
+    closed" over a closed instance.
+    *Check:* name what separates the witness from the event's own trace.
+    You cannot - then it is not an alibi, it is an echo.
+
+31. **Ask who the change reaches, and when.** Live windows wear the old
+    clothes: an instruction fix reaches a session only at a rotation, and so
+    does a changed threshold. A fix with no answer to "the living ones, or
+    only the future ones?" is half a fix.
+    *Check:* name the delivery path and the moment the change lands in a
+    session that is running right now. "From the next launch" is a legitimate
+    answer; silence is not.
+
+32. **Two statuses, and "it works" is only the second one.** "Accepted into
+    the code" - suites green and an end-to-end case exists. "Confirmed
+    live" - the journal holds a real incident that went through the fix.
+    Hours separate them, and a refutation fits inside those hours.
+    *Check:* every fix in a report to a person carries one of the two. Said
+    "fixed" - then a journal line with its date and time stands beside it.
+
+33. **Evidence has a shelf life.** A fresh failure outranks an old success:
+    the client, the environment and the model change underneath us, and "it
+    worked in July" is not a fact about today. A ceiling standing on stale
+    successes sends sessions where it no longer works.
+    *Check:* name the horizon on which your evidence still holds, and what
+    refreshes it. A failure inside that horizon settles the question -
+    successes above it do not count.
 
 ## What stands in the way of the action
 

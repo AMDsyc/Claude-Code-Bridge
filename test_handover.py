@@ -1645,6 +1645,44 @@ for _k in ("verdict", "info", "", None):
 check("and delivery is the one place it happens, so no caller can forget",
       "content = with_rules(content, meta, last_session_id(path, role))"
       in inspect.getsource(daemon.deliver_ex), True)
+print("   BUT A LONG VERDICT IS WORK. `done` means 'accepted, send the next")
+print("   piece', and in practice the next piece is often written straight")
+print("   into the feedback - a `continue` on 2026-08-22 at 00:01:04 spent")
+print("   four sentences telling the executor to reproduce a failure, find")
+print("   the cause and fix it, with a Residence and a full green run. That")
+print("   is a whole assignment arriving with nothing in front of it")
+print("   the threshold is measured: across 4 656 verdicts in this bridge's")
+print("   journals the median body is 515 characters and the p90 is 1 687,")
+print("   so 1 000 splits 31 per cent above from 69 per cent below. Charging")
+print("   every verdict would add 62 per cent to what the canon costs,")
+print("   nearly all of it on one-line acceptances - and a rule that taxes")
+print("   good work gets switched off")
+daemon.STATE.pop("rules_full", None)
+_short_v = "Accepted, nothing to add."
+_long_v = "Accepted. " + ("Now do the next piece properly. " * 40)
+check("the measured threshold is where the distribution turns",
+      daemon.VERDICT_WORK_CHARS, 1000)
+check("a short verdict is still free", len(_short_v) < 1000
+      and daemon.with_rules(_short_v, {"kind": "verdict"}, "vsess")
+      == _short_v, True)
+check("a long one carries the rules in front of it",
+      len(_long_v) >= 1000
+      and daemon.with_rules(_long_v, {"kind": "verdict"}, "vsess")
+      != _long_v, True)
+_vhead = daemon.with_rules(_long_v, {"kind": "verdict"}, "vsess2")
+check("and it is the whole canon the first time that session is written to",
+      ("RULES OF WORK" in _vhead,
+       len([l for l in _vhead.splitlines() if re.match(r"^\d+\. \*\*", l)])),
+      (True, _n_rules))
+check("the closing line names what follows, so it does not read as a task",
+      "Below is the verdict itself." in _vhead, True)
+print("   the sabotage: an info line and an empty kind stay free at any")
+print("   length - nothing there is a decision")
+for _k in ("info", "", None):
+    check("kind %r carries nothing even when long" % _k,
+          daemon.with_rules(_long_v, {"kind": _k}, "vsess3"), _long_v)
+daemon.STATE.pop("rules_full", None)
+
 print("   nothing on this path may drop the loop: a canon that is missing or")
 print("   empty costs the reminder, never the delivery")
 _realpath = daemon.HONESTY
@@ -1689,6 +1727,71 @@ finally:
     daemon.HONESTY = _realpath
     daemon._RULES_MISSING_TOLD[0] = False
 check("the real canon is back", len(daemon.honesty_text()) > 2000, True)
+print("   AND THE ORDER MUST NOT BE A WAY ROUND THE RULES. Two tiers means")
+print("   a session sees the full text once and titles for ever after, so a")
+print("   rule edited later never reaches it - it goes on deciding from the")
+print("   version in its memory. The owner, 2026-08-22: rules were already")
+print("   got round by ordering once, and that must not happen again")
+_realpath2 = daemon.HONESTY
+_ordering = os.path.join(TMP, "ordering-canon.md")
+try:
+    with open(_ordering, "w", encoding="utf-8") as fh:
+        fh.write("1. **Rule one.**\n    *Check:* first edition.\n")
+    daemon.HONESTY = _ordering
+    daemon.STATE.pop("rules_full", None)
+    _o1 = daemon.rules_for_delivery("task", "ordering-sess")
+    check("the session is given the canon in full the first time",
+          "first edition" in _o1, True)
+    _o2 = daemon.rules_for_delivery("task", "ordering-sess")
+    check("and titles only the second time - the two tiers still hold",
+          "first edition" in _o2, False)
+    print("   now the rule changes. Every session running right now has the")
+    print("   old text in its head and would never be told otherwise")
+    with open(_ordering, "w", encoding="utf-8") as fh:
+        fh.write("1. **Rule one.**\n    *Check:* SECOND edition.\n")
+    _o3 = daemon.rules_for_delivery("task", "ordering-sess")
+    check("the very next delivery carries the FULL new text",
+          ("SECOND edition" in _o3, "first edition" in _o3), (True, False))
+    check("and the mark now records the canon it was given",
+          (daemon.STATE["rules_full"]["ordering-sess"].get("canon")
+           == daemon.canon_fingerprint()), True)
+    _o4 = daemon.rules_for_delivery("task", "ordering-sess")
+    check("after which it drops back to titles - it is a reset, not a flood",
+          "SECOND edition" in _o4, False)
+    print("   the fingerprint is of the CONTENT, not of the file's clock: a")
+    print("   rebuild or a copy must not re-send eleven thousand characters")
+    print("   to every live session for nothing")
+    _fp = daemon.canon_fingerprint()
+    os.utime(_ordering, (time.time() + 500, time.time() + 500))
+    check("touching the file changes nothing", daemon.canon_fingerprint(), _fp)
+    check("and the session is still not owed the full text",
+          "SECOND edition" in daemon.rules_for_delivery("task",
+                                                        "ordering-sess"),
+          False)
+    print("   the sabotage: a mark with no fingerprint - one written before")
+    print("   this existed - must count as stale, because what that session")
+    print("   was shown cannot be established")
+    with daemon._lock:
+        daemon.STATE["rules_full"]["ordering-sess"] = daemon.now()
+    check("an old bare-timestamp mark does not silence the reset",
+          daemon.rules_seen("ordering-sess"), False)
+    check("so the session is handed the whole canon again",
+          "SECOND edition" in daemon.rules_for_delivery("task",
+                                                        "ordering-sess"),
+          True)
+    print("   and the sabotage that proves the check can fail at all: pin")
+    print("   the mark to the CURRENT canon and the reset must not fire")
+    with daemon._lock:
+        daemon.STATE["rules_full"]["ordering-sess"] = {
+            "at": daemon.now(), "canon": daemon.canon_fingerprint()}
+    check("a mark that matches the canon still means titles only",
+          "SECOND edition" in daemon.rules_for_delivery("task",
+                                                        "ordering-sess"),
+          False)
+finally:
+    daemon.HONESTY = _realpath2
+    daemon.STATE.pop("rules_full", None)
+
 print("   what it costs, measured rather than guessed - this text is paid")
 print("   for on every task and every report, so the number belongs here")
 daemon.STATE.pop("rules_full", None)
@@ -3567,15 +3670,15 @@ print("   repository is English-only, and check_public.py enforces that.")
 print("   Spelling the Russian phrases out in escapes would pass the scan")
 print("   while meaning exactly what the scan exists to stop")
 import re as _re29
-check("the Russian canon now carries 29 numbered rules",
-      len(_re29.findall(r"^\d+\. \*\*", _ru, _re29.M)), 29)
+check("the Russian canon now carries 33 numbered rules",
+      len(_re29.findall(r"^\d+\. \*\*", _ru, _re29.M)), 33)
 check("and every one of them still carries its check",
-      len(_re29.findall(r"^\s+\*[^*]+:\*", _ru, _re29.M)), 29)
-check("the English canon carries 29 too",
+      len(_re29.findall(r"^\s+\*[^*]+:\*", _ru, _re29.M)), 33)
+check("the English canon carries 33 too",
       not _en_here
-      or len(_re29.findall(r"^\d+\. \*\*", _en, _re29.M)) == 29, True)
+      or len(_re29.findall(r"^\d+\. \*\*", _en, _re29.M)) == 33, True)
 check("the English header counts them",
-      not _en_here or "Twenty-nine rules." in _en, True)
+      not _en_here or "Thirty-three rules." in _en, True)
 print("   the English rule names the mechanism, not just the goal")
 check("born minimised by the operating system",
       not _en_here or ("BORN minimised" in _en

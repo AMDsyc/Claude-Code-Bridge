@@ -95,6 +95,9 @@ def honesty_text():
 # Read from disk EVERY time: editing the file reaches the next delivery
 # without restarting anything.
 RULES_KINDS = ("task", "report")
+# A verdict this long has stopped being an acknowledgement and is
+# carrying the next piece of work. See carries_work for the measurement.
+VERDICT_WORK_CHARS = 1000
 RULES_OPEN = ("=" * 70 + "\nRULES OF WORK - read them before you start. "
               "They do not replace the task,\nthey say how to do it.\n"
               + "=" * 70)
@@ -139,11 +142,48 @@ def honesty_titles():
     return "\n".join(out)
 
 
+def canon_fingerprint():
+    """What the canon says right now, as eight hex characters.
+
+    The whole of the ordering fix hangs on this. Two tiers means a
+    session gets the full text once and titles for ever after, so a
+    RULE THAT CHANGES AFTER THAT NEVER REACHES IT - the session goes on
+    deciding from the version in its memory, and every decision it takes
+    is taken on rules that have moved. The owner named the class on
+    2026-08-22: rules have already been got round by ordering once here,
+    and that must not be allowed to happen again. His words are in
+    DECISIONS.md 5.39, which is never published.
+
+    Content, not mtime: a rebuild, a copy or a touch changes the stamp
+    without changing a word, and re-sending eleven thousand characters
+    to every live session for nothing is exactly the cost the two-tier
+    split exists to avoid.
+    """
+    text = honesty_text()
+    if not text:
+        return ""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
+
+
 def rules_seen(sid):
-    """Has this session already been given the canon in full?"""
+    """Has this session been given the canon AS IT NOW STANDS, in full?
+
+    Not "has it seen the canon" - has it seen THIS canon. The mark
+    carries the fingerprint of the text that was sent, so editing a rule
+    hands the full text back to every session on its next delivery, and
+    a session cannot go on deciding from a version nobody can see any
+    more. An old mark with no fingerprint at all counts as stale for the
+    same reason: it was written before this existed, so what it saw
+    cannot be established.
+    """
     if not sid:
         return False
-    return bool((STATE.get("rules_full") or {}).get(sid))
+    rec = (STATE.get("rules_full") or {}).get(sid)
+    if not rec:
+        return False
+    if not isinstance(rec, dict):
+        return False
+    return bool(rec.get("canon")) and rec["canon"] == canon_fingerprint()
 
 
 def mark_rules_seen(sid):
@@ -151,7 +191,7 @@ def mark_rules_seen(sid):
         return
     with _lock:
         seen = STATE.setdefault("rules_full", {})
-        seen[sid] = now()
+        seen[sid] = {"at": now(), "canon": canon_fingerprint()}
         # Bounded without needing a reaper: session ids are never reused, so
         # the only cost of an old entry is bytes. Trim the oldest when it
         # grows past anything a real bridge would hold at once.
@@ -174,7 +214,7 @@ def rules_for_delivery(kind, sid=None):
     the delivery. It says so once per daemon run rather than on every
     message, because a line per delivery is not a warning, it is noise.
     """
-    if kind not in RULES_KINDS:
+    if kind not in RULES_KINDS and kind != "verdict":
         return ""
     try:
         text = honesty_text()
@@ -189,7 +229,8 @@ def rules_for_delivery(kind, sid=None):
                                     "unaffected. Looked in: %s" % HONESTY,
                           "", "", "warn")
         return ""
-    what = "task" if kind == "task" else "executor report"
+    what = {"task": "task", "verdict": "verdict"}.get(
+        kind, "executor report")
     full = not rules_seen(sid)
     if full:
         mark_rules_seen(sid)
@@ -201,11 +242,42 @@ def rules_for_delivery(kind, sid=None):
     return "%s\n\n%s\n\n%s\n\n" % (head, body, RULES_CLOSE % what)
 
 
+def carries_work(kind, content):
+    """Does this delivery put a DECISION in front of a session?
+
+    task and report always do, and always did. The one that was missed is a
+    long verdict: `done` officially means "this piece is accepted, send the
+    next one", but in practice the next one is often written straight into
+    the feedback - one `continue` on 2026-08-22 spent four sentences
+    telling the executor to reproduce a failure, find the cause and fix
+    the real one, with a Residence and a full green run. That is a whole
+    assignment, and the verdict path was deliberately not charged for the
+    rules, so work arrived with nothing in front of it. The owner's rule:
+    the rules must appear BEFORE ANY DECISION.
+
+    The threshold is measured, not chosen. Across 4 656 verdicts in this
+    bridge's journals the median body is 515 characters and the p90 is 1 687;
+    at 1 000 the split is 31 % above, 69 % below, and above it a verdict has
+    stopped being an acknowledgement. Charging every verdict instead would
+    add 62 % to what the canon costs (4 705 verdicts against 7 595 tasks and
+    reports), almost all of it on one-line acceptances - and a rule that
+    taxes good work is a rule somebody switches off.
+    """
+    if kind in RULES_KINDS:
+        return True
+    return kind == "verdict" and len(content or "") >= VERDICT_WORK_CHARS
+
+
 def with_rules(content, meta, sid=None):
-    """Put the rules in front of a task or a report. Everything else is
-    passed through untouched - a verdict is an answer to something the
-    planner already has in front of it, and an info line is not work."""
+    """Put the rules in front of anything that carries a decision.
+
+    An info line is not work and a short verdict is an answer to a
+    report the session still has in front of it; neither is charged.
+    carries_work draws the line and holds the measurement.
+    """
     kind = (meta or {}).get("kind") or ""
+    if not carries_work(kind, content):
+        return content
     head = rules_for_delivery(kind, sid)
     return (head + content) if head else content
 

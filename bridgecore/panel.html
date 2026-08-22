@@ -960,7 +960,7 @@ function renderPanel(){
       who='<span class="dim">'+esc(pairsBy[e.path].mark||"")+' '+
           esc(pairsBy[e.path].name||"")+'</span>  ';
     return '<div class="'+(e.kind==="command"?"you":"")+'"><span class="dim">'+esc((e.at||"").slice(11))+'</span>  '+who+esc(e.text||"")+'</div>'}).join("");
-  $("#footPaths").textContent="logs: <project>\\bridge-logs\\   ·   crashes: bridge\\crashes\\";
+  $("#footPaths").textContent="logs: <project>\\bridge-logs\\   ·   crashes: bridge\\source\\data\\crashes\\";
 }
 function calOf(s){
   var cal=D.calibration||{},key=((s.model||"?").toLowerCase())+"|"+(s.path||"?");

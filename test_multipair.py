@@ -39,6 +39,7 @@ Two things it must never do, both learned the hard way:
 
 Run:  python test_multipair.py
 """
+import ast
 import inspect
 import json
 import os
@@ -2558,7 +2559,238 @@ check("moved_witness no longer asks the file system how big the file got",
 
 
 
-print("\n36. this suite leaves nothing behind in anybody's real state")
+print("\n36. the death grows the transcript, so 'it grew' is not 'it worked'")
+print("    Found by hunting NEIGHBOURS of a closed class, 2026-08-22: rule 30")
+print("    asks whether the event can produce its own witness, and asked of")
+print("    transcript_frozen the answer was yes. When a turn dies the client")
+print("    appends its own record - an assistant entry with isApiErrorMessage")
+print("    plus a system entry - so the file's SIZE changes at the exact")
+print("    moment the work stops, and the quiet clock restarted there")
+print("   measured on a throwaway daemon replaying the real order: right")
+print("   after a death executor_is_working answered True and stalled()")
+print("   could not name the dead half even at quiet=1. Same shape as the")
+print("   mtime witness in moved_witness, in a different function")
+FRZ = os.path.join(TMP, "frozen-project")
+os.makedirs(FRZ, exist_ok=True)
+post("/config", {"projects": {A: {}, B: {}, C: {}, FRZ: {}}})
+_fsid = "frozen-exec-1"
+_ftdir = os.path.join(TMP, "frozen-transcripts")
+os.makedirs(_ftdir, exist_ok=True)
+_ftp = os.path.join(_ftdir, _fsid + ".jsonl")
+_real_tof = sessions.transcript_of
+sessions.transcript_of = (lambda sid, path=None:
+                          _ftp if sid == _fsid else _real_tof(sid, path))
+
+
+def _iso38(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t)) + ".000Z"
+
+
+try:
+    _t038 = time.time() - 1200
+    with open(_ftp, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "assistant", "timestamp": _iso38(_t038),
+                             "message": {"content": "working"}}) + "\n")
+    with daemon._lock:
+        daemon.STATE["sessions"]["executor:%s" % _fsid[:8]] = {
+            "role": "executor", "path": canon(FRZ), "session_id": _fsid,
+            "model": "Opus 5", "window": 1000000, "context_tokens": 300000,
+            "state": "idle", "last_seen": daemon.now(),
+            "seen_at": _t038, "turn_costs": [30000]}
+        daemon.STATE.setdefault("last_session", {})[
+            "%s|executor" % canon(FRZ)] = _fsid
+        daemon.STATE.setdefault("loops", {})[canon(FRZ)] = {
+            "active": True, "iteration": 1}
+        # The window is still up - that is the whole situation: the
+        # turn died inside a living console, and our own pid is the
+        # one process this suite can be sure is alive.
+        daemon.STATE.setdefault("pids", {})["%s|executor" % canon(FRZ)] = {
+            "pid": os.getpid()}
+        daemon.save_state()
+    print("   the bridge has been watching this file: it knows its size and")
+    print("   when it last saw work in it")
+    daemon.transcript_frozen(FRZ, "executor", 600)
+    with daemon._lock:
+        daemon.STATE["tscript"]["%s|executor" % canon(FRZ)]["at"] = _t038
+        daemon.save_state()
+    print("   now the turn dies, and the client writes the death down")
+    with open(_ftp, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "assistant",
+                             "timestamp": _iso38(time.time()),
+                             "isApiErrorMessage": True,
+                             "message": {"content": "API Error: Connection "
+                                         "lost mid-response."}}) + "\n")
+        fh.write(json.dumps({"type": "system",
+                             "timestamp": _iso38(time.time())}) + "\n")
+    _fr, _since = daemon.transcript_frozen(FRZ, "executor", 600)
+    check("the file GREW - the old test would have reset the clock here",
+          os.path.getsize(_ftp) > 0, True)
+    check("but nothing a living turn writes arrived, so it stays frozen",
+          (_fr, _since > 1000), (True, True))
+    check("and executor_is_working is not fooled",
+          daemon.executor_is_working(FRZ), False)
+    _sit38 = daemon.situation(FRZ)
+    check("tier 2 can name the dead half again",
+          (daemon.stalled(FRZ, _sit38, quiet=600) or ("", 0))[0], "executor")
+
+    print("   the sabotage: append what a LIVING turn writes, and the clock")
+    print("   must restart - otherwise this check could never fail")
+    with open(_ftp, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "assistant",
+                             "timestamp": _iso38(time.time()),
+                             "message": {"content": "back at work"}}) + "\n")
+    _fr2, _since2 = daemon.transcript_frozen(FRZ, "executor", 600)
+    check("a real turn resets it", (_fr2, int(_since2)), (False, 0))
+    check("and the half is working again",
+          daemon.executor_is_working(FRZ), True)
+finally:
+    sessions.transcript_of = _real_tof
+
+
+print("\n37. a hand-edit of config.json is not silence, it is a loss")
+print("    CFG lives in memory and the file is its serialisation - the right")
+print("    way round, because a second authority would race the panel. The")
+print("    sharp edge, measured on a throwaway daemon: somebody edits")
+print("    config.json while the bridge runs, nothing happens because the")
+print("    file is never re-read, and the next thing that touches /config")
+print("    writes memory back over the edit. Rule 31's class, with a bite")
+_cfg_disk = json.load(open(store.CONFIG_PATH, encoding="utf-8"))
+_cfg_disk["role_modes"] = {"executor": "plan", "planner": "plan"}
+with open(store.CONFIG_PATH, "w", encoding="utf-8") as fh:
+    json.dump(_cfg_disk, fh, ensure_ascii=False, indent=2)
+check("the edit is on disk", json.load(open(store.CONFIG_PATH,
+                                            encoding="utf-8"))["role_modes"],
+      {"executor": "plan", "planner": "plan"})
+check("but the running bridge does not have it - the file is read once",
+      daemon.mode_for(A, "executor") != "plan", True)
+_before39 = len(store.recent_events(200))
+post("/config", {"thresholds": dict(daemon.CFG["thresholds"])})
+_said39 = [e for e in store.recent_events(200)
+           if "differs from the running bridge" in (e.get("text") or "")]
+check("the bridge says so, at a level that reaches the panel",
+      (len(_said39) >= 1, _said39[-1].get("level") if _said39 else None),
+      (True, "warn"))
+check("and it names the key that was lost",
+      "role_modes" in (_said39[-1].get("text") if _said39 else ""), True)
+print("   it REPORTS and does not repair - reading the file back would be")
+print("   the second authority this design exists to avoid")
+check("nothing was read back into the running config",
+      daemon.mode_for(A, "executor") != "plan", True)
+print("   the sabotage: a key this very request is setting is not a lost")
+print("   hand-edit, it is the request, and must not be reported")
+_cfg_disk2 = json.load(open(store.CONFIG_PATH, encoding="utf-8"))
+_cfg_disk2["thresholds"] = dict(_cfg_disk2.get("thresholds") or {},
+                                stall_quiet=4321)
+with open(store.CONFIG_PATH, "w", encoding="utf-8") as fh:
+    json.dump(_cfg_disk2, fh, ensure_ascii=False, indent=2)
+_n39 = len([e for e in store.recent_events(200)
+            if "differs from the running bridge" in (e.get("text") or "")])
+post("/config", {"thresholds": dict(daemon.CFG["thresholds"],
+                                    stall_quiet=555)})
+_after39 = [e for e in store.recent_events(200)
+            if "differs from the running bridge" in (e.get("text") or "")]
+check("a key being set by this request is not called a lost edit",
+      "thresholds" in (_after39[-1].get("text") if _after39 else ""), False)
+
+print("\n38. a handler may not take a name the module already uses")
+print("    Found while hunting neighbours of the lost-edit class, and found")
+print("    by walking into it: the /config branch was given a local called")
+print("    `managed` for its key list, and `managed` is already a module")
+print("    function - the predicate that says whether a role is one of the")
+print("    two the bridge plans for. Python decides a name is local for the")
+print("    WHOLE function body, so two branches ABOVE the assignment, in the")
+print("    same do_POST, started raising UnboundLocalError. Measured: 16")
+print("    failures in this suite - reports undelivered, windows not opened,")
+print("    a handover that never came - from a rename that reads as a no-op")
+print("   so the check is static and absolute, over every function in the")
+print("   module: no local, and no parameter, may take the name of anything")
+print("   defined or imported at module level and used in the same function")
+_TOP38 = set()
+_tree38 = ast.parse(inspect.getsource(daemon))
+for _n38 in _tree38.body:
+    if isinstance(_n38, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        _TOP38.add(_n38.name)
+    elif isinstance(_n38, (ast.Import, ast.ImportFrom)):
+        for _a38 in _n38.names:
+            _TOP38.add(_a38.asname or _a38.name.split(".")[0])
+
+
+def _scope38(fn):
+    """What this function binds, and what it reads, its own body only.
+
+    Nested defs, lambdas and comprehensions have scopes of their own, so
+    their bindings are not this function's; a comprehension still READS
+    from here, which is why its loads are kept. A `global` declaration
+    means the name is not local at all.
+    """
+    st, ld, gl = set(), set(), set()
+
+    def walk(node):
+        for ch in ast.iter_child_nodes(node):
+            if isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef,
+                               ast.ClassDef, ast.Lambda)):
+                continue
+            if isinstance(ch, (ast.ListComp, ast.SetComp, ast.DictComp,
+                               ast.GeneratorExp)):
+                for x in ast.walk(ch):
+                    if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load):
+                        ld.add(x.id)
+                continue
+            if isinstance(ch, ast.Global):
+                gl.update(ch.names)
+            if isinstance(ch, ast.Name):
+                (st if isinstance(ch.ctx, ast.Store) else ld).add(ch.id)
+            walk(ch)
+
+    walk(fn)
+    for a in list(fn.args.args) + list(fn.args.kwonlyargs):
+        st.add(a.arg)
+    return st - gl, ld
+
+
+def _shadows38(tree, top):
+    out = []
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            st, ld = _scope38(fn)
+            out += [(fn.name, n) for n in sorted((st & ld & top) - {fn.name})]
+    return out
+
+
+check("no function in daemon.py shadows a module-level name it also uses",
+      _shadows38(_tree38, _TOP38), [])
+print("   four latent ones were cleared to get here - _clock_of,")
+print("   _transcript_reason, check_compaction and check_lost_turn each held")
+print("   a local `now` beside the module's now(). None of them called it, so")
+print("   none was broken; every one was one line away from being broken")
+print("   the sabotage: the exact shape that was live, in miniature - the")
+print("   detector must name it, and Python must really break on it")
+_bad38 = ("def helper(x):\n"
+          "    return x\n"
+          "\n"
+          "\n"
+          "def handler(a, b):\n"
+          "    if a:\n"
+          "        return helper(b)\n"
+          "    helper = (1, 2)\n"
+          "    return [k for k in helper]\n")
+check("the detector names the function and the name it took",
+      _shadows38(ast.parse(_bad38), {"helper"}), [("handler", "helper")])
+_ns38 = {}
+exec(compile(_bad38, "<shadow>", "exec"), _ns38)
+try:
+    _ns38["handler"](True, 7)
+    _boom38 = "no error"
+except UnboundLocalError:
+    _boom38 = "UnboundLocalError"
+check("and the branch above the assignment really does die", _boom38,
+      "UnboundLocalError")
+_ok38 = _bad38.replace("    helper = (1, 2)\n", "    keys = (1, 2)\n")
+_ok38 = _ok38.replace("in helper]", "in keys]")
+check("renaming the local is the whole fix",
+      _shadows38(ast.parse(_ok38), {"helper"}), [])
+
+print("\n39. this suite leaves nothing behind in anybody's real state")
 check("its data lives in the temp folder",
       os.environ["BRIDGE_DATA"].startswith(TMP), True)
 check("so does the client's, so no transcript lands in the real store",
@@ -2566,11 +2798,20 @@ check("so does the client's, so no transcript lands in the real store",
 check("every project it made is under it too",
       all(p.startswith(TMP) for p in PROJ.values()), True)
 check("and the daemon it drove was never the live one", PORT != 8765, True)
+print("   a crash bundle is state too, and it used to land in the repository")
+print("   - ROOT, not DATA - so BRIDGE_DATA could not move it and 44 of them")
+print("   from one afternoon of failing runs sat in the source tree, each")
+print("   holding a whole STATE, in a folder no .gitignore covered")
+_cb39 = daemon.crash_bundle("this is the suite, not a real crash")
+check("a crash bundle goes under BRIDGE_DATA with everything else",
+      _cb39.startswith(TMP), True)
+check("and nothing was written into the source tree",
+      os.path.isdir(os.path.join(daemon.ROOT, "crashes")), False)
 note("windows opened in the whole run", len(launches()))
 
 SRV.shutdown()
 
-print("\n37. the pinned links stay fresh without a word in the chat")
+print("\n40. the pinned links stay fresh without a word in the chat")
 print("    The owner: the links have to BE current, and he does not want a")
 print("    message about it. Editing a pinned message is silent, so the")
 print("    whole job is making sure the edit happens - and that the pin is")

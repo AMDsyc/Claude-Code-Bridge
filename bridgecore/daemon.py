@@ -3509,6 +3509,59 @@ def disallow_for(path, role):
     return list(WRITE_TOOLS)
 
 
+# The keys /config is allowed to write. A tuple at module level and not
+# a local in do_POST: a local called "managed" shadowed the module
+# function of that name for the WHOLE handler, so two branches above
+# it raised UnboundLocalError (-> DECISIONS.md 5.40).
+CONFIG_KEYS = ("notify", "thresholds", "retention", "projects",
+               "quiet_when_present", "presence_file", "custom_models")
+
+
+def warn_config_handedits(being_set):
+    """Say when a hand-edit of config.json is about to be overwritten.
+
+    CFG lives in memory and the file is its serialisation, which is the
+    right way round and is not changing: a second authority would race the
+    panel. But it has a sharp edge, measured on a throwaway daemon on
+    2026-08-22 - a person edits config.json while the bridge is running,
+    nothing happens because the file is never re-read, and then the next
+    thing that touches /config writes memory back over the edit. The change
+    did not reach the living daemon AND it stopped existing, silently. That
+    is rule 31's class with a bite.
+
+    So this reports and does not repair, the same way
+    relayout.retired_tree_users does: reading the file back in would be the
+    second authority. It names the keys and says what to do - restart the
+    bridge to pick them up - and it only looks at keys this request is not
+    itself setting, because those are the ones nobody is watching.
+
+    Never raises: an unreadable or half-written config must not be what
+    fails a /config call.
+    """
+    try:
+        with open(store.CONFIG_PATH, "r", encoding="utf-8") as fh:
+            disk = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(disk, dict):
+        return []
+    lost = []
+    for key, value in disk.items():
+        if key in being_set:
+            continue
+        if key in CFG and CFG[key] != value:
+            lost.append(key)
+    if lost:
+        store.journal("config",
+                      "config.json on disk differs from the running bridge in "
+                      "%s, and this save is about to overwrite it. The daemon "
+                      "reads that file once, at start - a hand-edit made "
+                      "while it is running never reaches it. Restart the "
+                      "bridge to pick these up, or set them from the panel."
+                      % ", ".join(sorted(lost)), "", "", "warn")
+    return lost
+
+
 def mode_for(path, role):
     """The permission mode this role's window is started in.
 
@@ -3744,8 +3797,8 @@ def _clock_of(hhmmss):
     """
     try:
         h, m, sec = (int(x) for x in hhmmss.split(":"))
-        now = time.localtime()
-        return time.mktime((now.tm_year, now.tm_mon, now.tm_mday, h, m, sec,
+        lt = time.localtime()
+        return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, h, m, sec,
                             0, 0, -1))
     except Exception:
         return 0
@@ -4126,9 +4179,11 @@ def executor_is_working(path):
     """Is this executor writing right now? Not "did it finish", but "is it on".
 
     The same witnesses stalled() uses, asked the other way round, so there is
-    one idea of "working" in this file and not two. Transcript growth is the
+    one idea of "working" in this file and not two. The transcript is the
     honest one: a model turn writes as it goes, so a window that has written
-    inside the stall grace is a window that took its work.
+    inside the stall grace is a window that took its work - but the DEATH
+    writes too, and until 2026-08-22 its own error record answered here.
+    transcript_frozen asks what was written now, not whether the file grew.
 
     Cannot tell -> False, and that is deliberate the opposite way from
     tool_in_flight: there, being wrongly told "busy" costs one skipped check;
@@ -5528,7 +5583,7 @@ def _transcript_reason(event, path):
         tp = sessions.transcript_of(event.get("session_id"), path)
     if not tp or not os.path.exists(tp):
         return None, None
-    now = time.time()
+    ts = time.time()
     for ln in reversed(_tail_lines(tp)):
         if "isApiErrorMessage" not in ln:
             continue
@@ -5542,7 +5597,7 @@ def _transcript_reason(event, path):
         try:
             when = time.mktime(time.strptime(stamp[:19], "%Y-%m-%dT%H:%M:%S"))
             when -= time.timezone if not time.daylight else time.altzone
-            if now - when > STOPFAIL_LOOKBACK:
+            if ts - when > STOPFAIL_LOOKBACK:
                 return None, None
         except (ValueError, OverflowError):
             pass
@@ -5833,12 +5888,34 @@ def call_out_clinch(path, found):
 
 
 def transcript_frozen(path, role, quiet):
-    """Has this half's transcript stopped growing for longer than `quiet`?
+    """Has this half's transcript stopped recording WORK for longer than `quiet`?
 
     The transcript is the only witness that is not the session's own word
     for it: a window can be alive, its status line ticking, and nothing
-    being written. Size as well as mtime, because a file touched without
-    growing is not progress.
+    being written.
+
+    THE DEATH GROWS THE FILE TOO, which is why "stopped growing" is not the
+    question any more. When a turn dies the client appends its own record -
+    an `assistant` entry with isApiErrorMessage, and a `system` entry beside
+    it - so the size changes at the exact moment the work stops, and the
+    quiet clock used to restart there. Measured on a throwaway daemon
+    replaying the real order on 2026-08-22: right after a death
+    `executor_is_working` answered **True** and `stalled()` could not name
+    the dead half even at quiet=1. Same class as the mtime witness in
+    moved_witness (-> DECISIONS.md 5.38), in a different function, and the
+    reason rule 30 asks whether the EVENT can produce the witness.
+
+    So the size is only the cheap trigger for looking: it says something was
+    appended. What decides is transcript_moved_after, which counts an
+    `assistant`/`user` entry that is not the api error.
+
+    THE TAIL IS PARSED OUTSIDE THE LOCK, and that is not a detail. Written
+    the obvious way first - read the tail with `_lock` held - it serialised
+    the whole daemon behind half a megabyte of JSON on a thread that runs
+    every few seconds, and test_multipair's two simultaneous reviews stopped
+    being simultaneous: reports went undelivered and the bridge opened spare
+    windows for planners that were merely waiting on the lock. Nothing in
+    this file may do file I/O while holding it.
 
     FAILS OPEN, and that matters more than the detection: no session id,
     no transcript, an unreadable file, a clock that disagrees - all answer
@@ -5858,14 +5935,27 @@ def transcript_frozen(path, role, quiet):
         st = os.stat(tp)
         key = "%s|%s" % (norm(path), role)
         with _lock:
-            book = STATE.setdefault("tscript", {})
-            was = book.get(key) or {}
-            now_ts = time.time()
-            if was.get("size") != st.st_size:
-                book[key] = {"size": st.st_size, "at": now_ts}
+            was = dict((STATE.get("tscript") or {}).get(key) or {})
+        now_ts = time.time()
+        since_at = float(was.get("at") or 0)
+        if was.get("size") == st.st_size:
+            since = now_ts - (since_at or now_ts)
+            return since >= quiet, since
+        if not since_at:
+            # First sight of this file: nothing to judge the growth against.
+            with _lock:
+                STATE.setdefault("tscript", {})[key] = {"size": st.st_size,
+                                                        "at": now_ts}
                 save_state()
-                return False, 0
-            since = now_ts - float(was.get("at") or now_ts)
+            return False, 0
+        alive = transcript_moved_after(tp, since_at)      # no lock held
+        with _lock:
+            STATE.setdefault("tscript", {})[key] = {
+                "size": st.st_size, "at": now_ts if alive else since_at}
+            save_state()
+        if alive:
+            return False, 0
+        since = now_ts - since_at
         return since >= quiet, since
     except Exception:
         return False, 0
@@ -6627,7 +6717,7 @@ def check_compaction(path):
     that cannot summarise itself, so the failure is recorded as evidence and
     the wall handling finally runs.
     """
-    now = time.time()
+    ts = time.time()
     with _lock:
         waiting = dict(STATE.get("compact_wait") or {})
     for key, rec in waiting.items():
@@ -6648,7 +6738,7 @@ def check_compaction(path):
                              int(sess.get("context_tokens") or 0) // 1000),
                           project_name(path), role, "log", project_dir=path)
             continue
-        if now - float(rec.get("at") or 0) < COMPACT_RECOVERY_SEC:
+        if ts - float(rec.get("at") or 0) < COMPACT_RECOVERY_SEC:
             continue
         with _lock:
             (STATE.get("compact_wait") or {}).pop(key, None)
@@ -6695,14 +6785,14 @@ def check_lost_turn(path):
     and said so; what it did not say was that the loop had stopped.
     """
     grace = float(CFG.get("thresholds", {}).get("stopfail_grace", 150))
-    now = time.time()
+    ts = time.time()
     with _lock:
         fails = dict(STATE.get("stopfail") or {})
         seen = dict(STATE.get("stop_seen") or {})
     for key, rec in fails.items():
         if rec.get("told") or not key.startswith(norm(path) + "|"):
             continue
-        if now - rec.get("at", 0) < grace:
+        if ts - rec.get("at", 0) < grace:
             continue
         role = rec.get("role") or key.rsplit("|", 1)[-1]
         if seen.get(key, 0) > rec.get("at", 0):
@@ -9358,7 +9448,14 @@ def do_resume(body):
 # crash bundle + repair
 
 def crash_bundle(exc_text):
-    d = os.path.join(ROOT, "crashes", time.strftime("%m%d-%H%M%S"))
+    # Under the DATA directory and not under ROOT. Two reasons, both
+    # paid for: a bundle carries the whole of STATE - session ids,
+    # project paths, the Telegram chat - and ROOT is the git
+    # repository, where data/ is ignored and this was not; and a
+    # throwaway suite sets BRIDGE_DATA but cannot move ROOT, so 44
+    # bundles from one afternoon of failing runs landed in the source
+    # tree (-> DECISIONS.md 5.40).
+    d = os.path.join(store.DATA, "crashes", time.strftime("%m%d-%H%M%S"))
     try:
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, "traceback.txt"), "w",
@@ -10006,10 +10103,13 @@ class Handler(BaseHTTPRequestHandler):
                 store.save_models(m)
                 return self._send(200, {"ok": True, "opts": m["opts"]})
             if p.startswith("/config"):
+                # Before the file is written from memory, say whether
+                # somebody had edited it by hand - that edit never
+                # reached the running daemon and is about to be lost.
+                warn_config_handedits([k for k in CONFIG_KEYS
+                                       if k in body])
                 with _lock:
-                    for key in ("notify", "thresholds", "retention",
-                                "projects", "quiet_when_present",
-                                "presence_file", "custom_models"):
+                    for key in CONFIG_KEYS:
                         if key in body:
                             CFG[key] = body[key]
                     if "projects" in body:

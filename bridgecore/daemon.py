@@ -259,7 +259,7 @@ norm = store.norm
 PATH_KEYED = ("loops", "inflight", "awaiting", "loop_off", "loop_off_told",
               "seed", "planner_seed", "handover", "last_feedback",
               "paused", "note", "idle_spin", "noart", "frames", "debt",
-              "unanswered", "checks")
+              "unanswered", "checks", "handover_failed")
 PAIR_KEYED = ("pids", "down", "launches", "last_session", "channels",
               "autostart_tried", "autostart_told", "stopfail", "stop_seen")
 
@@ -1741,8 +1741,25 @@ def compaction_point(samples):
     good = [int(s) for s in (samples or []) if s]
     if not good:
         return None
-    anchor = max(good)
-    kept = [s for s in good if anchor - s <= LARGEST_TURN_SEEN]
+    # Anchored on the NEWEST sample, not on the largest, and the band is
+    # two-sided. Two automatic overshoots of one threshold differ by at most
+    # one turn in either direction; anything further away belongs to a
+    # different regime and cannot describe this one.
+    #
+    # Anchoring on max() was wrong in exactly one direction and it mattered.
+    # A threshold that MOVES DOWN makes every old sample a stale high one:
+    # with samples clustered at 996k-999k, a first honest compaction at 700k
+    # sits 299k below the maximum, further than any turn, so it was thrown
+    # away and the point stayed at 996k for ever - the pair could never
+    # recover even once the setting began to work. Measured on 2026-08-22
+    # with the real samples: 700100, 705000 and 690000 were each discarded.
+    #
+    # The newest sample is the one written under the configuration in force,
+    # so it is the honest anchor. The case this function was born for still
+    # works: a manual /compact 220k below the recent cluster is as far from
+    # the newest sample as it was from the largest, and is still dropped.
+    anchor = good[-1]
+    kept = [s for s in good if abs(anchor - s) <= LARGEST_TURN_SEEN]
     return min(kept)
 
 
@@ -2804,6 +2821,53 @@ def plan_for(sess, path):
                        "this bridge; a fresh session with the handoff is "
                        "what comes next" % done}
 
+    # 1a. A session that can never compact is replaced CALMLY, while there
+    #     is still room, instead of being caught at the wall.
+    #
+    #     The owner's words on 2026-08-22: a session must be able to compact,
+    #     or every time it will be a replacement, and that is bad on long
+    #     tasks. He is right, and the measurement says the bridge cannot give
+    #     him the first half: a window launched with autocompact 70 compacted
+    #     at 998 685, and ten samples from windows given 80 AND 70 all land
+    #     between 996 305 and 999 920. The percentage does not move the point
+    #     in this client build (-> DECISIONS.md 5.29). There is no other
+    #     lever either: the client has no environment switch for it, and
+    #     `/compact` is a REPL slash command, while everything the bridge
+    #     sends a session arrives as channel DATA by design.
+    #
+    #     So the honest goal is the second half - not losing the work - and
+    #     that is a replacement taken in a quiet moment with a full handoff,
+    #     rather than one taken after a crash. This is the same handover
+    #     machinery; the whole question is WHEN.
+    #
+    #     When: the compaction point leaves less room than a compaction
+    #     needs (window - RESERVED_TOKENS), so this session will never
+    #     summarise itself, AND the size is within EARLY_ROTATE_TURNS of its
+    #     own worst measured turn of that point. Both measured, nothing
+    #     assumed - and with no turn cost measured yet it does not fire at
+    #     all rather than guess.
+    #
+    #     Quiet is not tested here because it cannot be otherwise: plan_for
+    #     is consulted at a turn boundary (the Stop path) and by assess(),
+    #     which has already returned early on anything in flight, a report
+    #     under review, a verdict travelling or a handover under way.
+    #
+    #     Rule 1b below is untouched and stays the emergency: this one is
+    #     meant to make sure it is never reached.
+    if compact and wv.get("window") and not wv.get("assumed"):
+        cannot_compact = compact > wv["window"] - RESERVED_TOKENS
+        margin = (wv.get("worst_turn") or 0) * EARLY_ROTATE_TURNS
+        if cannot_compact and margin and used + margin >= compact:
+            return {"do": "handover", "pct": pct, "compactions": done,
+                    "why": "carrying %dk with its compaction point at %dk, "
+                           "which leaves less than the %dk a compaction "
+                           "needs - this session cannot summarise itself and "
+                           "is within %d turns of finding that out. Replacing "
+                           "it now, with the handoff, while there is still "
+                           "room to do it calmly"
+                           % (used // 1000, compact // 1000,
+                              RESERVED_TOKENS // 1000, EARLY_ROTATE_TURNS)}
+
     # 1b. Past the wall, "it compacts at the end of the turn" is a promise
     #     the session can no longer keep. The wall is defined a few hundred
     #     lines up as the point where the compaction REQUEST - the whole
@@ -3381,6 +3445,13 @@ def mark_registered(path, role):
             entry["registered"] = True
         (STATE.get("autostart_tried") or {}).pop(key, None)
         (STATE.get("autostart_told") or {}).pop(key, None)
+        # A window came up, so whatever was swallowing the previous ones is
+        # over and the failed-handover streak ends here. Without this the
+        # hold would be permanent for a pair whose stuck window somebody
+        # simply closed: nothing else clears it but a completed handover,
+        # and a pair that cannot be handed over at all is a worse fault than
+        # the loop the count exists to stop.
+        (STATE.get("handover_failed") or {}).pop(norm(path), None)
         save_state()
 
 
@@ -3655,6 +3726,18 @@ def expire_handover(path):
     waiting = hv.get("waiting") or []
     with _lock:
         (STATE.get("handover") or {}).pop(norm(path), None)
+        # A handover that never finished is a FAILED one, and it has to be
+        # counted or the same decision is taken again the moment this flag
+        # clears. On 2026-08-22 that ran from 05:16 to 08:41: plan_for said
+        # handover, a window opened, ten minutes later it had not come up,
+        # this cleared the flag, and the next pass decided the same thing -
+        # twenty-one windows, and twenty-one messages to a person. The
+        # launches-per-hour cap did not catch it because the cadence IS
+        # six an hour: handover_grace is 600s.
+        book = STATE.setdefault("handover_failed", {})
+        rec = book.setdefault(norm(path), {"n": 0, "at": 0})
+        rec["n"] = int(rec.get("n") or 0) + 1
+        rec["at"] = time.time()
         save_state()
     store.journal("rotation", "The handover started %d min ago never "
                   "finished - %s never came up. Clearing it so the bridge "
@@ -4316,10 +4399,24 @@ def handover_blocked(path, roles=("executor", "planner")):
     replacement that then fails to arrive leaves the work stopped with
     nothing to continue it - which is worse than a full context.
     """
+    # The specific reasons first: "a window is already starting" and "six in
+    # an hour" both name something a person can act on right now. The
+    # repeated-failure hold is the fallback, and it has to be last or it
+    # would mask them.
     for role in roles:
         why = launch_guard(path, role)
         if why:
             return why
+    tries = int(((STATE.get("handover_failed") or {})
+                 .get(norm(path)) or {}).get("n") or 0)
+    if tries >= HANDOVER_FAILS_BEFORE_HOLD:
+        # Trying the same thing again is not a plan. Cleared only by a
+        # handover that actually completes, so a person answering the dialog
+        # is all it takes to start the machinery again.
+        return ("%d handovers in a row were started for this project and none "
+                "of the new windows ever came up. Not starting another - "
+                "answer or close the window that is waiting, and the next one "
+                "will go through." % tries)
     return None
 
 
@@ -4468,6 +4565,13 @@ def resume_after_handover(path, role):
             break
         time.sleep(5)
     if deliver(path, "executor", body, {"kind": "task"}):
+        # It worked, so whatever was stopping the previous ones is gone and
+        # the failure counter goes with it. Cleared HERE and nowhere else:
+        # the count exists to stop the bridge repeating a handover that does
+        # not arrive, and only one arriving is evidence of that.
+        with _lock:
+            if (STATE.get("handover_failed") or {}).pop(norm(path), None):
+                save_state()
         store.journal("rotation", "Handover complete - the new executor has "
                       "the thread", project_name(path), "executor", "log",
                       project_dir=path)
@@ -5708,17 +5812,28 @@ def pair_moved_since(path, role, when):
         key = "%s|%s" % (norm(path), role)
         if float((STATE.get("stop_seen") or {}).get(key) or 0) > when:
             return True
-        if float((STATE.get("last_task") or {}).get(norm(path)) or 0) > when:
-            return True
-        # inflight_live, not the raw dict. This was MISSED when the other
-        # three readers were routed through it on 2026-08-21, and the miss
-        # cost the same night: a planner's turn died at 23:21:09 with an API
-        # error, check_lost_turn came to speak at 23:23:42, and this function
-        # answered "moving" on the strength of a `mkdir` record that had been
-        # leaking since 2026-08-18. The message became a journal line and the
-        # pair stood still until a person typed into the window.
-        if inflight_live(path):
-            return True
+        # THE NEXT TWO WITNESSES BELONG TO THE EXECUTOR AND TO NOBODY ELSE.
+        # Both are keyed by project, and asked about a planner they answer
+        # with the executor's life: `last_task` is when work was delivered to
+        # the EXECUTOR, and a tracked command is a Bash tool, which only the
+        # executor has - disallow_for() denies the planner Bash outright. So
+        # a working executor was an alibi for a dead planner, which is the
+        # same class already caught in stalled(): keyed by project, so one
+        # half silenced the check for the other.
+        #
+        # It is not hypothetical. All four turns that died on 2026-08-22
+        # (01:28:54 planner, 05:07:16, 08:54:01, 09:02:51 executor) had a
+        # leaked `mkdir` record standing in this dict, and the planner death
+        # at 01:28:54 had a demonstrably busy executor beside it. Every one
+        # of them answered "moving" here and the medicine never ran.
+        if role == "executor":
+            if float((STATE.get("last_task") or {}).get(norm(path))
+                     or 0) > when:
+                return True
+            # inflight_live, not the raw dict - the leak that made this
+            # answer "moving" for days (-> DECISIONS.md 5.24, 5.25).
+            if inflight_live(path):
+                return True
         sess = best_session(path, role) or {}
         if float(sess.get("seen_at") or 0) > when:
             return True
@@ -5951,6 +6066,16 @@ def outage_watch():
 # API error that keeps happening must not become an endless restart loop,
 # and the human who is finally called deserves to be told what was already
 # tried rather than asked to guess.
+# How many handovers may fail in a row before the bridge stops deciding the
+# same one again. Two, because the first failure is often a dialog nobody has
+# noticed yet and the second says it is not going to be noticed on its own.
+# How much room a session gets before a replacement it cannot avoid. Two of
+# its own worst turns: enough that the turn which would have hit the wall is
+# never started, small enough that a long task keeps almost all of its window.
+EARLY_ROTATE_TURNS = 2
+
+HANDOVER_FAILS_BEFORE_HOLD = 2
+
 LOST_TURN_TRIES = 3
 LOST_TURN_BACKOFF = 2.0
 

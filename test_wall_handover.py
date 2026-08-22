@@ -689,6 +689,17 @@ check("the executor is fine and stays fine",
       daemon.plan_for(sess_of("executor"), PROJ)["do"], "working")
 
 print("\nB2. assess replaces the planner alone")
+# A8 above left a pending window that never registers, on purpose, and the
+# expiry blocks before it counted failed handovers - also on purpose. Both
+# are that block's subject, not this one's, and since 2026-08-22 a streak
+# of failed handovers holds the next one back (see handover_blocked).
+# Cleared here so B2 tests what it is about; production clears it the
+# honest way, when a window actually registers.
+with daemon._lock:
+    (daemon.STATE.get("handover_failed") or {}).pop(daemon.norm(PROJ), None)
+    daemon.STATE.setdefault("pids", {}).pop(
+        "%s|executor" % daemon.norm(PROJ), None)
+    daemon.save_state()
 ex_sid_before = sess_of("executor").get("session_id")
 ex_compactions_before = daemon.compactions_done(PROJ, "executor")
 backdate("executor")

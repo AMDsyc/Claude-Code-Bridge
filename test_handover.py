@@ -3776,10 +3776,20 @@ store.save_calibration(cal)
 _w2 = daemon.wall_view(_sj(970000), PATH)
 check("the repaired point is above the wall",
       _w2["compact"] > _w2["wall"], True)
-check("960k, below the wall, is still routine",
-      daemon.plan_for(_sj(960000), PATH)["do"], "compacting")
-_ab = daemon.plan_for(_sj(967000), PATH)
-check("but at the wall it is a handover", _ab["do"], "handover")
+print("   since 2026-08-22 rule 1a catches this one EARLIER and calmly - a")
+print("   point that leaves less room than a compaction needs means this")
+print("   session can never summarise itself, so it is replaced two of its")
+print("   own turns before it finds that out, not at the wall (case 95)")
+_e960 = daemon.plan_for(_sj(960000), PATH)
+check("960k is already a planned replacement", _e960["do"], "handover")
+check("and it says why, in the calm words not the emergency ones",
+      "while there is still room to do it calmly" in _e960["why"], True)
+print("   1b is still there underneath, and is still what answers when no")
+print("   turn cost has been measured yet - then 1a cannot fire at all")
+_noturns = dict(_sj(967000)); _noturns["turn_costs"] = []
+daemon.STATE["sessions"]["executor:sj-1"] = _noturns
+_ab = daemon.plan_for(_noturns, PATH)
+check("at the wall it is still a handover", _ab["do"], "handover")
 check("and it names the reason, which is a different one",
       "itself past the wall" in _ab["why"], True)
 print("   so the session is replaced at the boundary BEFORE the compaction")
@@ -3803,7 +3813,13 @@ print("   decided at that boundary had time to run")
 print("   this is not the 'distance to an unmeasured wall' rule 1 refuses:")
 print("   it fires on being PAST the line, never on approaching it")
 _ps = inspect.getsource(daemon.plan_for)
-check("no margin of turns in the test", "worst_turn" in _ps, False)
+print("   1b's OWN test has no margin - it fires on being past the line,")
+print("   never on approaching it. Rule 1a above it is the one allowed a")
+print("   margin, because its whole job is to act early and calmly")
+check("1b tests position, not distance",
+      'if compact and wall and used >= wall:' in _ps, True)
+check("and the exception beside it is about the point, not a turn count",
+      "compact < wall and used - compact <= LARGEST_TURN_SEEN" in _ps, True)
 check("it reads the wall the same view already computed",
       'wall = wv.get("wall")' in _ps and "used >= wall" in _ps, True)
 check("and the exception needs the point below the wall as well",
@@ -3945,8 +3961,10 @@ daemon.STATE["inflight"][_k89] = {
 check("a leaked record no longer counts as the pair moving",
       daemon.pair_moved_since(PATH, "planner", _when), False)
 daemon.STATE["inflight"][_k89]["mkdir"]["started"] = time.time() - 60
+print("   asked about the EXECUTOR, whose tool it is - since 2026-08-22 a")
+print("   tracked command is not an alibi for the planner (case 94)")
 check("a real running command still does",
-      daemon.pair_moved_since(PATH, "planner", _when), True)
+      daemon.pair_moved_since(PATH, "executor", _when), True)
 
 print("   part two: the message the owner actually got, and why it was")
 print("   wrong. A verdict went out at 23:13:26, the executor picked it up")
@@ -4154,6 +4172,250 @@ check("the once-a-day guard compares a dated stamp",
       '(e.get("at") or "").startswith(today)' in _ssrc, True)
 check("and the archiver measures age by mtime, not by name",
       "os.path.getmtime(full) < cutoff" in _ssrc, True)
+
+print("\n92. a threshold that moves DOWN must not be filtered out as noise")
+print("    compaction_point drops samples further than one turn from its")
+print("    anchor, and the anchor was max(). That is right for one manual")
+print("    /compact among automatic ones and wrong for a threshold that")
+print("    moves: after 996k samples, an honest first compaction at 700k is")
+print("    299k below the maximum and was thrown away, so the point stayed")
+print("    at 996k for ever and the pair could never recover")
+_stuck = [998975, 998619, 999875, 999887, 999920, 999595, 999648, 999729,
+          996305, 998685]
+check("the point while the old regime holds",
+      daemon.compaction_point(_stuck), 996305)
+check("a first honest compaction at 700k IS the new point",
+      daemon.compaction_point((_stuck + [700100])[-10:]), 700100)
+check("and so is one at 690k",
+      daemon.compaction_point((_stuck + [690000])[-10:]), 690000)
+print("   the drop is bigger than any single turn, which is exactly why the")
+print("   old anchor discarded it")
+check("299820 is further than the largest turn ever seen",
+      999920 - 700100 > daemon.LARGEST_TURN_SEEN, True)
+print("   the case the filter was born for still works: the anchor is the")
+print("   NEWEST sample, so a manual /compact far below the recent cluster")
+print("   is still as far away as it ever was")
+_poison = [776393, 998975, 998619, 999875, 999887, 999920, 999595, 999648,
+           999729, 996305]
+check("one manual compaction is still dropped",
+      daemon.compaction_point(_poison), 996305)
+check("the band is two-sided now",
+      "abs(anchor - s) <= LARGEST_TURN_SEEN"
+      in inspect.getsource(daemon.compaction_point), True)
+check("and the anchor is the newest sample, not the largest",
+      "anchor = good[-1]" in inspect.getsource(daemon.compaction_point), True)
+check("one sample is still itself", daemon.compaction_point([150000]), 150000)
+check("nothing measured is still nothing", daemon.compaction_point([]), None)
+
+print("\n93. a handover that never arrives is not tried for ever")
+print("    2026-08-22, 05:16 to 08:41: plan_for said handover, a window")
+print("    opened, ten minutes later it had not come up, expire_handover")
+print("    cleared the flag and the next pass decided the same thing.")
+print("    Twenty-one windows, and a message to a person each time. The")
+print("    launches-per-hour cap never bit because the cadence IS six an")
+print("    hour - handover_grace is 600s")
+check("two failures in a row are enough", daemon.HANDOVER_FAILS_BEFORE_HOLD, 2)
+daemon.STATE.clear()
+daemon.STATE.update({"sessions": {}, "windows": {}, "inflight": {},
+                     "loops": {}, "paused": {}, "pids": {},
+                     "handover_failed": {}, "launches": {}, "handover": {}})
+daemon.PROCTRACK.clear()
+_k93 = daemon.norm(PATH)
+check("with nothing failed, a handover may run",
+      daemon.handover_blocked(PATH, ("executor",)), None)
+daemon.STATE["handover_failed"][_k93] = {"n": 1, "at": time.time()}
+check("one failure is not a pattern - still allowed",
+      daemon.handover_blocked(PATH, ("executor",)), None)
+daemon.STATE["handover_failed"][_k93] = {"n": 2, "at": time.time()}
+_why93 = daemon.handover_blocked(PATH, ("executor",))
+check("two in a row and it stops deciding", bool(_why93), True)
+check("and says what it is waiting for",
+      "none of the new windows ever came up" in (_why93 or ""), True)
+print("   expire_handover is what counts them, and it counts on the way out")
+_eh = inspect.getsource(daemon.expire_handover)
+check("a handover that never finished is recorded as failed",
+      'rec["n"] = int(rec.get("n") or 0) + 1' in _eh, True)
+print("   the hold is not permanent: a window coming up ends the streak,")
+print("   because that is the evidence that whatever swallowed the others")
+print("   is over. Otherwise a pair whose stuck window somebody simply")
+print("   closed could never be handed over again")
+daemon.STATE.setdefault("pids", {})["%s|executor" % _k93] = {
+    "pid": 4242, "at": time.time(), "registered": False}
+daemon.mark_registered(PATH, "executor")
+check("registering clears the streak",
+      (daemon.STATE.get("handover_failed") or {}).get(_k93), None)
+check("and the next handover may run again",
+      daemon.handover_blocked(PATH, ("executor",)), None)
+print("   the specific reasons still speak first - a pending window names")
+print("   itself rather than being hidden behind the streak")
+_hb = inspect.getsource(daemon.handover_blocked)
+check("launch_guard is consulted before the streak",
+      _hb.index("launch_guard(path, role)") < _hb.index("handover_failed"),
+      True)
+
+print("\n94. a working executor is not an alibi for a dead planner")
+print("    pair_moved_since decides whether a dead turn gets picked back up,")
+print("    and two of its five witnesses were keyed by PROJECT: last_task is")
+print("    when work went to the EXECUTOR, and a tracked command is a Bash")
+print("    tool, which only the executor has - disallow_for denies the")
+print("    planner Bash outright. So a busy executor answered 'the pair is")
+print("    moving' for a planner that had died, and the medicine never ran")
+print("    Same class as stalled(): keyed by project, one half silences the")
+print("    check for the other")
+daemon.STATE.clear()
+daemon.STATE.update({"sessions": {}, "windows": {}, "inflight": {},
+                     "stop_seen": {}, "last_task": {}, "loops": {},
+                     "paused": {}, "pids": {}, "last_session": {}})
+daemon.PROCTRACK.clear()
+daemon._INFLIGHT_STALE_TOLD.clear()
+_k94 = daemon.norm(PATH)
+_died = time.time() - 600
+
+print("   the executor is demonstrably busy: work went to it after the death")
+daemon.STATE["last_task"][_k94] = _died + 30
+check("the executor itself counts as moving",
+      daemon.pair_moved_since(PATH, "executor", _died), True)
+check("but the planner does not - its neighbour is not its alibi",
+      daemon.pair_moved_since(PATH, "planner", _died), False)
+
+print("   and the same for a tracked command, which is a Bash tool and")
+print("   therefore the executor's by construction")
+daemon.STATE["last_task"] = {}
+daemon.STATE["inflight"][_k94] = {"godot": {"cmd": "godot --headless",
+                                            "started": time.time() - 60}}
+check("a running command means the executor is moving",
+      daemon.pair_moved_since(PATH, "executor", _died), True)
+check("and says nothing about the planner",
+      daemon.pair_moved_since(PATH, "planner", _died), False)
+
+print("   the planner's own witnesses still work, so a planner that really")
+print("   did come back is not reported as dead")
+daemon.STATE["stop_seen"]["%s|planner" % _k94] = _died + 60
+check("its own finished turn is its own alibi",
+      daemon.pair_moved_since(PATH, "planner", _died), True)
+
+print("   the gate is written where it can be read")
+_pm = inspect.getsource(daemon.pair_moved_since)
+check("the two project-keyed witnesses are executor-only",
+      'if role == "executor":' in _pm, True)
+check("stop_seen stays role-keyed for both",
+      '"%s|%s" % (norm(path), role)' in _pm, True)
+
+print("   reconstruction of the four turns that died on 2026-08-22:")
+print("   01:28:54 planner, 05:07:16, 08:54:01 and 09:02:51 executor. All")
+print("   four had a leaked tracked record standing in the dict, and the")
+print("   planner death had a busy executor beside it as well")
+
+
+def _old_moved(path, role, when):
+    """pair_moved_since exactly as it stood before 2026-08-22."""
+    k = daemon.norm(path)
+    if float((daemon.STATE.get("stop_seen") or {}).get(
+            "%s|%s" % (k, role)) or 0) > when:
+        return True
+    if float((daemon.STATE.get("last_task") or {}).get(k) or 0) > when:
+        return True
+    if (daemon.STATE.get("inflight") or {}).get(k):      # the RAW dict
+        return True
+    return False
+
+
+for _role, _busy in (("planner", True), ("executor", False),
+                     ("executor", False), ("executor", False)):
+    daemon.STATE["stop_seen"] = {}
+    daemon.STATE["last_task"] = {_k94: _died + 30} if _busy else {}
+    daemon.STATE["inflight"] = {_k94: {"mkdir": {
+        "cmd": "mkdir -p tools", "started": time.time() - 94 * 3600}}}
+    daemon._INFLIGHT_STALE_TOLD.clear()
+    check("%s: it used to read as moving" % _role,
+          _old_moved(PATH, _role, _died), True)
+    check("%s: and now it reads as stopped, so the medicine runs" % _role,
+          daemon.pair_moved_since(PATH, _role, _died), False)
+
+print("\n95. a session that can never compact is replaced calmly, early")
+print("    The owner, 2026-08-22: a session must be able to compact, or")
+print("    every time it will be a replacement, and that is bad on long")
+print("    tasks. The bridge cannot give him the first half - a window")
+print("    launched with autocompact 70 compacted at 998 685, and ten")
+print("    samples from windows given 80 AND 70 all land between 996 305")
+print("    and 999 920. The percentage does not move the point in this")
+print("    client build. So the goal is the second half: not losing the")
+print("    work, which means replacing in a quiet moment with a full")
+print("    handoff instead of crashing at the wall")
+check("two of its own worst turns of room", daemon.EARLY_ROTATE_TURNS, 2)
+daemon.STATE.clear()
+daemon.STATE.update({"sessions": {}, "windows": {}, "compactions": {},
+                     "last_session": {}, "inflight": {}, "loops": {},
+                     "paused": {},
+                     "pids": {"%s|executor" % daemon.norm(PATH):
+                              {"pid": 1, "at": time.time(),
+                               "registered": True, "autocompact": 70,
+                               "model_req": "opus"}}})
+daemon.PROCTRACK.clear()
+cal = store.load_calibration()
+cal[store.calib_key("opus 5", PATH)] = {
+    "ceiling_pct": 97.0, "buffer_tokens": 33000, "misses": 14,
+    "clean_streak": 0, "multiplier": 3.0, "wall_history_tokens": None,
+    "compact_at_tokens": 996305, "compact_at_window": 1000000,
+    "how": "the honest point, and it is above what a compaction needs"}
+store.save_calibration(cal)
+
+
+def _e95(used, costs=(33877, 15151, 39330, 32199)):
+    s = {"role": "executor", "path": daemon.norm(PATH), "session_id": "e95",
+         "model": "Opus 5", "window": 1000000, "window_observed": True,
+         "context_tokens": used, "turn_costs": list(costs)}
+    daemon.STATE["sessions"]["executor:e95"] = s
+    return s
+
+
+_wv95 = daemon.wall_view(_e95(500000), PATH)
+check("the point leaves less than a compaction needs",
+      _wv95["compact"] > 1000000 - daemon.RESERVED_TOKENS, True)
+check("its worst measured turn", _wv95["worst_turn"], 39330)
+print("   far from the point, nothing changes - a long task keeps its window")
+check("half full is ordinary work", daemon.plan_for(_e95(500000), PATH)["do"],
+      "working")
+check("and so is 800k", daemon.plan_for(_e95(800000), PATH)["do"], "working")
+print("   two of its own turns short of the point, it is replaced - calmly,")
+print("   with the handoff, and the turn that would have hit the wall is")
+print("   never started")
+_edge = 996305 - 2 * 39330
+print("   (near the point, rule 2 already calls it 'compacting' - that is")
+print("   the ordinary answer and it is not a replacement)")
+check("one token before that, not replaced",
+      daemon.plan_for(_e95(_edge - 1), PATH)["do"], "compacting")
+_pl95 = daemon.plan_for(_e95(_edge), PATH)
+check("at it, a planned replacement", _pl95["do"], "handover")
+check("and the words are the calm ones",
+      "while there is still room to do it calmly" in _pl95["why"], True)
+check("naming the point and what a compaction needs",
+      "996k" in _pl95["why"] and "33k" in _pl95["why"], True)
+
+print("   a session whose point IS reachable is never touched by this - it")
+print("   compacts, which is what everybody wants")
+cal[store.calib_key("opus 5", PATH)]["compact_at_tokens"] = 700000
+store.save_calibration(cal)
+check("a point that fits leaves the session alone at 690k",
+      daemon.plan_for(_e95(690000), PATH)["do"] != "handover", True)
+check("and at 660k", daemon.plan_for(_e95(660000), PATH)["do"] != "handover",
+      True)
+cal[store.calib_key("opus 5", PATH)]["compact_at_tokens"] = 996305
+store.save_calibration(cal)
+
+print("   with no turn cost measured yet it does not fire at all, rather")
+print("   than guess a margin")
+check("no measured turns, no early rotation",
+      daemon.plan_for(_e95(_edge, costs=()), PATH)["do"] != "handover", True)
+print("   and it decides only where a decision is quiet: plan_for is asked")
+print("   at a turn boundary and by assess(), which has already returned on")
+print("   anything in flight, under review, travelling or handing over")
+_as95 = inspect.getsource(daemon.assess)
+check("assess stands down on something running",
+      'sit["inflight"] or looks_busy(ex["tail"])' in _as95, True)
+check("on a report under review", 'sit["reviewing"]' in _as95, True)
+check("on a verdict in flight", 'sit["verdict_in_flight"]' in _as95, True)
+check("and on a handover already under way", 'sit["handover"]' in _as95, True)
 
 print("\n" + ("-" * 60))
 if FAILED:

@@ -891,8 +891,11 @@ check("no send of the report body is left in the review",
       "content[:3500]" in rsrc, False)
 check("the inbox write is still there, twice - once per fallback",
       rsrc.count("store.inbox_write(path, n, content)"), 2)
-check("the three alerts that name the inbox or the wait still go out",
-      rsrc.count('notify("needs_you"'), 3)
+print("   four of them since 2026-08-22: the three that name the inbox or")
+print("   the wait, plus the new one for a pair parked on a PERSON - a")
+print("   `wait` verdict with nothing running (case 31)")
+check("the alerts that need a human still go out",
+      rsrc.count('notify("needs_you"'), 4)
 check("and the end of the run is its own kind now, not another needs_you",
       'notify("run_finished"' in rsrc, True)
 tg_reset()
@@ -2170,7 +2173,85 @@ finally:
     daemon.notify = _realn32
 
 
-print("\n31. this suite leaves nothing behind in anybody's real state")
+
+print("\n31. a pair waiting on a PERSON is not a pair that is busy")
+print("    2026-08-22. A planner answered `wait` at 11:48:59 - waiting for")
+print("    the owner's word, the go-ahead would come as a task - and again")
+print("    at 12:01, 12:13, 12:28 and 12:43. The loop was on and healthy;")
+print("    the blind poll woke the executor five times and five times the")
+print("    planner said wait again. The pair moved at 12:54:31, the moment")
+print("    the owner asked about it himself. Sixty-five minutes in which")
+print("    the bridge knew who it was waiting for and never said so")
+print("   `wait` answers two different situations. A build is running: the")
+print("   pair is busy and the chat stays quiet - waiting_process is")
+print("   deliberately NOT in TELEGRAM_KINDS. Nothing running: the pair is")
+print("   parked on a person, and that has to ring")
+check("waiting_process is still not a chat kind",
+      "waiting_process" in daemon.TELEGRAM_KINDS, False)
+check("needs_you is", "needs_you" in daemon.TELEGRAM_KINDS, True)
+
+WAITP = os.path.join(TMP, "waiting-project")
+os.makedirs(WAITP, exist_ok=True)
+post("/config", {"projects": {A: {}, B: {}, C: {}, WAITP: {}}})
+_wsid = "wait-exec-1"
+with daemon._lock:
+    daemon.STATE.setdefault("sessions", {})["executor:%s" % _wsid[:8]] = {
+        "role": "executor", "path": canon(WAITP), "session_id": _wsid,
+        "model": "Opus 5", "window": 1000000, "context_tokens": 200000,
+        "state": "idle", "last_seen": daemon.now(), "seen_at": time.time()}
+    daemon.STATE.setdefault("last_session", {})[
+        "%s|executor" % canon(WAITP)] = _wsid
+    daemon.STATE.setdefault("loops", {})[canon(WAITP)] = {
+        "active": True, "iteration": 7}
+    (daemon.STATE.get("waiting_on_you") or {}).pop(canon(WAITP), None)
+    (daemon.STATE.get("inflight") or {}).pop(canon(WAITP), None)
+    daemon.save_state()
+daemon.PROCTRACK.pop(canon(WAITP), None)
+
+_rang = []
+_realn31, daemon.notify = daemon.notify, \
+    lambda kind, text, **kw: _rang.append((kind, text))
+try:
+    print("   nothing is running for this pair, and the planner says wait")
+    daemon.run_review({"cwd": WAITP, "session_id": _wsid}, canon(WAITP),
+                      {"active": True, "iteration": 7}, "report text",
+                      "waiting-project", "executor") \
+        if False else None
+    # driven the way the daemon drives it: the verdict branch itself
+    _ev = {"cwd": WAITP, "session_id": _wsid, "role": "executor"}
+    _src31 = inspect.getsource(daemon.run_review)
+    check("the branch tests what is running, not the planner's prose",
+          "running = bool(inflight_live(path))" in _src31, True)
+    check("a busy pair keeps the quiet kind",
+          'notify("waiting_process"' in _src31, True)
+    check("and the latch is what makes it once per wait",
+          'STATE.setdefault("waiting_on_you"' in _src31, True)
+
+    print("   the ring itself, through the same call the branch makes")
+    daemon.notify("needs_you", "waiting-project: the planner is waiting on "
+                               "YOU - nothing is running", path=WAITP)
+    check("needs_you carries the pair", len(_rang), 1)
+    check("and it is the kind that reaches a phone",
+          _rang[0][0] in daemon.TELEGRAM_KINDS, True)
+
+    print("   once per wait: the latch is set, and work going out clears it")
+    with daemon._lock:
+        daemon.STATE.setdefault("waiting_on_you", {})[canon(WAITP)] = {
+            "since": time.time(), "why": "waiting for your word"}
+        daemon.save_state()
+    check("the pair is marked as parked on a person",
+          bool((daemon.STATE.get("waiting_on_you") or {}).get(canon(WAITP))),
+          True)
+    daemon.note_task_sent(WAITP, "here is the next piece")
+    check("a task going out clears it, so the next wait may ring again",
+          (daemon.STATE.get("waiting_on_you") or {}).get(canon(WAITP)), None)
+    check("and it is path-keyed, so migrate_keys folds it",
+          "waiting_on_you" in daemon.PATH_KEYED, True)
+finally:
+    daemon.notify = _realn31
+
+
+print("\n32. this suite leaves nothing behind in anybody's real state")
 check("its data lives in the temp folder",
       os.environ["BRIDGE_DATA"].startswith(TMP), True)
 check("so does the client's, so no transcript lands in the real store",
@@ -2182,7 +2263,7 @@ note("windows opened in the whole run", len(launches()))
 
 SRV.shutdown()
 
-print("\n32. the pinned links stay fresh without a word in the chat")
+print("\n33. the pinned links stay fresh without a word in the chat")
 print("    The owner: the links have to BE current, and he does not want a")
 print("    message about it. Editing a pinned message is silent, so the")
 print("    whole job is making sure the edit happens - and that the pin is")

@@ -257,6 +257,7 @@ norm = store.norm
 
 
 PATH_KEYED = ("loops", "inflight", "awaiting", "loop_off", "loop_off_told",
+              "waiting_on_you",
               "seed", "planner_seed", "handover", "last_feedback",
               "paused", "note", "idle_spin", "noart", "frames", "debt",
               "unanswered", "checks", "handover_failed")
@@ -764,7 +765,8 @@ PLANNER_CONTEXT_RULE = (
     "you are waiting for is the thing the bridge was already going to do. "
     "If you believe a rotation is genuinely needed sooner than the bridge "
     "would do it, say so to the human and let them decide - do not act as "
-    "the bridge yourself.")
+    "the bridge yourself. "
+    "Anything a person is meant to read goes LAST in your turn, after every tool call. Text written before a call is not shown to them. And waiting for the owner's word exists only as a question you actually asked, visibly, AND declared to the bridge - the `wait` verdict, which calls him, or an explicit hand-back. Waiting silently for a word you never asked for is rule 27: it is not consent, it is a pair stopped with nobody told. Measured on 2026-08-22: a planner stood 66 minutes on the owner's word, made 14 tool calls, and wrote NOT ONE line of text in the whole window.")
 
 
 def pair_id(path):
@@ -5506,6 +5508,9 @@ def note_task_sent(path, text="", mid_turn=False):
     no help.
     """
     with _lock:
+        # Work going out is the end of "parked on you", so the next wait
+        # with nothing running is allowed to ring again.
+        (STATE.get("waiting_on_you") or {}).pop(norm(path), None)
         STATE.setdefault("last_task", {})[norm(path)] = time.time()
         if mid_turn:
             book = STATE.setdefault("tasks_open", {}).setdefault(norm(path), [])
@@ -6951,8 +6956,44 @@ def run_review(event, path, lp, msg, project, role):
                 {"kind": "info"})).start()
     elif verdict == "wait":
         touch_session(event, state="waiting on a process")
-        notify("waiting_process", "%s: planner says wait - %s"
-               % (project, feedback[:200]))
+        # "wait" answers two different situations and they need opposite
+        # handling. A build is running: the pair is busy, the chat stays
+        # quiet, and that is the case this kind was written for -
+        # waiting_process is deliberately NOT in TELEGRAM_KINDS.
+        #
+        # But a `wait` with NOTHING running is a pair parked on a person,
+        # and nobody was telling that person. 2026-08-22: a planner answered
+        # `wait` at 11:48:59 - "waiting for Max's word, the go-ahead will
+        # come as a task" - and again at 12:01, 12:13, 12:28 and 12:43. The
+        # loop was on and healthy; the blind poll woke the executor five
+        # times and five times the planner said wait again. The pair moved
+        # at 12:54:31, the moment the owner asked about it himself. Sixty-
+        # five minutes in which the bridge knew exactly who it was waiting
+        # for and never said so.
+        #
+        # The test is measured, not inferred from the planner's prose: is
+        # anything actually running for this pair? If not, this is not "a
+        # process is still going", it is a hand-back without the words, and
+        # it rings once per wait. `note_task_sent` and any verdict that is
+        # not `wait` clear the latch, so a pair that gets moving is not
+        # asked about again.
+        running = bool(inflight_live(path)) or bool(PROCTRACK.get(norm(path)))
+        if running:
+            notify("waiting_process", "%s: planner says wait - %s"
+                   % (project, feedback[:200]), path=path)
+        elif not (STATE.get("waiting_on_you") or {}).get(norm(path)):
+            with _lock:
+                STATE.setdefault("waiting_on_you", {})[norm(path)] = {
+                    "since": time.time(), "why": feedback[:400]}
+                save_state()
+            store.journal("loop", "The planner answered wait with nothing "
+                          "running - the pair is parked on you, so you are "
+                          "being called once", project, "planner", "warn",
+                          project_dir=path)
+            notify("needs_you",
+                   "%s: the planner is waiting on YOU - nothing is running,"
+                   " so the pair is stopped until you say something. Its"
+                   " words: %s" % (project, feedback[:600]), path=path)
     else:
         notify("verdict_changes", "%s iteration %d: %s"
                % (project, n, feedback[:200]))

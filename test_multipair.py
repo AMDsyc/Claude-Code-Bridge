@@ -1925,7 +1925,160 @@ _jn = json.dumps(store.recent_events(60, project=canon(CPROJ)),
 check("with a warn line in the feed", "NO ARTEFACTS" in _jn, True)
 check("released", until(lambda: CN), True)
 
-print("\n29. this suite leaves nothing behind in anybody's real state")
+print("\n29. four pairs - eight agents - on one daemon")
+print("    The owner asked for eight agents. In this bridge that is four")
+print("    pairs, one more than the three every case above runs on. The")
+print("    question a fourth asks is not 'does the logic work' - the cases")
+print("    above answer that - but 'does anything only appear at scale':")
+print("    a feed leaking across projects, a PENDING shared by accident, a")
+print("    decision meant for one pair reaching another")
+DELTA = os.path.join(TMP, "delta")
+os.makedirs(DELTA, exist_ok=True)
+FOUR = [PROJ["alpha"], PROJ["beta"], PROJ["gamma"], DELTA]
+post("/config", {"projects": {A: {}, B: {}, C: {}, DELTA: {}}})
+check("the fourth project joins the watch list",
+      canon(DELTA) in (daemon.CFG.get("projects") or {}), True)
+check("and the other three are still there",
+      sorted(os.path.basename(p) for p in (daemon.CFG.get("projects") or {})),
+      ["alpha", "beta", "delta", "gamma"])
+
+print("   eight agents: an executor and a planner on each of the four")
+for _p in FOUR:
+    with daemon._lock:
+        for _role, _sid in (("executor", "ex-%s" % os.path.basename(_p)),
+                            ("planner", "pl-%s" % os.path.basename(_p))):
+            daemon.STATE.setdefault("sessions", {})[
+                "%s:%s" % (_role, _sid[:8])] = {
+                "role": _role, "path": canon(_p), "session_id": _sid,
+                "model": "Opus 5" if _role == "executor" else "Fable 5",
+                "window": 1000000, "window_observed": True,
+                "context_tokens": 120000, "state": "idle",
+                "last_seen": daemon.now(), "seen_at": time.time(),
+                "turn_costs": [30000, 25000, 40000]}
+            daemon.STATE.setdefault("last_session", {})[
+                "%s|%s" % (canon(_p), _role)] = _sid
+        daemon.save_state()
+_mine = {(canon(s.get("path")), s.get("role"))
+         for s in daemon.STATE["sessions"].values()
+         if str(s.get("session_id") or "").startswith(("ex-", "pl-"))}
+check("eight agents - four pairs - are on record", len(_mine), 8)
+check("four executors",
+      len([1 for _p, _r in _mine if _r == "executor"]), 4)
+check("four planners", len([1 for _p, _r in _mine if _r == "planner"]), 4)
+check("one of each on every project",
+      sorted(os.path.basename(_p) for _p, _r in _mine if _r == "planner"),
+      ["alpha", "beta", "delta", "gamma"])
+
+print("   each pair writes its own line, and no feed carries another's")
+for _p in FOUR:
+    store.journal("loop", "MARK-%s" % os.path.basename(_p),
+                  os.path.basename(_p), project_dir=_p)
+for _p in FOUR:
+    _texts = [e.get("text") for e in
+              get("/state?project=" + urllib.parse.quote(_p))["events"]]
+    _mine = "MARK-%s" % os.path.basename(_p)
+    _others = ["MARK-%s" % os.path.basename(q) for q in FOUR if q != _p]
+    check("%s sees its own line" % os.path.basename(_p),
+          _mine in _texts, True)
+    check("%s sees none of the other three" % os.path.basename(_p),
+          [t for t in _others if t in _texts], [])
+
+print("   PENDING is per pair: a report held for one is not held for four")
+_pend_before = {canon(p): bool(daemon.PENDING.get(canon(p))) for p in FOUR}
+check("nothing is pending for any of them to start with",
+      sorted(set(_pend_before.values())), [False])
+daemon.PENDING[canon(DELTA)] = {"n": 1, "content": "delta's report"}
+try:
+    check("only delta is holding one",
+          [os.path.basename(p) for p in FOUR
+           if daemon.PENDING.get(canon(p))], ["delta"])
+    print("   and the situation each pair reports is its own")
+    _sits = {os.path.basename(p): daemon.situation(p)["reviewing"]
+             for p in FOUR}
+    check("three quiet, one reviewing",
+          sorted(_sits.items()),
+          [("alpha", False), ("beta", False), ("delta", True),
+           ("gamma", False)])
+finally:
+    daemon.PENDING.pop(canon(DELTA), None)
+
+print("   today's role witnesses under load: every executor of the four is")
+print("   demonstrably busy, and ONE planner has died. The busy executors")
+print("   must not alibi it - not its own, and not the other three's")
+# The moment of death is NOW, and every witness that could speak for these
+# eight is set deliberately: earlier cases have been driving alpha, beta and
+# gamma for half an hour and their stop_seen is fresher than any death this
+# case could invent.
+_died = time.time()
+with daemon._lock:
+    for _p in FOUR:
+        for _r in ("executor", "planner"):
+            (daemon.STATE.get("stop_seen") or {}).pop(
+                "%s|%s" % (canon(_p), _r), None)
+        daemon.STATE.setdefault("last_task", {})[canon(_p)] = _died + 30
+    for _s in daemon.STATE["sessions"].values():
+        if str(_s.get("session_id") or "").startswith(("ex-", "pl-")):
+            _s["seen_at"] = _died - 60
+            _s["last_seen"] = time.strftime("%H:%M:%S",
+                                            time.localtime(_died - 60))
+    daemon.save_state()
+check("every executor reads as moving",
+      [daemon.pair_moved_since(p, "executor", _died) for p in FOUR],
+      [True, True, True, True])
+check("and every planner reads as stopped, on all four",
+      [daemon.pair_moved_since(p, "planner", _died) for p in FOUR],
+      [False, False, False, False])
+with daemon._lock:
+    daemon.STATE["stop_seen"]["%s|planner" % canon(FOUR[0])] = time.time()
+    daemon.save_state()
+check("a planner that really did finish a turn is still its own alibi",
+      daemon.pair_moved_since(FOUR[0], "planner", _died), True)
+check("and the other three are unaffected by it",
+      [daemon.pair_moved_since(p, "planner", _died) for p in FOUR[1:]],
+      [False, False, False])
+
+print("   rule 1a under load: one pair's compaction point sits above what a")
+print("   compaction needs. Only that pair is replaced early")
+_cal = store.load_calibration()
+_cal[store.calib_key("opus 5", DELTA)] = {
+    "ceiling_pct": 97.0, "buffer_tokens": 33000, "misses": 0,
+    "clean_streak": 0, "multiplier": 3.0, "wall_history_tokens": None,
+    "compact_at_tokens": 996305, "compact_at_window": 1000000, "how": "test"}
+store.save_calibration(_cal)
+with daemon._lock:
+    for _p in FOUR:
+        daemon.STATE.setdefault("pids", {})["%s|executor" % canon(_p)] = {
+            "pid": 1, "at": time.time(), "registered": True,
+            "autocompact": 70, "model_req": "opus"}
+    daemon.save_state()
+
+
+def _big(p, used):
+    s = dict(daemon.STATE["sessions"]["executor:ex-%s"
+                                      % os.path.basename(p)[:5]])
+    s["context_tokens"] = used
+    return s
+
+
+_plans = {}
+for _p in FOUR:
+    _key = "executor:ex-%s" % os.path.basename(_p)
+    _key = [k for k in daemon.STATE["sessions"]
+            if k.startswith("executor:ex-") and
+            canon(daemon.STATE["sessions"][k]["path"]) == canon(_p)][0]
+    _s = daemon.STATE["sessions"][_key]
+    _s["context_tokens"] = 930000
+    _plans[os.path.basename(_p)] = daemon.plan_for(_s, _p)["do"]
+check("only the pair whose point cannot fit is replaced early",
+      [n for n, d in _plans.items() if d == "handover"], ["delta"])
+print("   the other three are at the same size and are left alone, because")
+print("   their own numbers say a compaction will still fit")
+check("and the rest are not handed over",
+      sorted(n for n, d in _plans.items() if d != "handover"),
+      ["alpha", "beta", "gamma"])
+
+
+print("\n30. this suite leaves nothing behind in anybody's real state")
 check("its data lives in the temp folder",
       os.environ["BRIDGE_DATA"].startswith(TMP), True)
 check("so does the client's, so no transcript lands in the real store",
@@ -1936,7 +2089,8 @@ check("and the daemon it drove was never the live one", PORT != 8765, True)
 note("windows opened in the whole run", len(launches()))
 
 SRV.shutdown()
-print("\n30. the pinned links stay fresh without a word in the chat")
+
+print("\n31. the pinned links stay fresh without a word in the chat")
 print("    The owner: the links have to BE current, and he does not want a")
 print("    message about it. Editing a pinned message is silent, so the")
 print("    whole job is making sure the edit happens - and that the pin is")

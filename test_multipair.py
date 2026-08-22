@@ -2251,7 +2251,88 @@ finally:
     daemon.notify = _realn31
 
 
-print("\n32. this suite leaves nothing behind in anybody's real state")
+
+print("\n32. a stopped loop owes nothing, and one wait is asked about once")
+print("    Observed live on 2026-08-22: after a `stop` verdict closed the")
+print("    run at 14:53, the planner was sent 'the executor has stopped and")
+print("    appears to be waiting for an answer... Decide which this is' -")
+print("    TWICE, with no new fact in it. The same nudge repeated about")
+print("    twenty times through the night of 08-21")
+print("   two faults, and neither is the poll's cadence, which is right")
+print("   as it is: assess() checked `paused` but never checked whether")
+print("   the LOOP was on, and the latch was a fifteen-minute timer rather")
+print("   than the wait itself")
+ASKP = os.path.join(TMP, "asked-project")
+os.makedirs(ASKP, exist_ok=True)
+post("/config", {"projects": {A: {}, B: {}, C: {}, ASKP: {}}})
+_ak = canon(ASKP)
+_tail = [{"who": "assistant", "text": "Which of the two should I do?"}]
+with daemon._lock:
+    daemon.STATE.setdefault("loops", {})[_ak] = {"active": False,
+                                                 "iteration": 4}
+    (daemon.STATE.get("tasks_open") or {}).pop(_ak, None)
+    daemon.STATE.pop("asked:%s" % _ak, None)
+    daemon.save_state()
+daemon.PENDING.pop(_ak, None)
+
+print("   the loop is off, nothing is queued, nothing awaits a verdict")
+_sit = daemon.situation(ASKP)
+check("so nothing is owed", daemon.nothing_owed(ASKP, _sit), True)
+print("   and the executor's last line still looks like a question - which")
+print("   is exactly the shape that used to fire the nudge")
+check("it does look like one", daemon.looks_like_a_question(_tail), True)
+
+print("   with the loop ON and a report waiting, something IS owed")
+with daemon._lock:
+    daemon.STATE["loops"][_ak] = {"active": True, "iteration": 4}
+    daemon.save_state()
+check("the loop being on is enough",
+      daemon.nothing_owed(ASKP, daemon.situation(ASKP)), False)
+with daemon._lock:
+    daemon.STATE["loops"][_ak] = {"active": False, "iteration": 4}
+    daemon.save_state()
+daemon.PENDING[_ak] = {"n": 4, "content": "a report"}
+try:
+    check("and so is a report awaiting a verdict",
+          daemon.nothing_owed(ASKP, daemon.situation(ASKP)), False)
+finally:
+    daemon.PENDING.pop(_ak, None)
+with daemon._lock:
+    daemon.STATE.setdefault("tasks_open", {})[_ak] = [{"at": time.time(),
+                                                       "text": "held work"}]
+    daemon.save_state()
+check("and so is a task the bridge is holding",
+      daemon.nothing_owed(ASKP, daemon.situation(ASKP)), False)
+with daemon._lock:
+    (daemon.STATE.get("tasks_open") or {}).pop(_ak, None)
+    daemon.save_state()
+
+print("   the latch is on the WAIT, not on a clock: the same question is")
+print("   asked about once, however many ticks go by")
+check("the first time it is new", daemon.question_is_new(ASKP, _tail), True)
+check("the second time it is not", daemon.question_is_new(ASKP, _tail), False)
+check("and the third time it is still not",
+      daemon.question_is_new(ASKP, _tail), False)
+print("   answering the nudge is not a fact either - the planner's reply")
+print("   does not change the executor's last exchange, and that is why a")
+print("   timer re-sent it for ever")
+check("a genuinely different question IS asked about",
+      daemon.question_is_new(ASKP, [{"who": "assistant",
+                                     "text": "different question entirely?"}]),
+      True)
+print("   and the facts that end a wait clear the mark: a task, a finished")
+print("   turn, and the loop coming back on")
+check("a delivered task clears it",
+      (daemon.note_task_sent(ASKP, "next piece"),
+       daemon.STATE.get("asked:%s" % _ak))[1], None)
+check("the timer latch is gone from the branch",
+      'acted_recently(path, "question")'
+      in inspect.getsource(daemon.assess), False)
+check("and the branch stands down when nothing is owed",
+      "nothing_owed(path, sit)" in inspect.getsource(daemon.assess), True)
+
+
+print("\n33. this suite leaves nothing behind in anybody's real state")
 check("its data lives in the temp folder",
       os.environ["BRIDGE_DATA"].startswith(TMP), True)
 check("so does the client's, so no transcript lands in the real store",
@@ -2263,7 +2344,7 @@ note("windows opened in the whole run", len(launches()))
 
 SRV.shutdown()
 
-print("\n33. the pinned links stay fresh without a word in the chat")
+print("\n34. the pinned links stay fresh without a word in the chat")
 print("    The owner: the links have to BE current, and he does not want a")
 print("    message about it. Editing a pinned message is silent, so the")
 print("    whole job is making sure the edit happens - and that the pin is")

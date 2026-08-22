@@ -2200,6 +2200,57 @@ def call_human_about(path, question_tail):
     return "called you"
 
 
+def nothing_owed(path, sit):
+    """Is there genuinely nothing for this executor to be holding?
+
+    The loop is off, no report is awaiting a verdict, no task is queued for
+    it. An executor idle at its prompt in that state is not a session
+    waiting for an answer - it is a session that has finished, which is the
+    whole point of a `stop` verdict.
+
+    assess() checks `paused` but never checked this, so after a stop the
+    poll went on reading the executor's last exchange, deciding it looked
+    like a question, and asking the planner to "decide which this is". The
+    planner's own window on 2026-08-22 got that twice after report 172 was
+    closed at 14:53, and the same thing repeated about twenty times through
+    the night of 08-21. Nothing was owed on any of those occasions.
+    """
+    if sit.get("loop"):
+        return False
+    if sit.get("reviewing") or sit.get("verdict_in_flight"):
+        return False
+    if PENDING.get(norm(path)):
+        return False
+    if (STATE.get("tasks_open") or {}).get(norm(path)):
+        return False
+    return True
+
+
+def question_is_new(path, question_tail):
+    """Is this a different wait from the one already passed on?
+
+    Latched on the FACT, not on a clock. acted_recently(path, "question")
+    answers "has it been fifteen minutes", which is a different question
+    from "is this the same thing I already asked about" - so the same
+    nudge went to the planner every fifteen minutes with no new fact in it,
+    and the planner's answers are not facts either: replying does not
+    change the executor's last exchange, so the next tick sent it again.
+
+    A genuinely different question has a different fingerprint and gets
+    asked. Everything that ends the wait - a task, a report, the loop
+    coming back on - clears the mark through the callers that already
+    record those, so the next real wait is heard.
+    """
+    fp = question_fingerprint(question_tail)
+    key = "asked:%s" % norm(path)
+    with _lock:
+        if (STATE.get(key) or {}).get("fp") == fp:
+            return False
+        STATE[key] = {"fp": fp, "at": time.time()}
+        save_state()
+    return True
+
+
 def ask_planner_about(path, question_tail, ex):
     """Hand the executor's question to the planner, with the numbers.
 
@@ -2457,6 +2508,12 @@ def assess(path):
                % name, path=path)
         return done("the executor between pieces", "told you")
 
+    if looks_like_a_question(ex["tail"]) and nothing_owed(path, sit):
+        # The loop is off and nothing is queued: an idle executor here has
+        # finished, it is not waiting for an answer. Saying otherwise sent
+        # the planner a nudge with no fact in it.
+        return done("the executor idle with the loop off and nothing owed")
+
     if looks_like_a_question(ex["tail"]):
         # Tier 3, unchanged: the poll keeps its cadence and its reach. The
         # only addition is that an explicit hand-back to the owner rings a
@@ -2465,7 +2522,7 @@ def assess(path):
                                      for r in (pl["tail"] or [])[-3:])) \
                 and note_owner_question(path, ex["tail"]):
             call_human_about(path, ex["tail"])
-        if acted_recently(path, "question"):
+        if not question_is_new(path, ex["tail"]):
             return done("an unanswered question, already passed on")
         return done("the executor waiting on an answer",
                     ask_planner_about(path, ex["tail"], ex))
@@ -5446,11 +5503,22 @@ def note_stopfail(path, role, reason, kept):
         save_state()
 
 
+def clear_question_mark(path):
+    """A new report, or the loop coming back on, ends the old wait."""
+    with _lock:
+        if STATE.pop("asked:%s" % norm(path), None) is not None:
+            save_state()
+
+
 def note_stop_seen(path, role):
     """A turn that did finish. What tells the check below there was one."""
     with _lock:
         STATE.setdefault("stop_seen", {})["%s|%s" % (norm(path), role)] = \
             time.time()
+        # A finished turn is a new fact: whatever the executor was
+        # waiting on before, this is not that same wait any more.
+        if role == "executor":
+            STATE.pop("asked:%s" % norm(path), None)
         save_state()
 
 
@@ -5509,8 +5577,11 @@ def note_task_sent(path, text="", mid_turn=False):
     """
     with _lock:
         # Work going out is the end of "parked on you", so the next wait
-        # with nothing running is allowed to ring again.
+        # with nothing running is allowed to ring again - and it ends the
+        # executor's question too: a task IS the answer, so the next real
+        # question is heard rather than mistaken for the old one.
         (STATE.get("waiting_on_you") or {}).pop(norm(path), None)
+        STATE.pop("asked:%s" % norm(path), None)
         STATE.setdefault("last_task", {})[norm(path)] = time.time()
         if mid_turn:
             book = STATE.setdefault("tasks_open", {}).setdefault(norm(path), [])

@@ -2551,6 +2551,61 @@ def floors(path, role):
             and (h.get("session") or "") == sid]
 
 
+def compaction_survivable(path, role):
+    """The largest size this half has compacted SUCCESSFULLY at, or None.
+
+    A compaction record gets an `after` when the session drew itself again
+    at a smaller size - so an entry with a floor is proof that a compaction
+    of that size went through and the session carried on. That is the only
+    honest evidence of what this client can summarise.
+
+    Why it exists: the bridge had a "wall" of window - RESERVED_TOKENS, a
+    reserve nobody here measured, and rules 1a and 1b replaced sessions
+    before it. On 2026-08-22 the record was counted: 41 compactions, and
+    **37 of them recorded a floor** - 33 of those at 995k or above, the
+    highest successful one at 1 001 318 on a 1 000 000 window. So the
+    reserve model is refuted by 33 measurements above the line it drew, and
+    the two deaths of that day sit BELOW the best success: size is not what
+    separated them, and they are a rare fault rather than a rule.
+
+    The consequence was the owner's complaint in one sentence. Before
+    2026-08-21 the bridge stood aside and sessions compacted at 998k and
+    lived; after it, the branches replaced them first - the bridge took
+    compaction away from the sessions. This is what puts it back.
+
+    No margin is added on purpose. A size at or below a proven success is
+    proven; above it is simply unproven, and that is where caution belongs.
+    """
+    best = None
+    hist = (STATE.get("compactions") or {}).get(
+        "%s|%s" % (norm(path), role)) or []
+    for row in hist:
+        if row.get("tokens") and row.get("after"):
+            n = int(row["tokens"])
+            if best is None or n > best:
+                best = n
+    return best
+
+
+def compaction_too_big(path, role, window):
+    """Above what size has a compaction never been shown to work here?
+
+    Measured first, assumed only when there is nothing to measure. With no
+    successful compaction on record the old reserve arithmetic is all there
+    is, and it stays as the fallback - but it no longer overrules evidence.
+    """
+    proven = compaction_survivable(path, role)
+    if proven:
+        # One turn above the best proven size, because a sample IS an
+        # overshoot: the threshold sits below it and a session ordinarily
+        # ends a turn above its own last compaction size without being in
+        # any trouble at all. Case 22 is that shape - compacted at 150k,
+        # sitting at 168k, entirely routine - and without this allowance
+        # the branches would call it doomed.
+        return proven + LARGEST_TURN_SEEN
+    return max(0, int(window or 0) - RESERVED_TOKENS) or None
+
+
 def compaction_sizes(path, role):
     """The sizes this session was seen compacting at, oldest first.
 
@@ -2854,8 +2909,17 @@ def plan_for(sess, path):
     #
     #     Rule 1b below is untouched and stays the emergency: this one is
     #     meant to make sure it is never reached.
-    if compact and wv.get("window") and not wv.get("assumed"):
-        cannot_compact = compact > wv["window"] - RESERVED_TOKENS
+    #     MEASURED, not assumed, since 2026-08-22. This used to compare the
+    #     point against window - RESERVED_TOKENS, a reserve nobody here had
+    #     measured - and the record refutes it: 37 compactions on file
+    #     recorded a floor, which is proof they went through, 33 of them at
+    #     995k or above and the best at 1 001 318 on a 1M window. Replacing
+    #     a session below a size it has demonstrably survived is taking its
+    #     compaction away from it, which is exactly what the owner saw.
+    ceiling = compaction_too_big(path, sess.get("role") or "executor",
+                                 wv.get("window"))
+    if compact and ceiling and wv.get("window") and not wv.get("assumed"):
+        cannot_compact = compact > ceiling
         margin = (wv.get("worst_turn") or 0) * EARLY_ROTATE_TURNS
         if cannot_compact and margin and used + margin >= compact:
             return {"do": "handover", "pct": pct, "compactions": done,
@@ -2913,7 +2977,15 @@ def plan_for(sess, path):
     #     get one turn past 996k without already being dead. A point above
     #     the wall is not a plan; it is the pair's real problem, and it is
     #     what autocompact_pct exists to move (-> DECISIONS.md 5.16, 5.22).
-    wall = wv.get("wall")
+    #     The line is MEASURED too. It used to be wv["wall"] - the window
+    #     minus an unmeasured reserve - and 33 successful compactions sit
+    #     above that line, so it was replacing sessions that would have
+    #     summarised themselves perfectly well. A compaction that really
+    #     does fail has its own immediate path: StopFailure with an
+    #     invalid/context error rotates the executor there and then, which
+    #     is when a replacement is genuinely earned.
+    wall = compaction_too_big(path, sess.get("role") or "executor",
+                              wv.get("window"))
     if compact and wall and used >= wall:
         coming = compact < wall and used - compact <= LARGEST_TURN_SEEN
         if not coming:

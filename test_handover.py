@@ -3820,8 +3820,14 @@ check("1b tests position, not distance",
       'if compact and wall and used >= wall:' in _ps, True)
 check("and the exception beside it is about the point, not a turn count",
       "compact < wall and used - compact <= LARGEST_TURN_SEEN" in _ps, True)
-check("it reads the wall the same view already computed",
-      'wall = wv.get("wall")' in _ps and "used >= wall" in _ps, True)
+print("   and since 2026-08-22 the line it reads is MEASURED, not the")
+print("   window minus an unmeasured reserve: 33 compactions succeeded")
+print("   above that reserve, so it was replacing sessions that would have")
+print("   summarised themselves perfectly well (case 96)")
+check("it asks what has actually been survived here",
+      "compaction_too_big(path, sess.get(\"role\")" in _ps, True)
+check("and still fires on position, not on distance", "used >= wall" in _ps,
+      True)
 check("and the exception needs the point below the wall as well",
       "compact < wall and used - compact <= LARGEST_TURN_SEEN" in _ps, True)
 print("   and a session with no compaction point at all decides nothing")
@@ -4416,6 +4422,90 @@ check("assess stands down on something running",
 check("on a report under review", 'sit["reviewing"]' in _as95, True)
 check("on a verdict in flight", 'sit["verdict_in_flight"]' in _as95, True)
 check("and on a handover already under way", 'sit["handover"]' in _as95, True)
+
+print("\n96. what a session has survived outranks a reserve nobody measured")
+print("    The owner, 2026-08-22: find after WHAT compaction stopped")
+print("    happening. The record answers it, and the answer is us. Of 41")
+print("    compactions on file, 37 recorded a FLOOR - proof the session")
+print("    shrank and carried on - and 33 of those were at 995k or above,")
+print("    the best of them at 1 001 318 on a 1 000 000 window")
+print("   so the old line, window minus a 33k reserve, had 33 successful")
+print("   compactions standing above it. Before 2026-08-21 the bridge stood")
+print("   aside and those sessions compacted and lived; after it, rules 1a")
+print("   and 1b replaced them first. The bridge took their compaction away")
+daemon.STATE.clear()
+daemon.STATE.update({"sessions": {}, "windows": {}, "compactions": {},
+                     "last_session": {}, "inflight": {}, "loops": {},
+                     "paused": {}, "pids": {}})
+daemon.PROCTRACK.clear()
+_k96 = daemon.norm(PATH)
+check("with nothing measured it still falls back to the reserve",
+      daemon.compaction_too_big(PATH, "executor", 1000000),
+      1000000 - daemon.RESERVED_TOKENS)
+print("   a compaction with no floor is not evidence of anything: the")
+print("   session may have died in it, which is exactly what a missing")
+print("   floor means")
+daemon.STATE["compactions"]["%s|executor" % _k96] = [
+    {"at": "2026-08-21 20:50", "tokens": 996305, "session": "a"}]
+check("a floorless sample proves nothing",
+      daemon.compaction_survivable(PATH, "executor"), None)
+check("so the fallback still applies",
+      daemon.compaction_too_big(PATH, "executor", 1000000),
+      1000000 - daemon.RESERVED_TOKENS)
+print("   a floor is the proof, and it moves the line UP")
+daemon.STATE["compactions"]["%s|executor" % _k96].append(
+    {"at": "2026-08-18 17:23", "tokens": 999920, "after": 188013,
+     "session": "b"})
+check("the best proven size is the one with a floor",
+      daemon.compaction_survivable(PATH, "executor"), 999920)
+check("and the line sits one turn above it",
+      daemon.compaction_too_big(PATH, "executor", 1000000),
+      999920 + daemon.LARGEST_TURN_SEEN)
+print("   one turn, because a sample IS an overshoot: the threshold is")
+print("   below it, and a session ordinarily ends a turn above its own last")
+print("   compaction size without being in trouble at all")
+
+print("   the effect on the two branches, on the real numbers of the pair")
+print("   that prompted this: point 996 305, window 1M, worst turn 39 330")
+cal = store.load_calibration()
+cal[store.calib_key("opus 5", PATH)] = {
+    "ceiling_pct": 97.0, "buffer_tokens": 33000, "misses": 0,
+    "clean_streak": 0, "multiplier": 3.0, "wall_history_tokens": None,
+    "compact_at_tokens": 996305, "compact_at_window": 1000000, "how": "test"}
+store.save_calibration(cal)
+daemon.STATE["pids"]["%s|executor" % _k96] = {
+    "pid": 1, "at": time.time(), "registered": True, "autocompact": 70,
+    "model_req": "opus"}
+
+
+def _s96(used):
+    s = {"role": "executor", "path": _k96, "session_id": "s96",
+         "model": "Opus 5", "window": 1000000, "window_observed": True,
+         "context_tokens": used, "turn_costs": [33877, 15151, 39330, 32199]}
+    daemon.STATE["sessions"]["executor:s96"] = s
+    return s
+
+
+check("at 930k it is left alone to compact",
+      daemon.plan_for(_s96(930000), PATH)["do"] != "handover", True)
+check("and at 996k too - it has survived that size",
+      daemon.plan_for(_s96(996000), PATH)["do"] != "handover", True)
+print("   which is the whole point: the bridge stands aside again, and the")
+print("   session gets to do the thing everybody wants it to do")
+print("   a replacement is still earned by a compaction that really fails -")
+print("   StopFailure with an invalid/context error rotates there and then")
+_he = inspect.getsource(daemon.handle_event)
+check("a real failed compaction still rotates immediately",
+      'args=(path, "hit the wall")' in _he, True)
+check("on the error type, not on a size",
+      '"invalid" in etype or "context" in etype' in _he, True)
+
+print("   and with NO proven history the caution is unchanged, so a fresh")
+print("   pair is no worse off than before")
+daemon.STATE["compactions"]["%s|executor" % _k96] = []
+check("no history, the old reserve line",
+      daemon.compaction_too_big(PATH, "executor", 1000000),
+      1000000 - daemon.RESERVED_TOKENS)
 
 print("\n" + ("-" * 60))
 if FAILED:

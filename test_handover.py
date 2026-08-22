@@ -3376,8 +3376,14 @@ def _boom(*a, **k):
 
 
 daemon.best_session = _boom
-check("an unreadable state means say nothing",
-      daemon.pair_moved_since(_mp, "executor", _when), True)
+print("   REVERSED on 2026-08-22: unreadable is no longer an alibi. It was")
+print("   'cannot tell, say nothing', which is one more way an unnameable")
+print("   witness silences a real death. The consequence changed first -")
+print("   the answer to a dead turn is now revive_lost_turn handing the")
+print("   work back, which is cheap and safe to do once too often, so")
+print("   silence is the expensive mistake (case 97)")
+check("an unreadable state is not an alibi",
+      daemon.pair_moved_since(_mp, "executor", _when), False)
 daemon.best_session = _saved_best
 check("and a missing timestamp is not a claim either way",
       daemon.pair_moved_since(_mp, "executor", 0), False)
@@ -3387,7 +3393,7 @@ _cl = inspect.getsource(daemon.check_lost_turn)
 check("the grace is still stopfail_grace",
       "stopfail_grace" in _cl, True)
 check("and the check happens before the message, not instead of the grace",
-      _cl.index("pair_moved_since") < _cl.index('notify("crash"'), True)
+      _cl.index("moved_witness") < _cl.index('notify("crash"'), True)
 check("a pair that came back is dropped from the book, not just skipped",
       'STATE["stopfail"].pop(key, None)' in _cl, True)
 
@@ -3950,7 +3956,7 @@ print("   part one, and it is a miss in the fix of the same morning:")
 print("   pair_moved_since read the RAW inflight dict, so the leaked record")
 print("   that case 88 is about still answered 'moving' and turned the")
 print("   lost-turn message into a journal line")
-_pms = inspect.getsource(daemon.pair_moved_since)
+_pms = inspect.getsource(daemon.moved_witness)
 check("it goes through inflight_live now", "inflight_live(path)" in _pms, True)
 check("and not through the raw dict",
       'STATE.get("inflight") or {}).get(norm(path))' in _pms, False)
@@ -4301,7 +4307,7 @@ check("its own finished turn is its own alibi",
       daemon.pair_moved_since(PATH, "planner", _died), True)
 
 print("   the gate is written where it can be read")
-_pm = inspect.getsource(daemon.pair_moved_since)
+_pm = inspect.getsource(daemon.moved_witness)
 check("the two project-keyed witnesses are executor-only",
       'if role == "executor":' in _pm, True)
 check("stop_seen stays role-keyed for both",
@@ -4506,6 +4512,55 @@ daemon.STATE["compactions"]["%s|executor" % _k96] = []
 check("no history, the old reserve line",
       daemon.compaction_too_big(PATH, "executor", 1000000),
       1000000 - daemon.RESERVED_TOKENS)
+
+print("\n97. a witness that cannot be named grants no alibi")
+print("    Three dead turns in two days were swallowed by the same")
+print("    reassuring sentence - 'the pair is moving again - not telling' -")
+print("    and none of the three pairs had moved. The line never said WHO")
+print("    said so, which is how it could be wrong three times quietly")
+_mw97 = inspect.getsource(daemon.moved_witness)
+check("the witness names itself and its stamp",
+      "is past the death at" in _mw97, True)
+check("and the journal line carries it",
+      "Witness: %s" in inspect.getsource(daemon.check_lost_turn), True)
+print("   the session's own seen_at is not a witness at all: EVERY event")
+print("   stamps it, including the fatal one, so it cannot show life")
+check("seen_at is not consulted", 'sess.get("seen_at")' in _mw97, False)
+print("   and cannot-tell is no longer silence. Safe to reverse only")
+print("   because the consequence changed: a dead turn is answered by")
+print("   handing the work back, not by waking somebody")
+check("an unreadable witness is not an alibi",
+      _mw97.split("except Exception")[-1].strip().endswith('return ""'), True)
+print("   the ordering that made the death its own alibi, locked down:")
+_he97 = inspect.getsource(daemon.handle_event)
+check("the death is stamped after everything the death writes",
+      _he97.index('touch_session(event, state="error")')
+      < _he97.index("note_stopfail(path, role, reason, kept)"), True)
+
+print("   named witnesses still work when they are real")
+daemon.STATE.clear()
+daemon.STATE.update({"sessions": {}, "stop_seen": {}, "last_task": {},
+                     "inflight": {}, "loops": {}, "paused": {}, "pids": {},
+                     "last_session": {}})
+daemon.PROCTRACK.clear()
+_k97 = daemon.norm(PATH)
+_d97 = time.time() - 300
+check("nothing moved, so nothing is claimed",
+      daemon.moved_witness(PATH, "executor", _d97), "")
+daemon.STATE["stop_seen"]["%s|executor" % _k97] = _d97 + 60
+_w97 = daemon.moved_witness(PATH, "executor", _d97)
+check("a finished turn is a witness", bool(_w97), True)
+check("and it says which one, and when",
+      "stop_seen" in _w97 and "past the death at" in _w97, True)
+print("   a task delivered to the executor is one too, and belongs only to")
+print("   the executor - the planner has no Bash and takes no tasks")
+daemon.STATE["stop_seen"] = {}
+daemon.STATE["last_task"][_k97] = _d97 + 30
+check("the executor has an alibi",
+      "a task went out at" in daemon.moved_witness(PATH, "executor", _d97),
+      True)
+check("the planner does not",
+      daemon.moved_witness(PATH, "planner", _d97), "")
 
 print("\n" + ("-" * 60))
 if FAILED:

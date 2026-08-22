@@ -2078,7 +2078,99 @@ check("and the rest are not handed over",
       ["alpha", "beta", "gamma"])
 
 
-print("\n30. this suite leaves nothing behind in anybody's real state")
+
+print("\n30. a death is not its own alibi - driven through the real endpoint")
+print("    2026-08-22 11:37:55, an executor's turn died. 11:41:01, the")
+print("    bridge wrote 'the pair is moving again - not telling'. Between")
+print("    those stamps the journal holds NOT ONE event for that pair.")
+print("    The witness was the death itself: note_stopfail stamped the")
+print("    death, then touch_session stamped seen_at microseconds later,")
+print("    and 'seen_at > when' was true by the width of two statements")
+print("   this case exists because the two repairs before it were accepted")
+print("   on a RECONSTRUCTION over a snapshot of state, and a snapshot")
+print("   cannot show the order in which one event writes its own stamps.")
+print("   So: a real POST to /event, then a real check tick")
+ALIBI = os.path.join(TMP, "alibi-project")
+os.makedirs(ALIBI, exist_ok=True)
+post("/config", {"projects": {A: {}, B: {}, C: {}, ALIBI: {}}})
+_sid32 = "alibi-exec-1"
+with daemon._lock:
+    daemon.STATE.setdefault("sessions", {})["executor:%s" % _sid32[:8]] = {
+        "role": "executor", "path": canon(ALIBI), "session_id": _sid32,
+        "model": "Opus 5", "window": 1000000, "window_observed": True,
+        "context_tokens": 300000, "state": "idle",
+        "last_seen": daemon.now(), "seen_at": time.time(),
+        "turn_costs": [30000]}
+    daemon.STATE.setdefault("last_session", {})[
+        "%s|executor" % canon(ALIBI)] = _sid32
+    daemon.STATE.setdefault("loops", {})[canon(ALIBI)] = {
+        "active": True, "iteration": 1}
+    daemon.STATE["stop_seen"] = {k: v for k, v in
+                                 (daemon.STATE.get("stop_seen") or {}).items()
+                                 if not k.startswith(canon(ALIBI))}
+    daemon.save_state()
+
+print("   the death goes in the way a real one does: a POST to /event")
+_r32 = post("/event", {"hook_event_name": "StopFailure", "cwd": ALIBI,
+                       "role": "executor", "session_id": _sid32,
+                       "error_type": "server_error",
+                       "error": "server_error"})
+check("the bridge took the StopFailure", _r32.get("status"), 200)
+_rec32 = (daemon.STATE.get("stopfail") or {}).get(
+    "%s|executor" % canon(ALIBI))
+check("and it recorded the death", bool(_rec32), True)
+
+print("   now the question the whole bug turns on: does anything claim the")
+print("   pair moved, when the only thing that happened IS the death?")
+_w32 = daemon.moved_witness(ALIBI, "executor", (_rec32 or {}).get("at", 0))
+check("no witness can be named", _w32, "")
+print("   before 2026-08-22 the session's own seen_at answered here, and it")
+print("   is stamped by every event including the fatal one - which is why")
+print("   it is not consulted at all any more")
+_mw = inspect.getsource(daemon.moved_witness)
+check("seen_at is no longer a witness", 'sess.get("seen_at")' in _mw, False)
+check("and the death is stamped after everything the death writes",
+      inspect.getsource(daemon.handle_event).index("touch_session(event, "
+                                                   "state=\"error\")")
+      < inspect.getsource(daemon.handle_event).index(
+          "note_stopfail(path, role, reason, kept)"), True)
+
+print("   and the real tick, not a snapshot: past the grace, check_lost_turn")
+print("   must NOT swallow it - it must pick the turn back up")
+_told32 = []
+_realn32, daemon.notify = daemon.notify, \
+    lambda kind, text, **kw: _told32.append(kind)
+try:
+    with daemon._lock:
+        daemon.STATE["stopfail"]["%s|executor" % canon(ALIBI)]["at"] = \
+            time.time() - 400
+        daemon.save_state()
+    daemon.check_lost_turn(ALIBI)
+    _after = (daemon.STATE.get("stopfail") or {}).get(
+        "%s|executor" % canon(ALIBI))
+    check("the death was not swallowed", bool(_after), True)
+    check("the bridge picked it back up instead of telling anyone",
+          (_after or {}).get("revives"), 1)
+    check("and nobody was woken on the first attempt", _told32, [])
+
+    print("   the sabotage: give the death its own alibi back - stamp the")
+    print("   session as seen just after it - and the swallow returns")
+    with daemon._lock:
+        daemon.STATE["stopfail"]["%s|executor" % canon(ALIBI)] = {
+            "at": time.time() - 400, "reason": "server_error", "kept": None,
+            "role": "executor", "told": False}
+        daemon.STATE.setdefault("stop_seen", {})[
+            "%s|executor" % canon(ALIBI)] = time.time() - 399
+        daemon.save_state()
+    _sab = daemon.moved_witness(ALIBI, "executor", time.time() - 400)
+    check("a stamp one second past the death IS an alibi", bool(_sab), True)
+    check("and it names itself, so the journal reads as a bug report",
+          "stop_seen" in _sab and "past the death at" in _sab, True)
+finally:
+    daemon.notify = _realn32
+
+
+print("\n31. this suite leaves nothing behind in anybody's real state")
 check("its data lives in the temp folder",
       os.environ["BRIDGE_DATA"].startswith(TMP), True)
 check("so does the client's, so no transcript lands in the real store",
@@ -2090,7 +2182,7 @@ note("windows opened in the whole run", len(launches()))
 
 SRV.shutdown()
 
-print("\n31. the pinned links stay fresh without a word in the chat")
+print("\n32. the pinned links stay fresh without a word in the chat")
 print("    The owner: the links have to BE current, and he does not want a")
 print("    message about it. Editing a pinned message is silent, so the")
 print("    whole job is making sure the edit happens - and that the pin is")

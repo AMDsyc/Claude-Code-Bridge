@@ -5862,60 +5862,88 @@ def nudge_stalled(path, role, since, owed=""):
     return "called you"
 
 
-def pair_moved_since(path, role, when):
-    """Any sign of life in this pair since `when`? Cheap signals only.
+def moved_witness(path, role, when):
+    """WHO says this pair moved since `when`, and when they say it happened.
 
-    Used to re-ask, at the moment of speaking, a question that was answered
-    when the message was decided on. Four independent witnesses, any one of
-    which means the pair is not the stopped thing the message would call it:
+    Returns a sentence naming the witness and its stamp, or "" for nobody.
+    The name is not decoration: a witness that cannot be named does not get
+    to grant an alibi, and the sentence goes into the journal line, so a
+    false alibi becomes a bug report the moment it is written.
 
-      a finished turn      STATE["stop_seen"] moved past `when`
-      a delivery           a task went out after it
-      something running    a tracked command or the session's own state
-      a growing transcript the window is writing
+    THE DEATH IS NOT ITS OWN ALIBI, and that is why this was rewritten. On
+    2026-08-22 at 11:37:55 an executor's turn died; at 11:41:01 the bridge
+    wrote "the pair is moving again - not telling", and between those two
+    stamps the journal holds NOT ONE event for that pair. The witness was
+    the death itself: the StopFailure branch called note_stopfail, which
+    stamps the death at time.time(), and then touch_session, which stamps
+    seen_at at time.time() microseconds later - so "seen_at > when" was true
+    by the width of two statements.
 
-    Errs towards SILENCE: anything unreadable answers "moved", because the
-    cost of a message wrongly withheld is a line in the journal, and the
-    cost of one wrongly sent is a person told a working pair is dead.
+    Third time in two days that a dead turn was swallowed by a false alibi.
+    The first two repairs - a leaked tracked record (5.24), then witnesses
+    keyed by pair instead of by role (5.30) - were both accepted on a
+    RECONSTRUCTION over a snapshot of state, and a snapshot cannot show the
+    order in which one event writes its own stamps. See 5.33.
+
+    So `when` is taken AFTER everything the death writes, and the session's
+    own seen_at is not consulted at all: it is stamped by every event
+    including the fatal one, which makes it useless as evidence of life.
+    What is left are witnesses that only a LIVING pair produces.
+
+    Cannot tell -> "" -> NOT an alibi. That is the opposite of what this did
+    before, and the reason it changed is that the consequence changed: the
+    answer to a dead turn is no longer "wake somebody", it is
+    revive_lost_turn handing the work back, which is cheap and safe to do
+    once too often. Silence is the expensive mistake now.
     """
     if not when:
-        return False
+        return ""
+
+    def stamp(t):
+        return time.strftime("%H:%M:%S", time.localtime(t))
+
     try:
         key = "%s|%s" % (norm(path), role)
-        if float((STATE.get("stop_seen") or {}).get(key) or 0) > when:
-            return True
-        # THE NEXT TWO WITNESSES BELONG TO THE EXECUTOR AND TO NOBODY ELSE.
-        # Both are keyed by project, and asked about a planner they answer
-        # with the executor's life: `last_task` is when work was delivered to
-        # the EXECUTOR, and a tracked command is a Bash tool, which only the
-        # executor has - disallow_for() denies the planner Bash outright. So
-        # a working executor was an alibi for a dead planner, which is the
-        # same class already caught in stalled(): keyed by project, so one
-        # half silenced the check for the other.
-        #
-        # It is not hypothetical. All four turns that died on 2026-08-22
-        # (01:28:54 planner, 05:07:16, 08:54:01, 09:02:51 executor) had a
-        # leaked `mkdir` record standing in this dict, and the planner death
-        # at 01:28:54 had a demonstrably busy executor beside it. Every one
-        # of them answered "moving" here and the medicine never ran.
+        seen = float((STATE.get("stop_seen") or {}).get(key) or 0)
+        if seen > when:
+            return ("stop_seen %s is past the death at %s"
+                    % (stamp(seen), stamp(when)))
+        # These two belong to the EXECUTOR and to nobody else: last_task is
+        # when work was delivered to it, and a tracked command is a Bash
+        # tool, which disallow_for denies the planner outright. Asked about
+        # a planner they used to answer with the executor's life (-> 5.30).
         if role == "executor":
-            if float((STATE.get("last_task") or {}).get(norm(path))
-                     or 0) > when:
-                return True
-            # inflight_live, not the raw dict - the leak that made this
-            # answer "moving" for days (-> DECISIONS.md 5.24, 5.25).
-            if inflight_live(path):
-                return True
-        sess = best_session(path, role) or {}
-        if float(sess.get("seen_at") or 0) > when:
-            return True
-        sid = last_session_id(path, role) or sess.get("session_id")
+            task = float((STATE.get("last_task") or {}).get(norm(path)) or 0)
+            if task > when:
+                return ("a task went out at %s, after the death at %s"
+                        % (stamp(task), stamp(when)))
+            live = inflight_live(path)
+            if live:
+                return ("a tracked command is running: %s"
+                        % brief((live[0] or {}).get("cmd"), 40))
+        sid = last_session_id(path, role) or \
+            (best_session(path, role) or {}).get("session_id")
         tp = sessions.transcript_of(sid) if sid else None
-        if tp and os.path.isfile(tp) and os.path.getmtime(tp) > when:
-            return True
-    except Exception:
-        return True                  # cannot tell -> say nothing
-    return False
+        if tp and os.path.isfile(tp):
+            mt = os.path.getmtime(tp)
+            if mt > when:
+                return ("its transcript grew at %s, after the death at %s"
+                        % (stamp(mt), stamp(when)))
+    except Exception as exc:
+        # Unreadable is not an alibi. It used to be - "cannot tell, say
+        # nothing" - which is one more way an unnameable witness silences a
+        # real death.
+        store.journal("turn_lost", "Could not read the witnesses for %s / %s "
+                      "- that is not an alibi, so this is not being "
+                      "swallowed: %s" % (project_name(path), role, exc),
+                      project_name(path), role, "log", project_dir=path)
+        return ""
+    return ""
+
+
+def pair_moved_since(path, role, when):
+    """Did anything move at all? The yes/no form of moved_witness."""
+    return bool(moved_witness(path, role, when))
 
 
 # ---------------------------------------------------------------------
@@ -6245,16 +6273,23 @@ def check_lost_turn(path):
         #
         # The grace itself is right and is not touched: it exists to let a
         # late report catch up. What was missing is the second look.
-        if pair_moved_since(path, role, rec.get("at", 0)):
+        # A witness that cannot be NAMED does not grant an alibi. The line
+        # carries who said the pair moved and when they say it happened, so
+        # that a false alibi reads as the bug report it is instead of a
+        # reassuring sentence. Three of these were written over two days
+        # about pairs that had not moved at all.
+        witness = moved_witness(path, role, rec.get("at", 0))
+        if witness:
             with _lock:
                 STATE["stopfail"].pop(key, None)
                 save_state()
             store.journal("turn_lost",
                           "%s / %s: the turn died at %s but the pair is "
-                          "moving again - not telling"
+                          "moving again - not telling. Witness: %s"
                           % (project_name(path), role,
                              time.strftime("%H:%M:%S",
-                                           time.localtime(rec.get("at", 0)))),
+                                           time.localtime(rec.get("at", 0))),
+                             witness),
                           project_name(path), role, "log", project_dir=path)
             continue
         name = project_name(path)
@@ -7158,13 +7193,21 @@ def handle_event(event):
 
     elif name == "StopFailure":
         reason, where, kept = stopfail_reason(event, path, role)
-        note_stopfail(path, role, reason, kept)
         # The classification below reads a short lowercase word; the reason
         # is a sentence written for a person. Both, because they answer
         # different questions - "which handling does this need" and "what
         # went wrong".
         etype = (event.get("error_type") or reason or "").lower()
         sess = touch_session(event, state="error")
+        # note_stopfail AFTER touch_session, and this order is load-bearing.
+        # It used to come first, so the death was stamped and THEN the same
+        # event stamped the session's seen_at microseconds later - and the
+        # check for "has anything moved since the death" read that stamp as
+        # movement. The death was its own alibi and a real death went
+        # unreported (-> DECISIONS.md 5.33). Taking the death's time after
+        # everything the death writes is what makes "later than the death"
+        # mean what it says.
+        note_stopfail(path, role, reason, kept)
         ref = sess if sess.get("model") else best_session(path, role)
         text = ("%s / %s stopped with an error: %s%s"
                 % (project, role, reason,

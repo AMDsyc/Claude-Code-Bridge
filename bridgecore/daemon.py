@@ -100,7 +100,10 @@ RULES_OPEN = ("=" * 70 + "\nRULES OF WORK - read them before you start. "
 RULES_OPEN_SHORT = ("=" * 70 + "\nRULES OF WORK, a reminder. The full "
                     "text with its checks is HONESTY.md\nin the "
                     "bridge folder; this session was given it\n" + "whole at its start.\n" + "=" * 70)
-RULES_CLOSE = ("=" * 70 + "\nEnd of the rules. Below is the %s itself.\n" + "=" * 70)
+RULES_CLOSE = ("=" * 70 + "\nAnswer a person in VISIBLE TEXT, as the LAST "
+               "block of your turn - text\nbefore a tool call is not shown, "
+               "and their message left without one is\nrule 27.\n"
+               + "End of the rules. Below is the %s itself.\n" + "=" * 70)
 _RULES_MISSING_TOLD = [False]
 
 # How much of the canon rides on a delivery, and why it is not the same every

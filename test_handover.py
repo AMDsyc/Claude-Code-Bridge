@@ -205,7 +205,8 @@ check("and it says why", "one of the two numbers is wrong" in (src or ""),
 check("plan decides nothing", daemon.plan_for(s, PATH)["do"], "unknown")
 
 print("\n11. automatic handovers still name exactly one role")
-import inspect                                          # noqa: E402
+import inspect
+import io                                          # noqa: E402
 src = inspect.getsource(daemon.handle_event)
 check("the Stop path hands over the executor alone",
       'roles_to_go = ("executor",)' in src, True)
@@ -4561,6 +4562,38 @@ check("the executor has an alibi",
       True)
 check("the planner does not",
       daemon.moved_witness(PATH, "planner", _d97), "")
+
+print("\n98. the rule a LIVE session can still receive")
+print("    2026-08-22: the owner wrote to a planner at 17:27:31 and got no")
+print("    answer - it read the question and went straight to work. Its")
+print("    transcript from there: thinking, tool_use, tool_use, thinking,")
+print("    tool_use ... and ZERO text blocks. He had asked the same thing")
+print("    at 12:56 - 'are you going to answer?'")
+print("   the instructions were fixed that morning and could not reach it:")
+print("   INSTRUCTIONS is returned in the MCP initialize handshake, read")
+print("   once when the channel starts. That session started 08-21 04:18.")
+print("   Same class as a live window carrying yesterday's threshold")
+_ch = io.open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "bridgecore", "channel.py"),
+              encoding="utf-8").read()
+check("the instructions ride on the handshake",
+      '"instructions": INSTRUCTIONS' in _ch, True)
+print("   so the rule goes where a live session DOES look every time: the")
+print("   preamble in front of every task and every report, read from disk")
+print("   on each delivery, no rotation needed")
+check("the close carries it", "VISIBLE TEXT" in daemon.RULES_CLOSE, True)
+check("and says where it must go", "LAST block of your turn"
+      in daemon.RULES_CLOSE, True)
+check("leaning on rule 27, not inventing a new one",
+      "rule 27" in daemon.RULES_CLOSE, True)
+_d = daemon.rules_for_delivery("report", "some-session-id")
+check("a report delivery carries it", "VISIBLE TEXT" in _d, True)
+check("and so does a task", "VISIBLE TEXT"
+      in daemon.rules_for_delivery("task", "some-session-id"), True)
+print("   it is short on purpose - it rides on every delivery, and the")
+print("   canon's own size rule says every character is paid for each time")
+check("three lines, not a paragraph",
+      daemon.RULES_CLOSE.count("\n") <= 6, True)
 
 print("\n" + ("-" * 60))
 if FAILED:

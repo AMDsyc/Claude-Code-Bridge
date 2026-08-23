@@ -2790,7 +2790,338 @@ _ok38 = _ok38.replace("in helper]", "in keys]")
 check("renaming the local is the whole fix",
       _shadows38(ast.parse(_ok38), {"helper"}), [])
 
-print("\n39. this suite leaves nothing behind in anybody's real state")
+print("\n39. queued is not delivered, and the answer said otherwise")
+print("    2026-08-23, on a live pair. Reports 68, 69 and 70 went out at")
+print("    10:45:29, 11:13:21 and 11:41:23, each journalled 'delivered to")
+print("    the channel'. The planner's own transcript shows all three")
+print("    arriving at 12:52:30 - three enqueue records inside one second,")
+print("    when the pipe unblocked. Two hours seven minutes of a window")
+print("    that was up, alive, and reading nothing")
+print("   the cause: notify_channel answers the moment the event is on its")
+print("   queue - by design, so a busy session cannot hang the daemon - and")
+print("   deliver_ex threw that answer away and called it delivery. A")
+print("   witness the act of asking produces (rule 30), on the SUCCESS")
+print("   path, which is why three days of hunting failures never saw it")
+from bridgecore import channel as _chan                        # noqa: E402
+
+_hold39 = threading.Event()
+_wrote39 = []
+_realw39 = _chan.rpc_write
+
+
+def _blocked_write(obj):
+    _hold39.wait(20)
+    _wrote39.append(obj)
+
+
+try:
+    _chan.rpc_write = _blocked_write
+    threading.Thread(target=_chan._drain_outbox, daemon=True).start()
+    print("   the window stops draining the pipe - the write blocks")
+    _seq39 = _chan.notify_channel("report 68", {"kind": "report"})
+    check("the event is queued and numbered", _seq39 > 0, True)
+    check("but the session has NOT taken it",
+          _chan.wait_written(_seq39, timeout=0.4), False)
+    _bv39 = _chan.backlog_view()
+    check("and the channel says how many are waiting",
+          (_bv39["backlog"], _bv39["oldest_sec"] > 0), (1, True))
+    print("   two more go out - this is 69 and 70, into the same pipe")
+    _chan.notify_channel("report 69", {"kind": "report"})
+    _seq70 = _chan.notify_channel("report 70", {"kind": "report"})
+    check("three waiting, none read", _chan.backlog_view()["backlog"], 3)
+    print("   the sabotage: let the pipe drain, and the same question must")
+    print("   answer the other way - otherwise the check could never fail")
+    _hold39.set()
+    check("now the session has taken them",
+          _chan.wait_written(_seq70, timeout=5.0), True)
+    check("and nothing is waiting", _chan.backlog_view()["backlog"], 0)
+    check("all three were really written", len(_wrote39), 3)
+finally:
+    _chan.rpc_write = _realw39
+    _hold39.set()
+
+print("   now the daemon side, through the real POST to a real channel")
+UNREAD = os.path.join(TMP, "unread-project")
+os.makedirs(UNREAD, exist_ok=True)
+post("/config", {"projects": {A: {}, B: {}, C: {}, UNREAD: {}}})
+_ans39 = {"body": {"ok": True, "written": False, "backlog": 3,
+                   "oldest_sec": 4000.0}}
+
+
+class _FakeChannel(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(n)
+        out = json.dumps(_ans39["body"]).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+
+
+_CH39 = ThreadingHTTPServer(("127.0.0.1", 0), _FakeChannel)
+_CHPORT39 = _CH39.server_address[1]
+threading.Thread(target=_CH39.serve_forever, daemon=True).start()
+try:
+    post("/channel/register", {"project": UNREAD, "role": "planner",
+                               "port": _CHPORT39, "pid": os.getpid(),
+                               "ppid": os.getppid()}, secret=True)
+    _ok39, _why39 = daemon.deliver_ex(UNREAD, "planner", "report 68",
+                                      {"kind": "report"})
+    check("the message is taken - it is queued, not lost", _ok39, True)
+    _rec39 = (daemon.STATE.get("chan_backlog") or {}).get(
+        "%s|planner" % canon(UNREAD))
+    check("and the bridge now knows the session has not read it",
+          (bool(_rec39), (_rec39 or {}).get("n")), (True, 3))
+    print("   past the grace it is not a clinch and must not be treated as")
+    print("   one: waking the OTHER half writes another report into the")
+    print("   same blocked pipe, which is where 69 and 70 came from")
+    with daemon._lock:
+        daemon.STATE["chan_backlog"]["%s|planner" % canon(UNREAD)]["since"] \
+            = time.time() - 4000
+        daemon.STATE.setdefault("loops", {})[canon(UNREAD)] = {
+            "active": True, "iteration": 68}
+        # Both windows are UP - that is the whole point: the pair is
+        # alive, the status lines tick, and one of them is reading
+        # nothing. Our own pid is the process this suite can be sure
+        # of, and the executor has been quiet long enough for the
+        # watchdog to look at it at all.
+        for _r39 in ("executor", "planner"):
+            _s39 = "%s-unread" % _r39[:4]
+            daemon.STATE["sessions"]["%s:%s" % (_r39, _s39[:8])] = {
+                "role": _r39, "path": canon(UNREAD),
+                "session_id": _s39, "model": "Opus 5",
+                "window": 1000000, "context_tokens": 200000,
+                "state": "idle", "last_seen": daemon.now(),
+                "seen_at": time.time() - 4000, "turn_costs": [20000]}
+            daemon.STATE.setdefault("last_session", {})[
+                "%s|%s" % (canon(UNREAD), _r39)] = _s39
+            daemon.STATE.setdefault("pids", {})[
+                "%s|%s" % (canon(UNREAD), _r39)] = {"pid": os.getpid()}
+        daemon.save_state()
+    _found39 = daemon.unread_channel(UNREAD)
+    check("the deaf half is named, and it is the planner",
+          (_found39 or {}).get("role"), "planner")
+    _told39, _sent39 = [], []
+    _rn39, daemon.notify = daemon.notify, \
+        lambda kind, text, **kw: _told39.append((kind, text))
+    _rd39, daemon.deliver = daemon.deliver, \
+        lambda *a, **kw: _sent39.append(a) or True
+    try:
+        _res39 = daemon.assess(UNREAD)
+        check("the bridge calls a person instead of waking anybody",
+              [k for k, _ in _told39], ["needs_you"])
+        check("and nobody was woken into the blocked channel", _sent39, [])
+        check("the message names the half and says nothing is lost",
+              ("planner" in _told39[0][1] and "Nothing is lost"
+               in _told39[0][1]) if _told39 else False, True)
+        print("   the sabotage: let the channel say the session read it, and")
+        print("   the whole branch must stand down")
+        _ans39["body"] = {"ok": True, "written": True, "backlog": 0,
+                          "oldest_sec": 0.0}
+        daemon.deliver_ex(UNREAD, "planner", "report 71", {"kind": "report"})
+        check("the record is cleared the moment a write lands",
+              ("%s|planner" % canon(UNREAD)) in
+              (daemon.STATE.get("chan_backlog") or {}), False)
+        check("and nothing is named any more", daemon.unread_channel(UNREAD),
+              None)
+    finally:
+        daemon.notify = _rn39
+        daemon.deliver = _rd39
+    print("   an older channel process - a window started before this")
+    print("   existed - answers 'ok' and cannot be asked. Silence is the")
+    print("   honest answer there, never a guess in either direction")
+    daemon.note_channel_write(UNREAD, "planner", b"ok")
+    check("an answer with no verdict in it records nothing",
+          ("%s|planner" % canon(UNREAD)) in
+          (daemon.STATE.get("chan_backlog") or {}), False)
+finally:
+    _CH39.shutdown()
+
+
+print("\n40. picking a dead turn back up has to hand something over")
+print("    2026-08-23 13:07:44, a live executor died with a")
+print("    server_error. The bridge tried twice, three minutes apart, and")
+print("    wrote 'found nothing to hand back (attempt 1 of 3, no one")
+print("    woken)', then the same again at 13:13:55. The record read")
+print("    tried: ['nothing', 'nothing'], which says there was nothing to")
+print("    hand back. There was: an idle executor with the loop on")
+print("   the cause: state_report takes five arguments and revive_lost_turn")
+print("   passed three, so the call raised TypeError before it reached the")
+print("   channel - every time since the repair shipped on 2026-08-22, 15")
+print("   lines of it - and a bare except that returns an empty string")
+print("   turned that into the same word the honest case uses")
+REVIVE = os.path.join(TMP, "revive-project")
+os.makedirs(REVIVE, exist_ok=True)
+post("/config", {"projects": {A: {}, B: {}, C: {}, REVIVE: {}}})
+_sid40 = "revive-exec-1"
+with daemon._lock:
+    daemon.STATE["sessions"]["executor:%s" % _sid40[:8]] = {
+        "role": "executor", "path": canon(REVIVE), "session_id": _sid40,
+        "model": "Opus 5", "window": 1000000, "window_observed": True,
+        "context_tokens": 300000, "state": "idle",
+        "last_seen": daemon.now(), "seen_at": time.time() - 900,
+        "turn_costs": [30000]}
+    daemon.STATE.setdefault("last_session", {})[
+        "%s|executor" % canon(REVIVE)] = _sid40
+    daemon.STATE.setdefault("loops", {})[canon(REVIVE)] = {
+        "active": True, "iteration": 12}
+    daemon.STATE.setdefault("pids", {})["%s|executor" % canon(REVIVE)] = {
+        "pid": os.getpid()}
+    daemon.STATE["stop_seen"] = {
+        k: v for k, v in (daemon.STATE.get("stop_seen") or {}).items()
+        if not k.startswith(canon(REVIVE))}
+    daemon.save_state()
+
+print("   the death goes in the way a real one does: a POST to /event")
+_r40 = post("/event", {"hook_event_name": "StopFailure", "cwd": REVIVE,
+                       "role": "executor", "session_id": _sid40,
+                       "error_type": "server_error", "error": "server_error"})
+check("the bridge took the StopFailure", _r40.get("status"), 200)
+_key40 = "%s|executor" % canon(REVIVE)
+_sent40 = []
+_told40 = []
+_rd40 = daemon.deliver
+_rn40 = daemon.notify
+daemon.deliver = lambda p_, r_, c_, m_: _sent40.append((r_, c_, m_)) or True
+daemon.notify = lambda kind, text, **kw: _told40.append(kind)
+try:
+    with daemon._lock:
+        daemon.STATE["stopfail"][_key40]["at"] = time.time() - 400
+        daemon.save_state()
+    daemon.check_lost_turn(REVIVE)
+    _rec40 = (daemon.STATE.get("stopfail") or {}).get(_key40) or {}
+    print("   the assertion that was missing: not that the bridge TRIED but")
+    print("   WHAT it handed over. The old case checked the counter, and the")
+    print("   counter moves whether or not anything was delivered")
+    check("something really went to the executor", len(_sent40), 1)
+    check("as a task, which is what a session picks up",
+          (_sent40[0][0], _sent40[0][2].get("kind")) if _sent40 else None,
+          ("executor", "task"))
+    check("and it is the state readout, not an empty nudge",
+          ("Context:" in _sent40[0][1] and "Compactions:" in _sent40[0][1])
+          if _sent40 else False, True)
+    check("the record says what was done, not nothing",
+          (_rec40.get("tried") or [None])[0],
+          "woke the executor with its state")
+    check("and nobody was rung on the first attempt", _told40, [])
+
+    print("   the sabotage: make the readout raise, the way it really did,")
+    print("   and the bridge must SAY so instead of writing nothing")
+    _rs40 = daemon.state_report
+
+    def _boom40(*a, **kw):
+        raise TypeError("boom")
+
+    daemon.state_report = _boom40
+    try:
+        with daemon._lock:
+            daemon.STATE["stopfail"][_key40]["at"] = time.time() - 900
+            daemon.save_state()
+        daemon.check_lost_turn(REVIVE)
+        _said40 = [e for e in store.recent_events(300)
+                   if "failed inside the bridge" in (e.get("text") or "")]
+        check("the failure is journalled, at a level that reaches the panel",
+              (len(_said40) >= 1,
+               _said40[-1].get("level") if _said40 else None),
+              (True, "warn"))
+        check("and it names the exception, not just that something broke",
+              "TypeError" in (_said40[-1].get("text") if _said40 else ""),
+              True)
+    finally:
+        daemon.state_report = _rs40
+finally:
+    daemon.deliver = _rd40
+    daemon.notify = _rn40
+
+print("   the standing guard, static and over every module: a call to a")
+print("   function defined in the same file must match its signature. This")
+print("   defect needed no incident to find - it was in the source from the")
+print("   day it shipped, and nothing was looking")
+
+
+def _sig40(tree):
+    out = {}
+    for n in tree.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            a = n.args
+            names = [x.arg for x in a.posonlyargs] + [x.arg for x in a.args]
+            out[n.name] = {
+                "names": names, "req": len(names) - len(a.defaults),
+                "star": a.vararg is not None, "kw": a.kwarg is not None,
+                "kwonly_req": [k.arg for k, d in
+                               zip(a.kwonlyargs, a.kw_defaults) if d is None]}
+    return out
+
+
+def _bad_calls40(src):
+    """Calls that cannot work, judged only where the answer is certain.
+
+    A starred argument at either end makes the count unknowable from the
+    source, and an unknowable one is passed over: a guard that refuses good
+    code is one somebody switches off.
+    """
+    tree = ast.parse(src)
+    table = _sig40(tree)
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        if not isinstance(f, ast.Name) or f.id not in table:
+            continue
+        sig = table[f.id]
+        if any(isinstance(x, ast.Starred) for x in node.args):
+            continue
+        if any(k.arg is None for k in node.keywords):
+            continue
+        given = len(node.args)
+        named = set(k.arg for k in node.keywords)
+        filled = set(sig["names"][:given]) | named
+        missing = tuple(x for x in sig["names"][:sig["req"]]
+                        if x not in filled)
+        extra = given > len(sig["names"]) and not sig["star"]
+        unknown = () if sig["kw"] else tuple(
+            k for k in sorted(named)
+            if k not in sig["names"] and k not in sig["kwonly_req"])
+        if missing or extra or unknown:
+            out.append((f.id, node.lineno,
+                        missing or (("too many",) if extra else unknown)))
+    return out
+
+
+_HERE40 = os.path.dirname(os.path.abspath(__file__))
+_bad40 = {}
+for _m40 in ("daemon", "store", "sessions", "channel", "archive", "install",
+             "telegram", "models", "discover", "remote", "relayout", "hook",
+             "statusline"):
+    _f40 = os.path.join(_HERE40, "bridgecore", _m40 + ".py")
+    with open(_f40, encoding="utf-8") as _fh40:
+        _hits40 = _bad_calls40(_fh40.read())
+    if _hits40:
+        _bad40[_m40] = _hits40
+check("every call in the package matches the signature it calls", _bad40, {})
+print("   the sabotage: the exact shape that shipped - three arguments to a")
+print("   five-argument state_report - must be named, or this proves nothing")
+_shape40 = ("def state_report(path, role, sess, headline, whats_next):\n"
+            "    return 1\n"
+            "\n"
+            "\n"
+            "def revive(path):\n"
+            "    return state_report(path, 'executor', {})\n")
+check("the shape that shipped is caught, with the missing names",
+      [(n, m) for n, _l40, m in _bad_calls40(_shape40)],
+      [("state_report", ("headline", "whats_next"))])
+check("and correct code is left alone",
+      _bad_calls40(_shape40.replace("state_report(path, 'executor', {})",
+                                    "state_report(path, 'e', {}, 'a', 'b')")),
+      [])
+
+print("\n41. this suite leaves nothing behind in anybody's real state")
 check("its data lives in the temp folder",
       os.environ["BRIDGE_DATA"].startswith(TMP), True)
 check("so does the client's, so no transcript lands in the real store",
@@ -2811,7 +3142,7 @@ note("windows opened in the whole run", len(launches()))
 
 SRV.shutdown()
 
-print("\n40. the pinned links stay fresh without a word in the chat")
+print("\n42. the pinned links stay fresh without a word in the chat")
 print("    The owner: the links have to BE current, and he does not want a")
 print("    message about it. Editing a pinned message is silent, so the")
 print("    whole job is making sure the edit happens - and that the pin is")

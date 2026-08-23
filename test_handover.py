@@ -396,14 +396,62 @@ check("and the distance to the wall too", lv["left"], 0 + 3 * 85000)
 check("in turns", lv["turns_left"], 255000 // 4333)
 check("plan is the routine one", daemon.plan_for(pl, PATH)["do"], "compacting")
 
-print("\n23. the channel answers the daemon before it writes to stdout")
+print("\n23. the channel answers the daemon without waiting on the pipe")
+print("   it used to answer BEFORE the write was attempted, full stop, and")
+print("   the daemon read that 200 as delivery. On 2026-08-23 a window")
+print("   stopped draining its pipe for 2h07m and every report inside that")
+print("   was journalled 'delivered to the channel'. So the answer now")
+print("   carries whether the SESSION took it - after a bounded wait that")
+print("   must stay far below the daemon's own 20 s delivery timeout")
+import json as _json23
+import threading as _thr23
+import urllib.request as _url23
+from http.server import ThreadingHTTPServer as _THS23
+from bridgecore import channel as _ch23
 csrc = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "bridgecore", "channel.py"), encoding="utf-8").read()
 check("inbound events are queued, not written inline",
       "_outbox.put_nowait" in csrc, True)
 check("a writer thread drains them", "_drain_outbox" in csrc, True)
-check("and the HTTP reply does not wait for the pipe",
-      "answered before the write is attempted" in csrc, True)
+check("the wait for the write is bounded and small",
+      0 < _ch23.WRITE_WAIT <= 5.0, True)
+_hold23 = _thr23.Event()
+_real23 = _ch23.rpc_write
+_ch23.rpc_write = lambda obj: _hold23.wait(30)
+_sec23, _ch23.SECRET = _ch23.SECRET, "suite-secret"
+_srv23 = _THS23(("127.0.0.1", 0), _ch23.Inbound)
+_thr23.Thread(target=_srv23.serve_forever, daemon=True).start()
+_thr23.Thread(target=_ch23._drain_outbox, daemon=True).start()
+try:
+    _req23 = _url23.Request(
+        "http://127.0.0.1:%d/" % _srv23.server_address[1],
+        data=_json23.dumps({"content": "report", "meta": {"kind": "report"}}
+                        ).encode("utf-8"),
+        headers={"Content-Type": "application/json",
+                 "X-Bridge-Secret": "suite-secret"})
+    _t23 = time.time()
+    _body23 = _json23.loads(_url23.urlopen(_req23, timeout=30).read()
+                         .decode("utf-8"))
+    _took23 = time.time() - _t23
+    check("the POST is answered while the pipe is still blocked",
+          _took23 < _ch23.WRITE_WAIT + 3.0, True)
+    check("it says the event was taken", _body23.get("ok"), True)
+    check("and that the session has NOT read it", _body23.get("written"),
+          False)
+    check("naming how many are waiting", _body23.get("backlog") >= 1, True)
+    print("   the sabotage: unblock the pipe and ask again - the same field")
+    print("   must answer the other way, or it could never fail")
+    _hold23.set()
+    _ch23.rpc_write = lambda obj: None
+    _body23b = _json23.loads(_url23.urlopen(_req23, timeout=30).read()
+                          .decode("utf-8"))
+    check("a draining session is reported as having read it",
+          _body23b.get("written"), True)
+finally:
+    _ch23.rpc_write = _real23
+    _ch23.SECRET = _sec23
+    _hold23.set()
+    _srv23.shutdown()
 
 print("\n24. the record the channel makes carries the flag too")
 daemon.STATE.clear()

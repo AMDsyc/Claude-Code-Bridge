@@ -339,7 +339,7 @@ PATH_KEYED = ("loops", "inflight", "awaiting", "loop_off", "loop_off_told",
               "unanswered", "checks", "handover_failed")
 PAIR_KEYED = ("pids", "down", "launches", "last_session", "channels",
               "autostart_tried", "autostart_told", "stopfail", "stop_seen",
-              "compact_wait", "compact_failed")
+              "compact_wait", "compact_failed", "chan_backlog")
 
 
 def migrate_keys():
@@ -1572,6 +1572,93 @@ def channel_alive(path, role):
     return None
 
 
+# A session that has taken nothing off its channel for this long is not
+# thinking - it is not reading. Measured on the 2026-08-23 incident: the
+# gap was 7 021 s and every report inside it was answered 200. Five
+# minutes is well past any turn that is merely long, because a turn that
+# is running still drains the pipe between tool calls.
+CHANNEL_UNREAD_SEC = 300
+
+
+def note_channel_write(path, role, raw):
+    """Record whether the SESSION took the message, not whether we sent it.
+
+    The channel's answer carries `written` - false means the event is on
+    its queue and the window has not read it - plus how many are waiting
+    and how old the oldest is. Kept per pair so the watchdog can name the
+    half that has gone deaf, and cleared the moment a write lands, because
+    the fact is about now and not about the day.
+    """
+    key = "%s|%s" % (norm(path), role)
+    try:
+        ans = json.loads((raw or b"{}").decode("utf-8") or "{}")
+    except Exception:
+        ans = {}
+    if not isinstance(ans, dict) or "written" not in ans:
+        # An older channel process, from a window started before this
+        # existed: it answers "ok" and cannot be asked. Silence is the
+        # honest answer - never a guess in either direction.
+        return
+    with _lock:
+        rec = (STATE.setdefault("chan_backlog", {})).get(key) or {}
+        if ans.get("written"):
+            STATE["chan_backlog"].pop(key, None)
+            return
+        if not rec:
+            rec = {"since": time.time()}
+        rec["n"] = int(ans.get("backlog") or 0)
+        rec["oldest"] = float(ans.get("oldest_sec") or 0.0)
+        rec["at"] = time.time()
+        STATE["chan_backlog"][key] = rec
+
+
+def unread_channel(path):
+    """A half whose channel holds messages the session has not read.
+
+    Returns the worst one, or None. This is the pipe talking, not the
+    session: the window can be up, its status line ticking and its own
+    record fresh, and still not be taking anything - which is exactly the
+    shape that looked like a planner refusing to answer.
+    """
+    out = None
+    with _lock:
+        recs = dict(STATE.get("chan_backlog") or {})
+    for key, rec in recs.items():
+        pth, _, role = key.rpartition("|")
+        if norm(pth) != norm(path) or role not in MANAGED_ROLES:
+            continue
+        since = float(rec.get("since") or 0)
+        waited = time.time() - since if since else 0.0
+        if waited < CHANNEL_UNREAD_SEC:
+            continue
+        if not out or waited > out["waited"]:
+            out = {"role": role, "waited": waited,
+                   "n": int(rec.get("n") or 0)}
+    return out
+
+
+def call_out_unread(path, found):
+    """Say that a window is not reading, and ring - it is nobody else's job.
+
+    The bridge cannot drain somebody else's pipe, so there is nothing to
+    repair here and pretending otherwise is how two extra reports got
+    written into the same blocked channel. It names the half, the count
+    and the wait, once per hour, and stops the pair being told to try
+    again into a place nothing comes back from.
+    """
+    name = project_name(path)
+    mins = int(found["waited"] // 60)
+    said = ("%s: its %s window has not read anything off its channel for "
+            "%dm - %d message(s) are queued and the session is taking none "
+            "of them. Nothing is lost; nothing will move either until that "
+            "window is looked at."
+            % (name, found["role"], mins, found["n"]))
+    store.journal("channel", said, name, found["role"], "warn",
+                  project_dir=path)
+    notify("needs_you", said, path=path)
+    return "called you about a window that is not reading"
+
+
 def deliver_ex(path, role, content, meta):
     """Returns (ok, reason). reason is "absent" when no channel is
     registered at all, "failed" when one is and would not take the
@@ -1609,7 +1696,17 @@ def deliver_ex(path, role, content, meta):
             data=json.dumps({"content": content, "meta": meta}).encode("utf-8"),
             headers={"Content-Type": "application/json",
                      "X-Bridge-Secret": SECRET})
-        urllib.request.urlopen(req, timeout=20).read()
+        raw = urllib.request.urlopen(req, timeout=20).read()
+        # THE ANSWER USED TO BE THROWN AWAY, and with it the only fact that
+        # could tell "the session read it" from "the pipe is full and
+        # nobody is reading". The channel answers 200 the moment the event
+        # is on its queue - by design, so a busy session cannot hang the
+        # daemon - and for two hours on 2026-08-23 that 200 was journalled
+        # as "delivered to the channel" while the window took nothing at
+        # all. A witness the act of asking produces is not a witness
+        # (rule 30), and this one was on the SUCCESS path, which is why
+        # three days of hunting the failure paths never came near it.
+        note_channel_write(path, role, raw)
         # This used to re-register whatever answered, on the reasoning that
         # a port which takes the message must be the current channel. It is
         # not: a leftover process from a replaced window accepts bytes
@@ -2535,6 +2632,21 @@ def assess(path):
                          daemon=True).start()
         return done("the planner at the end of its runway",
                     "handing over the planner to a fresh session")
+
+    # BEFORE the clinch, because they look identical from here and the
+    # answers are opposite. A clinch is two halves each waiting for the
+    # other, and waking one fixes it. A window that is not reading its
+    # channel is not waiting for anything, and waking the OTHER half just
+    # writes another report into the same blocked pipe - which is what
+    # happened on 2026-08-23: reports 69 and 70 exist only because this
+    # branch was not here.
+    unread = unread_channel(path)
+    if unread:
+        if acted_recently(path, "unread:%s" % unread["role"], 3600):
+            return done("a window that is not reading its channel, "
+                        "already called")
+        return done("a window that is not reading its channel",
+                    call_out_unread(path, unread))
 
     found = clinch(path, sit)
     if found:
@@ -6441,8 +6553,15 @@ def resume_after_outage(pairs, why=""):
         try:
             ex = (sit.get("roles") or {}).get("executor") or {}
             if ex.get("alive") and not sit.get("inflight"):
-                deliver(path, "executor", state_report(path, "executor",
-                                                       ex.get("sess") or {}),
+                deliver(path, "executor",
+                        state_report(path, "executor",
+                                     ex.get("sess") or {},
+                                     "the connection was gone for a "
+                                     "while and is back",
+                                     "if you have work in hand, carry "
+                                     "on and finish the turn; if you "
+                                     "were waiting on an answer, say "
+                                     "so in one line."),
                         {"kind": "task"})
                 done.append("%s: woke its executor with its state" % name)
         except Exception:
@@ -6594,10 +6713,31 @@ def revive_lost_turn(path, role):
                 return "handed back the task it never started"
             return ""
         sess = best_session(path, "executor") or {}
-        if deliver(path, "executor", state_report(path, "executor", sess),
+        if deliver(path, "executor",
+                   state_report(path, "executor", sess,
+                                "your last turn ended in an error "
+                                "before it could be reviewed",
+                                "nothing was lost - say where you got "
+                                "to and finish the turn, so the "
+                                "planner has something to answer."),
                    {"kind": "task"}):
             return "woke the executor with its state"
-    except Exception:
+    except Exception as exc:
+        # NEVER "nothing" FOR TWO DIFFERENT FACTS. This call used to
+        # pass three arguments to a five-argument state_report, so it
+        # raised TypeError before it reached the channel, every time,
+        # and the caller wrote "nothing" - which reads as "there was
+        # nothing to hand back". Fifteen lines of it between
+        # 2026-08-22 and 2026-08-23, and the executor half of this
+        # repair had therefore never run at all. An edge path may not
+        # raise; it may not hide either (-> DECISIONS.md 5.42).
+        store.journal("turn_lost",
+                      "%s / %s: picking the turn back up failed "
+                      "inside the bridge: %s: %s"
+                      % (project_name(path), role,
+                         type(exc).__name__, exc),
+                      project_name(path), role, "warn",
+                      project_dir=path)
         return ""
     return ""
 
@@ -6815,7 +6955,15 @@ def check_lost_turn(path):
         # that a false alibi reads as the bug report it is instead of a
         # reassuring sentence. Three of these were written over two days
         # about pairs that had not moved at all.
-        witness = moved_witness(path, role, rec.get("at", 0))
+        # The stamp of the DEATH, taken before anything rewrites it.
+        # `rec` is the same dict as the one in STATE, and the backoff
+        # below pushes its "at" into the future - so the line that
+        # follows used to say "the turn died at 13:16:25" at 13:13:55,
+        # naming a death that had not happened yet. A message that
+        # states a fact it no longer holds is the same defect as the
+        # one this whole function was built for.
+        died_at = float(rec.get("at") or 0)
+        witness = moved_witness(path, role, died_at)
         if witness:
             with _lock:
                 STATE["stopfail"].pop(key, None)
@@ -6825,7 +6973,7 @@ def check_lost_turn(path):
                           "moving again - not telling. Witness: %s"
                           % (project_name(path), role,
                              time.strftime("%H:%M:%S",
-                                           time.localtime(rec.get("at", 0))),
+                                           time.localtime(died_at)),
                              witness),
                           project_name(path), role, "log", project_dir=path)
             continue
@@ -6854,7 +7002,7 @@ def check_lost_turn(path):
                           "back - %s (attempt %d of %d, no one woken)"
                           % (name, role,
                              time.strftime("%H:%M:%S",
-                                           time.localtime(rec.get("at", 0))),
+                                           time.localtime(died_at)),
                              rec.get("reason") or "-",
                              did or "found nothing to hand back",
                              tries + 1, LOST_TURN_TRIES),

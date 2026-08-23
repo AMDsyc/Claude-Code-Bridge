@@ -218,7 +218,44 @@ _out_lock = threading.Lock()
 # So: the HTTP request is answered immediately and the notification is put
 # on a queue that one writer thread drains. A stalled pipe now delays only
 # the notification, which is what it always was.
+# How long the inbound POST may wait for the write before answering
+# "queued but not taken". Short on purpose: the daemon's own delivery
+# timeout is 20 s and this must never be what spends it.
+WRITE_WAIT = 2.0
+
 _outbox = queue.Queue(maxsize=1000)
+
+# WHETHER A MESSAGE WAS QUEUED IS NOT WHETHER THE SESSION GOT IT.
+#
+# notify_channel answers the daemon the moment the event is on the queue,
+# and that answer used to be the daemon's ONLY witness of delivery - so a
+# window that had stopped draining this subprocess's pipe took every
+# report with a 200 and read none of them. Measured 2026-08-23: three
+# reports, 10:45 / 11:13 / 11:41, each journalled "delivered to the
+# channel"; the session's own transcript shows all three arriving at
+# 12:52:30, within one second, when the pipe unblocked. Two hours seven
+# minutes, and the bridge said "delivered" three times (-> 5.41).
+#
+# So the write is numbered now and the watermark is public. Nothing here
+# blocks: one thread still drains the queue and a stalled pipe still
+# delays only the notification. What changed is that the daemon can ask a
+# question it could not ask before - "has the session actually taken it?"
+# - and get an answer that the act of asking cannot produce.
+_seq_lock = threading.Lock()
+_seq_out = 0            # last sequence number handed out
+_seq_written = 0        # last sequence number actually written to stdout
+_seq_queued_at = {}     # seq -> when queued, for the unwritten ones
+
+
+def backlog_view():
+    """How many messages this session has not taken, and for how long."""
+    with _seq_lock:
+        waiting = dict(_seq_queued_at)
+        written, out = _seq_written, _seq_out
+    oldest = min(waiting.values()) if waiting else 0.0
+    return {"backlog": len(waiting),
+            "oldest_sec": (time.time() - oldest) if oldest else 0.0,
+            "written": written, "queued": out}
 
 
 def rpc_write(obj):
@@ -231,26 +268,63 @@ def rpc_write(obj):
 
 
 def _drain_outbox():
+    global _seq_written
     while True:
-        obj = _outbox.get()
+        seq, obj = _outbox.get()
         try:
             rpc_write(obj)
         except Exception as exc:
             sys.stderr.write("bridge channel: write failed: %s\n" % exc)
+        # Written or refused, it is no longer waiting: a message this
+        # process could not write is not one the session failed to read.
+        with _seq_lock:
+            _seq_written = max(_seq_written, seq)
+            _seq_queued_at.pop(seq, None)
 
 
 def notify_channel(content, meta):
-    """Queue an inbound event. Never blocks the caller."""
+    """Queue an inbound event. Never blocks the caller.
+
+    Returns the sequence number given to this event, or 0 when the
+    outbox is full. The number is what lets the caller ask, a moment
+    later, whether the session has actually taken it.
+    """
+    global _seq_out
+    with _seq_lock:
+        _seq_out += 1
+        seq = _seq_out
+        _seq_queued_at[seq] = time.time()
     try:
-        _outbox.put_nowait({
+        _outbox.put_nowait((seq, {
             "jsonrpc": "2.0",
             "method": "notifications/claude/channel",
             "params": {"content": content, "meta": meta},
-        })
-        return True
+        }))
+        return seq
     except queue.Full:
+        with _seq_lock:
+            _seq_queued_at.pop(seq, None)
         sys.stderr.write("bridge channel: outbox full, event dropped\n")
-        return False
+        return 0
+
+
+def wait_written(seq, timeout=WRITE_WAIT):
+    """Did the session take message `seq` within `timeout` seconds?
+
+    A short bounded wait and never a blocking one: the message is queued
+    either way and nothing is lost by answering "not yet". What the
+    answer buys is a daemon that can tell "the session read it" from
+    "the pipe is full and nobody is reading", which used to look
+    identical from outside.
+    """
+    end = time.time() + max(0.0, timeout)
+    while True:
+        with _seq_lock:
+            if _seq_written >= seq:
+                return True
+        if time.time() >= end:
+            return False
+        time.sleep(0.05)
 
 
 def post_daemon(path, payload, timeout=8):
@@ -300,10 +374,20 @@ class Inbound(BaseHTTPRequestHandler):
             kk = "".join(c for c in str(k) if c.isalnum() or c == "_")
             if kk:
                 meta[kk] = str(v)
-        queued = notify_channel(body.get("content", ""), meta)
-        # answered before the write is attempted, on purpose
-        payload = b"ok" if queued else b"no"
-        self.send_response(200 if queued else 503)
+        seq = notify_channel(body.get("content", ""), meta)
+        # Answered without waiting when the write is quick, and
+        # after a short bounded wait when it is not - never
+        # blocking on it. The body says which happened, because
+        # "queued" and "the session has it" are different facts,
+        # and the daemon needs the difference to be able to say
+        # anything true about delivery.
+        written = bool(seq) and wait_written(seq)
+        view = backlog_view()
+        view["ok"] = bool(seq)
+        view["written"] = written
+        payload = json.dumps(view).encode("utf-8")
+        self.send_response(200 if seq else 503)
+        self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)

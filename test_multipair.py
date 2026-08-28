@@ -45,6 +45,7 @@ import json
 import os
 import re
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -4167,6 +4168,151 @@ check("the walk finds it",
 with daemon._lock:
     daemon.STATE["said"].pop("%s|executor" % GHC, None)
     daemon.CFG["projects"] = json.loads(_cfg50)
+    daemon.save_state()
+
+print("\n51. a second live window may take the seat; a subagent may not")
+print("    2026-08-28, 12:30:40. A planner window came up that this bridge")
+print("    did NOT launch - it adopted it (\"Noticed a live planner window")
+print("    (its channel is answering) - adding it to the panel\") and never")
+print("    updated STATE['pids'], which still named the window it had")
+print("    launched the evening before and which was still running. So the")
+print("    new window's channel had a parent that was not the recorded")
+print("    window, while the old window's channel was still its child -")
+print("    and channel_supersedes refused the newcomer 232 times over two")
+print("    hours, every 45 s. Reports 86, 87 and 88 were carried to a live")
+print("    window nobody was reading; at three unanswered the pair was held")
+print("   every guard downstream was silent and RIGHT to be: the channel")
+print("   really was draining, so chan_backlog stayed empty and")
+print("   unread_channel had nothing to fire on; deliver_ex's fallback")
+print("   fired all three times into bridge-logs/inbox; the blind poll woke")
+print("   the executor. Nothing measures \"delivered to the wrong live")
+print("   window\", and the repair is not another watcher - it is that the")
+print("   seat is decided correctly in the first place")
+
+_TREE = os.path.join(TMP, "tree.py")
+with open(_TREE, "w", encoding="utf-8") as _fh:
+    _fh.write(
+        "import os, subprocess, sys, time\n"
+        "d = int(sys.argv[1])\n"
+        "if d > 0:\n"
+        "    p = subprocess.Popen([sys.executable, __file__, str(d - 1)],\n"
+        "                         stdout=subprocess.PIPE, text=True)\n"
+        "    print('%d %s' % (os.getpid(), p.stdout.readline().strip()),\n"
+        "          flush=True)\n"
+        "else:\n"
+        "    print(os.getpid(), flush=True)\n"
+        "time.sleep(180)\n")
+
+
+def _tree(depth):
+    """A real chain of real processes: [self, child, grandchild, ...].
+
+    Real ones because the whole question is parentage, and a fixture that
+    hands the code the pids it wants to hear would answer it by assertion.
+    """
+    p = subprocess.Popen([sys.executable, _TREE, str(depth)],
+                         stdout=subprocess.PIPE, text=True)
+    pids = [int(x) for x in p.stdout.readline().split()]
+    _TREES.append(p)
+    return pids
+
+
+_TREES = []
+_W, _WC, _S = _tree(2)      # the recorded window, its channel, a subagent's
+_X, _XC = _tree(1)          # a DIFFERENT window and its channel
+note("recorded window / its channel / a process inside it", (_W, _WC, _S))
+note("a second live window / its channel", (_X, _XC))
+check("the fixture really is a chain, not three unrelated numbers",
+      len({_W, _WC, _S, _X, _XC}), 5)
+
+CH = os.path.join(TMP, "channel-seat")
+os.makedirs(CH, exist_ok=True)
+CHC = canon(CH)
+_cfg51 = json.dumps(daemon.CFG.get("projects") or {})
+with daemon._lock:
+    daemon.CFG.setdefault("projects", {})[CHC] = {}
+daemon.reg_pid(CH, "planner", _W)
+
+print("   the window's own channel registers first, as it always does")
+check("taken", post_rc("/channel/register",
+                       {"project": CH, "role": "planner", "port": 40001,
+                        "pid": _WC, "ppid": _W,
+                        "session_id": "seat-1"})[1].get("ok"), True)
+check("and holds the seat",
+      ((daemon.STATE.get("channels") or {}).get("%s|planner" % CHC)
+       or {}).get("pid"), _WC)
+
+print("   SS5.19 unchanged: a channel started INSIDE that window inherits")
+print("   PROJECT and ROLE and registers under the same key. It is younger,")
+print("   so age alone would hand it the seat and every report would go")
+print("   into a subagent. It must be refused - five times over, because")
+print("   the repeat is what the new warning counts")
+for _i in range(5):
+    _r51 = post_rc("/channel/register",
+                   {"project": CH, "role": "planner", "port": 40002,
+                    "pid": _S, "ppid": _WC, "session_id": "seat-2"})[1]
+    check("refused (%d of 5)" % (_i + 1), (_r51.get("ok"), _r51.get("why")),
+          (False, "superseded"))
+check("the window's channel still holds the seat",
+      ((daemon.STATE.get("channels") or {}).get("%s|planner" % CHC)
+       or {}).get("pid"), _WC)
+
+print("   and the REPEAT is a fact of its own. Every refusal stays in the")
+print("   journal - 232 of them are what let this be found - but one warn")
+print("   says the thing they never said: this contender is not going away")
+_warn51 = [r for r in daemon.store.recent_events(300, project=CH)
+           if r.get("level") == "warn" and "has been refused" in (r.get("text")
+                                                                  or "")]
+check("said once, not five times", len(_warn51), 1)
+check("and it names the contender, its parent and the seat's holder",
+      all(str(x) in (_warn51[0].get("text") or "")
+          for x in (_S, _WC, _W)), True)
+
+print("   the seat itself is NOT moved by this change, and that is a")
+print("   decision. The same test refuses a second LIVE window - the app")
+print("   forks the planner conversation into a new local window, and its")
+print("   channel is a sibling, not a subagent. Three ways to tell them")
+print("   apart were tried against the live machine and all three failed:")
+print("   the process tree dies on an exited ancestor, channel.py sends no")
+print("   session id, and no birth time is kept for a session. So the hole")
+print("   is named and reported rather than closed with a guess")
+_c51, _r51b = post_rc("/channel/register",
+                      {"project": CH, "role": "planner", "port": 40003,
+                       "pid": _XC, "ppid": _X, "session_id": "seat-3"})
+check("a sibling window is refused too, today", _r51b.get("ok"), False)
+check("and the seat has not moved",
+      ((daemon.STATE.get("channels") or {}).get("%s|planner" % CHC)
+       or {}).get("pid"), _WC)
+
+print("   THE SABOTAGE (rule 19): with the counter never reaching its")
+print("   threshold the warning is silent, and two hours of refusals say")
+print("   nothing new again - which is the whole failure being repaired")
+_saved51 = daemon.CHANNEL_REFUSE_TELL
+try:
+    daemon.CHANNEL_REFUSE_TELL = 10 ** 6
+    with daemon._lock:
+        (daemon.STATE.get("chan_refused") or {}).pop("%s|planner" % CHC,
+                                                     None)
+    _before51 = len([r for r in daemon.store.recent_events(300, project=CH)
+                     if "has been refused" in (r.get("text") or "")])
+    for _i in range(6):
+        post_rc("/channel/register",
+                {"project": CH, "role": "planner", "port": 40002,
+                 "pid": _S, "ppid": _WC, "session_id": "seat-2"})
+    check("nothing new is said",
+          len([r for r in daemon.store.recent_events(300, project=CH)
+               if "has been refused" in (r.get("text") or "")]), _before51)
+finally:
+    daemon.CHANNEL_REFUSE_TELL = _saved51
+
+for _p in _TREES:
+    try:
+        _p.kill()
+    except Exception:
+        pass
+with daemon._lock:
+    daemon.CFG["projects"] = json.loads(_cfg51)
+    (daemon.STATE.get("chan_refused") or {}).pop("%s|planner" % CHC, None)
     daemon.save_state()
 
 check("and the shared server answered for the whole run - the day",

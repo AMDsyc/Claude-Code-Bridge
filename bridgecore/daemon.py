@@ -372,6 +372,7 @@ STATE_PATHS = {
     "last_session": "pair", "channels": "pair", "autostart_tried": "pair",
     "autostart_told": "pair", "stopfail": "pair", "stop_seen": "pair",
     "compact_wait": "pair", "compact_failed": "pair", "chan_backlog": "pair",
+    "chan_refused": "pair",
     # ...and the pair half of the twelve. `channels_view` is rebuilt from
     # CHANNELS on every /state, so re-keying it changes nothing that lasts -
     # it is here because the guard would otherwise report it as unlisted,
@@ -2034,6 +2035,54 @@ def proc_started(pid):
         return None
 
 
+CHANNEL_REFUSE_TELL = 5
+
+
+def note_channel_refused(path, role, pid, ppid, holder):
+    """Say ONCE when the same contender keeps being turned away.
+
+    A leftover channel is refused and that is the end of it as far as
+    anybody needs to know. A contender that comes back every 45 s for hours
+    is a different fact: something alive is starting it, and the seat it
+    cannot have may be held by a window that is no longer the pair's.
+
+    So the count is the signal, not the line. Five in a row - about four
+    minutes at channel.py's heartbeat - is late enough that a genuine
+    restart's leftover has stopped and early enough that nobody has waited
+    on a report yet. Said once per contender: a `warn` repeated is a `log`.
+
+    The pid of the CONTENDER is what the streak is keyed on, so a different
+    leftover appearing later is its own fact and gets its own line.
+    """
+    key = "%s|%s" % (norm(path), role)
+    with _lock:
+        rec = (STATE.setdefault("chan_refused", {}).get(key) or {})
+        if str(rec.get("pid")) != str(pid):
+            rec = {"pid": pid, "n": 0, "since": time.time(), "told": False}
+        rec["n"] = rec.get("n", 0) + 1
+        rec["at"] = time.time()
+        STATE["chan_refused"][key] = rec
+        tell = rec["n"] >= CHANNEL_REFUSE_TELL and not rec.get("told")
+        if tell:
+            rec["told"] = True
+        n, since = rec["n"], rec.get("since") or time.time()
+        save_state()
+    if not tell:
+        return
+    store.journal(
+        "channel",
+        "The %s channel pid %s has been refused %d times in %d min. It is "
+        "not going away, so something alive keeps starting it: its parent is "
+        "pid %s, and the seat is held by pid %s under the window pid %s this "
+        "bridge has on record. If that window is not the one you are talking "
+        "to, the record is stale and reports are being carried to the wrong "
+        "window - see the pair's channel row in the panel."
+        % (role, pid, n, int((time.time() - since) / 60), ppid, holder,
+           (((STATE.get("pids") or {}).get("%s|%s" % (norm(path), role))
+             or {}).get("pid"))),
+        project_name(path), role, "warn", project_dir=path)
+
+
 def channel_supersedes(prev, pid, ppid=None, path=None, role=None):
     """May a registration from `pid` replace the record `prev`?
 
@@ -2078,6 +2127,43 @@ def channel_supersedes(prev, pid, ppid=None, path=None, role=None):
     #
     # Fails open in both directions: an unknown parent, or a window pid we
     # never recorded, falls through to the age rule exactly as before.
+    #
+    # AND THIS RULE IS KNOWN TO BE INCOMPLETE. 2026-08-28: a second planner
+    # window appeared that the bridge did not launch (the Claude app forks
+    # the conversation locally - `--session-id … --fork-session --resume`),
+    # the bridge ADOPTED it into the panel and updated `last_session`, but
+    # `STATE["pids"]` still named the window it had launched the evening
+    # before, which was still running. So the newcomer's channel had a
+    # parent that was not the recorded window while the old window's
+    # channel was still its child, and this branch refused the newcomer 232
+    # times over two hours. Three reports were carried to a live window
+    # nobody was reading and the pair was held by the silence guard.
+    # Measured the same afternoon on the bridge's own pair as well, so it
+    # is the ordinary consequence of opening the planner in the app, not a
+    # one-off.
+    #
+    # It is left as it is ON PURPOSE, and that is a decision, not an
+    # oversight. Three discriminators were tried against the live machine
+    # and all three failed:
+    #   - process-tree membership (is the contender INSIDE the recorded
+    #     window): the walk dies on an exited ancestor, and on this machine
+    #     it answered "cannot tell" for every live contender - which falls
+    #     through to age and would have handed a real pair's seat to an
+    #     orphan;
+    #   - the session id: `channel.py`'s heartbeat does not send one, and
+    #     adding it reaches a channel process only when its window
+    #     restarts - never the orphans this is about;
+    #   - "the pid record is older than the pair's current session":
+    #     `last_session` carries no birth time, and `seen_at` is a
+    #     heartbeat, so it reads STALE for correct records too.
+    #
+    # What is missing is not a cleverer test here. It is that TWO records
+    # of "which window is this half" are kept and allowed to disagree:
+    # `STATE["pids"]`, written only where the bridge launches, and
+    # `last_session`, written at every SessionStart. Making them one is a
+    # design decision with a cost, and it is the owner's. Until then
+    # `note_channel_refused` says out loud, after five refusals, that the
+    # recorded window may be stale - four minutes instead of two hours.
     win = (STATE.get("pids") or {}).get("%s|%s" % (norm(path or ""), role or "")) \
         if (path or role) else None
     win_pid = (win or {}).get("pid")
@@ -10517,6 +10603,19 @@ class Handler(BaseHTTPRequestHandler):
                                      body.get("port")),
                                   project_name(path), role, "log",
                                   project_dir=path)
+                    # EVERY refusal stays in the journal. Deduplicating them
+                    # was considered and rejected: 232 identical lines over
+                    # two hours are what let this be found at all, they cost
+                    # nothing (a journal is not the chat), and folding them
+                    # would have hidden the one signal that was actually
+                    # there. What was missing is not fewer lines - it is ONE
+                    # line saying something new. A contender refused over and
+                    # over is not a leftover heartbeating; a leftover is
+                    # refused once and forgotten, while this one keeps coming
+                    # back because something alive keeps starting it.
+                    note_channel_refused(path, role, body.get("pid"),
+                                         body.get("ppid"),
+                                         (_prev or {}).get("pid"))
                     return self._send(200, {"ok": False,
                                             "why": "superseded"})
                 first = (path, role) not in CHANNELS
@@ -10536,6 +10635,9 @@ class Handler(BaseHTTPRequestHandler):
                            # same key
                            "ppid": body.get("ppid")}
                     save_state()
+                with _lock:
+                    (STATE.get("chan_refused") or {}).pop(
+                        "%s|%s" % (path, role), None)
                 # via="channel": a channel process, which outlives its
                 # window and re-registers every 45 s (§5.3), so this may
                 # not end a failed-handover streak. See mark_registered.

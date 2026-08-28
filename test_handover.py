@@ -27,6 +27,7 @@ compaction seen firing after a turn that ended at 1002k, and ~33k turns.
 Run:  python3 test_handover.py
 """
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -3647,21 +3648,68 @@ print("    window spawns inherits both - so a channel started deeper inside")
 print("    the window registers under the very same (project, role) key.")
 print("    It is always YOUNGER than the window's own channel, and the age")
 print("    rule hands the record to the younger one")
+# REAL processes, because parentage is the whole question. This case used
+# invented pids - 1000, 2000, 2500 - and passed while the code asked only
+# "is your parent the recorded window". It cannot: since 2026-08-28 the
+# question is "are you INSIDE the recorded window", and numbers that name
+# no process answer it with "cannot tell", which correctly falls through
+# to the age rule. A fixture that hands the code the pids it wants to hear
+# proves nothing about the pids it will actually get.
+_seat_tree = os.path.join(TMP, "seat_tree.py")
+with open(_seat_tree, "w", encoding="utf-8") as _fh:
+    _fh.write(
+        "import os, subprocess, sys, time" + chr(10) +
+        "d = int(sys.argv[1])" + chr(10) +
+        "if d > 0:" + chr(10) +
+        "    p = subprocess.Popen([sys.executable, __file__, str(d - 1)],"
+        + chr(10) +
+        "                         stdout=subprocess.PIPE, text=True)"
+        + chr(10) +
+        "    print('%d %s' % (os.getpid(), p.stdout.readline().strip()),"
+        + chr(10) +
+        "          flush=True)" + chr(10) +
+        "else:" + chr(10) +
+        "    print(os.getpid(), flush=True)" + chr(10) +
+        "time.sleep(120)" + chr(10))
+_seat_procs = []
+
+
+def _seat_chain(depth):
+    p = subprocess.Popen([sys.executable, _seat_tree, str(depth)],
+                         stdout=subprocess.PIPE, text=True)
+    _seat_procs.append(p)
+    return [int(x) for x in p.stdout.readline().split()]
+
+
+_win, _wchan, _sub = _seat_chain(2)
 _p = os.path.join(TMP, "seat_project")
 _k = daemon.norm(_p)
-daemon.STATE["pids"] = {"%s|planner" % _k: {"pid": 1000}}
-_window_chan = {"pid": 2000, "ppid": 1000}          # the window's own
+daemon.STATE["pids"] = {"%s|planner" % _k: {"pid": _win}}
+_window_chan = {"pid": _wchan, "ppid": _win}        # the window's own
 print("   the window's own channel always keeps its seat")
 check("the window's channel may register",
-      daemon.channel_supersedes(None, 2000, 1000, _p, "planner"), True)
+      daemon.channel_supersedes(None, _wchan, _win, _p, "planner"), True)
 check("and may re-register over itself",
-      daemon.channel_supersedes(_window_chan, 2000, 1000, _p, "planner"),
+      daemon.channel_supersedes(_window_chan, _wchan, _win, _p, "planner"),
       True)
 print("   a stranger under the same key is refused, however young it is -")
 print("   and this is the case the age rule got exactly backwards")
 check("a subagent's channel may not take it",
-      daemon.channel_supersedes(_window_chan, 3000, 2500, _p, "planner"),
+      daemon.channel_supersedes(_window_chan, _sub, _wchan, _p, "planner"),
       False)
+print("   AND SO IS A SECOND LIVE WINDOW, which is the hole this leaves.")
+print("   2026-08-28: the app forked the planner conversation into a new")
+print("   local window, the bridge adopted it but kept the old window pid,")
+print("   and this refused the newcomer 232 times over two hours while")
+print("   three reports went to a window nobody was reading. The test is")
+print("   the same in both cases and cannot tell them apart - written down")
+print("   here rather than left for the next reader to rediscover")
+_win2, _wchan2 = _seat_chain(1)
+check("a live sibling window is refused too - correct for a subagent,",
+      daemon.channel_supersedes(_window_chan, _wchan2, _win2, _p,
+                                "planner"), False)
+print("   wrong for a window, and the rule sees one thing. What says so")
+print("   out loud is note_channel_refused, after five refusals")
 print("   the theft would have been INVISIBLE: a win is silent, only a")
 print("   refusal is journalled, and afterwards the window's own channel is")
 print("   refused for ever - it is the older contender - so every report")
@@ -3686,6 +3734,11 @@ check("and channel.py sends it",
       '"ppid": os.getppid()' in _io.open(
           os.path.join(os.path.dirname(daemon.__file__), "channel.py"),
           encoding="utf-8").read(), True)
+for _sp in _seat_procs:
+    try:
+        _sp.kill()
+    except Exception:
+        pass
 print("   measured 2026-08-21: all six live channels were direct children")
 print("   of exactly the window pid the bridge recorded at launch, so the")
 print("   test is sound on real data - and there was not one refusal in the")

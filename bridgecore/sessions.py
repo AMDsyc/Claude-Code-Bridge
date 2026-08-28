@@ -190,7 +190,9 @@ def ensure_marks(project, role=""):
         try:
             store.journal("session",
                           "could not check the bridge marks of %s: %s"
-                          % (project, exc), "", role, "warn")
+                          % (project, exc),
+                          os.path.basename(str(project).rstrip("\\/")),
+                          role, "warn", project_dir=project)
         except Exception:
             pass
         return []

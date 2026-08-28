@@ -274,7 +274,17 @@ def marks_missing(project):
             gone.append("%s: no bridge status line" % s_path)
 
         env = cfg.get("env") or {}
-        if env.get("PYTHONPATH") != ROOT:
+        # normcase, because this is a Windows path and the same folder
+        # arrives spelled several ways - the one comparison in the package
+        # that was still doing it raw. Found 2026-08-28: the settings on
+        # this machine can carry one capitalisation of the bridge's own folder
+        # while the folder on disk carries another, so whether a project
+        # read as "missing a mark" depended on the capitalisation of
+        # whatever put the package on sys.path. `ensure_marks` warns and
+        # re-runs install on the answer, so a false one means a warning and
+        # an install at every single launch, for ever.
+        if os.path.normcase(env.get("PYTHONPATH") or "") \
+                != os.path.normcase(ROOT):
             gone.append("%s: env PYTHONPATH is not %s" % (s_path, ROOT))
         if env.get("PYTHONSAFEPATH") != "1":
             # Without it a stray bridgecore/ next to the session shadows the

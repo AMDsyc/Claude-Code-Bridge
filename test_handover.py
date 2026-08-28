@@ -3975,7 +3975,21 @@ print("   1b's OWN test has no margin - it fires on being past the line,")
 print("   never on approaching it. Rule 1a above it is the one allowed a")
 print("   margin, because its whole job is to act early and calmly")
 check("1b tests position, not distance",
-      'if compact and wall and used >= wall:' in _ps, True)
+      'used >= wall and wv.get(' + chr(34) + 'compact_measured'
+      + chr(34) + ')' in _ps, True)
+print("   the guard beside it is about PROVENANCE, not slack: since")
+print("   2026-08-28 'no compaction is coming' may only be said from a")
+print("   point somebody SAW. With none on record wall_view falls back")
+print("   to the percentage - and 5.29 measured that the percentage does")
+print("   not move the point in this client, so it is a number already")
+print("   known to be wrong. A pair moved drive, the calibration")
+print("   stayed under the old key, and 13 handovers followed")
+_1b = [l.strip() for l in _ps.splitlines()
+       if l.strip().startswith('if compact and wall and used >= wall')]
+check("1b's condition is exactly one line, and this is it",
+      len(_1b), 1)
+check("and it is a provenance test, not a margin",
+      any(m in _1b[0] for m in ('+', 'margin', 'RESERVED', '0.9')), False)
 check("and the exception beside it is about the point, not a turn count",
       "compact < wall and used - compact <= LARGEST_TURN_SEEN" in _ps, True)
 print("   and since 2026-08-22 the line it reads is MEASURED, not the")
@@ -4759,6 +4773,291 @@ print("   it is short on purpose - it rides on every delivery, and the")
 print("   canon's own size rule says every character is paid for each time")
 check("three lines, not a paragraph",
       daemon.RULES_CLOSE.count("\n") <= 6, True)
+
+print("\n99. a journal row's identity, and what a project folder carries")
+print("    ANALYSIS-portable-history.md step 1. journal() has always")
+print("    written every line twice - data/logs and, when project_dir is")
+print("    given, the project's own bridge-logs. Measured 2026-08-28: the")
+print("    project copy of that day held 1894 rows, byte-identical to the")
+print("    1894 the central journal held for it. Nothing read it back, so")
+print("    a project carried to another machine arrived with a history the")
+print("    bridge could not see")
+PH = os.path.join(TMP, "carried-project")
+os.makedirs(os.path.join(PH, "bridge-logs", "2026-08-01"), exist_ok=True)
+os.makedirs(os.path.join(PH, "bridge-logs", "2026-08-02"), exist_ok=True)
+OLDP = "e:" + chr(92) + "elsewhere" + chr(92) + "carried-project"
+
+
+def _ph_row(at, text, path=OLDP, kind="loop"):
+    return {"at": at, "kind": kind, "text": text, "project": "Carried",
+            "path": path, "session": "executor", "level": "log"}
+
+
+def _ph_write(day, rows):
+    os.makedirs(os.path.join(PH, "bridge-logs", day), exist_ok=True)
+    f = os.path.join(PH, "bridge-logs", day, "events.jsonl")
+    with io.open(f, "w", encoding="utf-8", newline="") as fh:
+        for r in rows:
+            fh.write(_json.dumps(r, ensure_ascii=False) + "\n")
+    return f
+
+
+_ph_write("2026-08-01", [_ph_row("2026-08-01T10:00:00", "one"),
+                         _ph_row("2026-08-01T10:00:01", "two")])
+_ph_write("2026-08-02", [_ph_row("2026-08-02T11:00:00", "three")])
+
+print("   the fingerprint answers 'is this the same event', and the answer")
+print("   must not depend on which machine wrote it - path is the one field")
+print("   the merge rewrites, so it is excluded")
+_r1 = _ph_row("2026-08-01T10:00:00", "one")
+_r2 = _ph_row("2026-08-01T10:00:00", "one",
+              path="c:" + chr(92) + "here" + chr(92) + "carried-project")
+check("same row under two drive letters is one fingerprint",
+      store.row_fingerprint(_r1), store.row_fingerprint(_r2))
+_r3 = dict(_r1)
+_r3["path_was"] = OLDP
+check("and an already-imported row does not become a different one",
+      store.row_fingerprint(_r3), store.row_fingerprint(_r1))
+print("   THE SABOTAGE (rule 19): change what the row SAYS and it must")
+print("   stop matching, or the fingerprint would fold real events together")
+check("a different text is a different fingerprint",
+      store.row_fingerprint(_ph_row("2026-08-01T10:00:00", "ONE"))
+      == store.row_fingerprint(_r1), False)
+check("so is a different stamp",
+      store.row_fingerprint(_ph_row("2026-08-01T10:00:09", "one"))
+      == store.row_fingerprint(_r1), False)
+check("so is a different level",
+      store.row_fingerprint(dict(_r1, level="warn"))
+      == store.row_fingerprint(_r1), False)
+check("a row that is not a dict has no identity, and does not raise",
+      store.row_fingerprint("not a row"), "")
+
+print("   the inventory reads and writes nothing - it is what later shows a")
+print("   person WHICH paths a folder carries, before anybody is asked")
+_scan = store.scan_project_history(PH)
+check("both days found", [d["day"] for d in _scan["days"]],
+      ["2026-08-01", "2026-08-02"])
+check("and all three rows", _scan["rows"], 3)
+check("all of them under the other machine's path",
+      _scan["paths"].get(OLDP), 3)
+check("a folder with no bridge-logs answers empty rather than raising",
+      store.scan_project_history(os.path.join(TMP, "nothing-here"))["rows"], 0)
+check("and so does no project at all",
+      store.scan_project_history("")["rows"], 0)
+
+
+print("\n100. bringing that history in: once, re-keyed, and never pathless")
+print("    step 2. Three properties, and a person can check each: the merge")
+print("    is idempotent, it re-keys onto this machine's path, and it")
+print("    refuses a row that names no project at all")
+_ph_target = os.path.join(store.LOGS, "2026-08-01", "events.jsonl")
+_m1 = store.merge_day(PH, "2026-08-01")
+check("both rows of that day came in", (_m1["added"], _m1["read"]), (2, 2))
+check("and both were written on another machine", _m1["rekeyed"], 2)
+_h1 = _hl.sha256(io.open(_ph_target, "rb").read()).hexdigest()
+_m2 = store.merge_day(PH, "2026-08-01")
+_h2 = _hl.sha256(io.open(_ph_target, "rb").read()).hexdigest()
+check("a second merge adds nothing", _m2["added"], 0)
+check("and the file is byte-identical", _h1, _h2)
+check("it says what it already had", _m2["already"], 2)
+
+print("   re-keyed, because the feed filter is an exact match: without this")
+print("   the history would sit in the file and appear in no feed at all.")
+print("   Checked on TODAY's day folder, because recent_events reads today")
+print("   and yesterday only - a carried day older than that lands in the")
+print("   right file and is still outside the feed's two-day window. That",)
+print("   is a property of the feed, not of the merge, and it is written")
+print("   down here so nobody reads the merge as broken")
+_ph_today = time.strftime("%Y-%m-%d")
+os.makedirs(os.path.join(PH, "bridge-logs", _ph_today), exist_ok=True)
+_ph_write(_ph_today, [_ph_row(_ph_today + "T10:00:00", "carried-one"),
+                      _ph_row(_ph_today + "T10:00:01", "carried-two")])
+_mt = store.merge_day(PH, _ph_today)
+check("today's carried day comes in too", _mt["added"], 2)
+_feed = store.recent_events(200, project=PH)
+_mine = [r for r in _feed if r.get("text") in ("carried-one", "carried-two")]
+check("the carried rows are in this project's feed", len(_mine), 2)
+check("under this machine's path", _mine[0].get("path"), daemon.norm(PH))
+check("and the original is kept, so a wrong import is reversible",
+      _mine[0].get("path_was"), OLDP)
+print("   and the older day really is on disk, just outside the window")
+_old_rows = store._read_events(_ph_target)
+check("2026-08-01 sits in its own file, re-keyed",
+      len([r for r in _old_rows if r.get("path") == daemon.norm(PH)]), 2)
+
+print("   a pathless row passes EVERY project's filter (_feed_rows), so one")
+print("   import of one could flood every pair's feed at once")
+_ph_write("2026-08-03", [_ph_row("2026-08-03T09:00:00", "belongs to nobody",
+                                 path=""),
+                         _ph_row("2026-08-03T09:00:01", "four")])
+_m3 = store.merge_day(PH, "2026-08-03")
+check("the pathless one is refused", _m3["no_path"], 1)
+check("counted, not silently dropped", _m3["added"], 1)
+check("and it is nowhere in the journal it was refused from",
+      any(r.get("text") == "belongs to nobody" for r in store._read_events(
+          os.path.join(store.LOGS, "2026-08-03", "events.jsonl"))), False)
+
+print("   the carrier is READ-ONLY - the bridge does not write into the")
+print("   folder it is reading, or the two copies would drift")
+check("nothing was added to the project's own day",
+      sorted(os.listdir(os.path.join(PH, "bridge-logs", "2026-08-01"))),
+      ["events.jsonl"])
+
+print("   edges never raise: this runs on the startup path, so a broken")
+print("   line costs a line and a broken day costs a day, never a boot")
+_bad = os.path.join(PH, "bridge-logs", "2026-08-04")
+os.makedirs(_bad, exist_ok=True)
+with io.open(os.path.join(_bad, "events.jsonl"), "w", encoding="utf-8") as fh:
+    fh.write("{not json at all\n")
+    fh.write(_json.dumps(_ph_row("2026-08-04T08:00:00", "five")) + "\n")
+_m4 = store.merge_day(PH, "2026-08-04")
+check("the good line survives the broken one", _m4["added"], 1)
+check("and nothing was raised", _m4["error"], "")
+check("a day that is not there answers empty",
+      store.merge_day(PH, "1999-01-01")["added"], 0)
+
+print("   and the whole folder in one call, which is what the daemon uses")
+_all = store.merge_project_history(PH)
+check("it walks every day the folder carries", _all["days"], 5)
+print("   2026-08-02 was never merged on its own above, so the first pass")
+print("   over the whole folder is the one that brings it in")
+check("and picks up what was still outstanding", _all["added"], 1)
+_all2 = store.merge_project_history(PH)
+check("the pass after that adds nothing at all", _all2["added"], 0)
+print("   seven: 2 + 1 + 1 + 1 + 2 across the five days - the pathless row",)
+print("   and the unparseable line are not among them, by construction")
+check("saying it already had every one", _all2["already"], 7)
+
+print("\n101. a calibration key is a path, and paths fold their case")
+print("     store.calib_key was the one comparison left in the package that")
+print("     folded a Windows path with normpath and no normcase. So")
+print("     one spelling and another were two entries for one")
+print("     folder: a session measured under one spelling read under the")
+print("     other and arrived at a window with no measurements at all")
+CK_A = "C:" + os.sep + "Projects" + os.sep + "Game"
+CK_B = "c:" + os.sep + "projects" + os.sep + "game"
+check("the two spellings are one key now",
+      store.calib_key("Opus 5", CK_A), store.calib_key("opus 5", CK_B))
+check("and the key is the canonical path",
+      store.calib_key("opus 5", CK_A).split("|", 1)[1], daemon.norm(CK_A))
+
+print("   what is already on disk is folded at startup, like the other")
+print("   migrations - and a collision keeps the entry that has actually")
+print("   measured something, because samples are the whole value of one")
+_cal101 = store.load_calibration()
+_cal101["opus 5|" + CK_A] = {"ceiling_pct": 90.0, "compact_samples": [1, 2, 3]}
+_cal101["opus 5|" + CK_B] = {"ceiling_pct": 50.0, "compact_samples": []}
+store.save_calibration(_cal101)
+_folded = store.migrate_calib_keys()
+_cal101 = store.load_calibration()
+check("both spellings folded into one", _folded >= 1, True)
+check("only the canonical key is left",
+      ("opus 5|" + CK_A) in _cal101, False)
+check("and the entry with the samples is the one kept",
+      (_cal101.get(store.calib_key("opus 5", CK_A)) or {})
+      .get("compact_samples"), [1, 2, 3])
+check("running it again moves nothing", store.migrate_calib_keys(), 0)
+
+print("   bringing a calibration across from the path a project used to")
+print("   have. Rule 33 decides the collision, and it decides it the")
+print("   OPPOSITE way to STATE: a measurement made on this machine is")
+print("   never replaced by one carried from another, however rich")
+CM_OLD = daemon.norm("e:" + os.sep + "oldbox" + os.sep + "thing")
+CM_NEW = daemon.norm(os.path.join(TMP, "thing-here"))
+store.calib_update("opus 5", CM_OLD, ceiling_pct=96.6,
+                   compact_at_tokens=994509,
+                   compact_samples=[999595, 998685, 994509],
+                   how="PreCompact fired")
+store.calib_update("opus 5", CM_NEW, ceiling_pct=93.7,
+                   compact_samples=[701000], how="PreCompact fired")
+_r101 = store.calib_move(CM_OLD, CM_NEW)
+_cal101 = store.load_calibration()
+check("the local measurement is kept", _r101["kept_local"], 1)
+check("nothing was adopted over it", _r101["moved"], 0)
+check("and it is still the local numbers on the key",
+      (_cal101[store.calib_key("opus 5", CM_NEW)] or {})["compact_samples"],
+      [701000])
+check("the old key is gone either way - nothing is left to rot",
+      store.calib_key("opus 5", CM_OLD) in _cal101, False)
+
+print("   THE SABOTAGE (rule 19): take the local measurement away and the")
+print("   carried one MUST be adopted - an entry that has measured nothing")
+print("   is not evidence, and 'initial estimate' is not a reading")
+store.calib_update("opus 5", CM_OLD, ceiling_pct=96.6,
+                   compact_at_tokens=994509,
+                   compact_samples=[999595, 998685, 994509],
+                   how="PreCompact fired")
+_cal101 = store.load_calibration()
+_cal101[store.calib_key("opus 5", CM_NEW)] = {"ceiling_pct": 93.7,
+                                              "how": "initial estimate",
+                                              "compact_samples": []}
+store.save_calibration(_cal101)
+_r101b = store.calib_move(CM_OLD, CM_NEW)
+_cal101 = store.load_calibration()
+_e101 = _cal101[store.calib_key("opus 5", CM_NEW)]
+check("this time it is adopted", _r101b["moved"], 1)
+check("with the measurement intact", _e101["compact_at_tokens"], 994509)
+print("   and MARKED, so nothing downstream mistakes a figure that")
+print("   travelled for one measured here (rule 33)")
+check("where it came from is on the entry", _e101.get("carried_from"), CM_OLD)
+check("when it was brought across too", bool(_e101.get("carried_at")), True)
+check("and `how` says it in words a person reads",
+      "measured on another machine" in _e101.get("how", ""), True)
+
+print("   the same mark lets compaction_survivable be honest: a carried")
+print("   success is real evidence and is used while it is all there is,")
+print("   and steps aside the moment this machine measures the pair itself")
+CS = daemon.norm(os.path.join(TMP, "survivable-here"))
+with daemon._lock:
+    daemon.STATE.setdefault("compactions", {})["%s|executor" % CS] = [
+        {"tokens": 999000, "after": 120000, "session": "old",
+         "carried_from": "e:" + os.sep + "elsewhere"}]
+    daemon.save_state()
+check("the carried success is used when it is all there is",
+      daemon.compaction_survivable(CS, "executor"), 999000)
+with daemon._lock:
+    daemon.STATE["compactions"]["%s|executor" % CS].append(
+        {"tokens": 700000, "after": 90000, "session": "here"})
+    daemon.save_state()
+check("a local measurement takes over, even a smaller one",
+      daemon.compaction_survivable(CS, "executor"), 700000)
+
+
+print("\n102. marks_missing compares a path, so it folds case too")
+print("     Found 2026-08-28 while checking the new machine: the settings")
+print("     carry one capitalisation of the source folder, the folder on")
+print("     disk carries another, and this was the only comparison")
+print("     left doing it raw. ensure_marks WARNS and re-runs install on")
+print("     the answer, so a false one costs a warning and an install at")
+print("     every single launch, for ever")
+_mp102 = os.path.join(TMP, "marks-case")
+os.makedirs(os.path.join(_mp102, ".claude"), exist_ok=True)
+_install.install(_mp102, python=sys.executable, statusline=False)
+_sp102 = os.path.join(_mp102, ".claude", "settings.json")
+with io.open(_sp102, encoding="utf-8") as _fh:
+    _cfg102 = _json.load(_fh)
+def _pypath102():
+    """Only the PYTHONPATH complaint - the fixture installs without a
+    status line, so the rest of the list is legitimately not empty."""
+    return [m for m in _install.marks_missing(_mp102)
+            if "PYTHONPATH" in m]
+
+
+check("a freshly installed project reads right", _pypath102(), [])
+print("   now spell the very same folder differently, as another machine's")
+print("   settings do after a move")
+_cfg102["env"]["PYTHONPATH"] = _install.ROOT.upper()
+with io.open(_sp102, "w", encoding="utf-8") as _fh:
+    _json.dump(_cfg102, _fh)
+check("the same folder in another case is still the same folder",
+      _pypath102(), [])
+print("   THE SABOTAGE (rule 19): a genuinely different folder must still")
+print("   be reported, or the check would have stopped checking")
+_cfg102["env"]["PYTHONPATH"] = os.path.join(_install.ROOT, "somewhere-else")
+with io.open(_sp102, "w", encoding="utf-8") as _fh:
+    _json.dump(_cfg102, _fh)
+check("a different path is named, with the file it is in",
+      len(_pypath102()), 1)
 
 print("\n" + ("-" * 60))
 if FAILED:

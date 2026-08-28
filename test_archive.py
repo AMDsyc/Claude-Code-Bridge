@@ -278,6 +278,70 @@ check("no files", m2["totals"]["files"], 0)
 check("and the map says it plainly",
       "Nothing archived yet." in archive.render_md(m2), True)
 
+print("\n12. history carried from another machine, and the map after it")
+print("    ANALYSIS-portable-history.md step 4. A folder brought here from")
+print("    another computer carries raw/ files whose session ids this bridge")
+print("    never launched. known_sessions() is built from the bridge's own")
+print("    bookkeeping, so those ids are in none of it - and the invariant")
+print("    (SS1.5) says such a file is mapped UNKNOWN and never attributed")
+print("    from the folder it sits in or the file beside it")
+CARRIED_SID = "carried-from-another-machine"
+write([
+    user("2026-08-01T14:00:00Z", "work done on the old machine"),
+    assistant("2026-08-01T14:00:01Z"),
+], CARRIED_SID)
+_known12 = {"known-sid": {"role": "executor", "project": "proj",
+                          "how": "bridge launched it as the executor"}}
+m12 = archive.build(PROJ, _known12)
+_c12 = [f for f in m12["files"] if f["session_id"] == CARRIED_SID]
+check("the carried file is in the map", len(_c12), 1)
+check("with no role guessed for it", _c12[0]["role"], "unknown")
+check("and no project either", _c12[0]["project"], "unknown")
+check("it is counted as unknown rather than hidden",
+      m12["totals"]["unknown_files"] >= 1, True)
+check("and MAP.md says so in words rather than quietly",
+      "listed as unknown rather than guessed at" in archive.render_md(m12),
+      True)
+
+print("   THE SABOTAGE (rule 19): give the bridge a record of that id and")
+print("   the same file must stop being unknown - the invariant is about")
+print("   having no record, not about the file")
+_known12b = dict(_known12)
+_known12b[CARRIED_SID] = {"role": "planner", "project": "elsewhere",
+                          "how": "last recorded planner of that project"}
+m12b = archive.build(PROJ, _known12b)
+_c12b = [f for f in m12b["files"]
+         if f["session_id"] == CARRIED_SID]
+check("now it is attributed", _c12b[0]["role"], "planner")
+check("from the record and from nothing else", _c12b[0]["project"],
+      "elsewhere")
+
+print("   the first rebuild after an import changes MAP.md legitimately -")
+print("   there are files in it that were not there before. The SECOND must")
+print("   be a no-op on disk: MAP.md carries no clock precisely so that a")
+print("   rebuild nobody asked for does not rewrite a file every time")
+_map12 = os.path.join(archive.logs_root(PROJ), "MAP.md")
+_h12a = hashlib.sha256(open(_map12, "rb").read()).hexdigest()
+archive.build(PROJ, _known12b)
+_h12b = hashlib.sha256(open(_map12, "rb").read()).hexdigest()
+check("a repeated rebuild leaves MAP.md byte-identical", _h12a, _h12b)
+print("   map.json is a DIFFERENT promise and does not make it: it carries")
+print("   a `generated` stamp, so it is rewritten every build. That is the")
+print("   whole reason the no-clock rule is about MAP.md - the file a")
+print("   person reads and a repository would show as changed")
+_map_json12 = archive.last_map(PROJ)
+check("map.json does carry a clock", bool(_map_json12.get("generated")),
+      True)
+check("and MAP.md does not carry that stamp",
+      _map_json12["generated"] in open(_map12, encoding="utf-8").read(),
+      False)
+
+print("   and the import really did move the file - the earlier build had")
+print("   fewer, so the first rebuild was not a no-op and the check above")
+print("   is not passing on an empty change")
+check("the carried file added to the count",
+      m12["totals"]["files"] > 0 and len(_c12) == 1, True)
+
 print("\n" + ("-" * 60))
 shutil.rmtree(TMP, ignore_errors=True)
 if FAILED:

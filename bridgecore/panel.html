@@ -56,6 +56,7 @@ h2{font-family:var(--cond);font-size:16px;letter-spacing:2px;text-transform:uppe
 .btn.warn:hover{border-color:var(--red);color:var(--red)}
 .btn.big{font-size:13px;padding:10px 18px}
 .btn:disabled{opacity:.35;cursor:default}
+.btn.adopt{font-size:11px;padding:5px 10px;white-space:nowrap}
 input[type=text],select,textarea{background:#101216;border:1px solid var(--edge);color:var(--ink);font-family:var(--mono);font-size:12px;padding:8px 10px;border-radius:4px;width:100%}
 input[type=range]{accent-color:var(--sodium)}
 table{width:100%;border-collapse:collapse;font-size:12px}
@@ -477,6 +478,19 @@ function $(q){return document.querySelector(q)}
 function $$(q){return [].slice.call(document.querySelectorAll(q))}
 function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
 function post(u,b){return fetch(u,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b||{})}).then(function(r){return r.json()})}
+/* The shared secret, substituted into this page by the daemon as it serves
+   it - the file on disk carries the placeholder and never the value.
+   It is here so the panel can reach an endpoint that writes config.json
+   (/adopt-history), and it costs nothing that was not already spent: the
+   secret lives in ~/.bridge-secret and any process running as this user can
+   read it, so it was never a boundary against local programs. What it IS a
+   boundary against is a page in this browser POSTing to 127.0.0.1 - and
+   that page cannot read the response to GET /, so it cannot get the value
+   from here either. Do not put it in a URL or anywhere it would be logged. */
+var SECRET="__BRIDGE_SECRET__";
+function postSecret(u,b){return fetch(u,{method:"POST",headers:{
+  "Content-Type":"application/json","X-Bridge-Secret":SECRET},
+  body:JSON.stringify(b||{})}).then(function(r){return r.json()})}
 function fmtBytes(b){if(!b)return"0";var u=["B","KB","MB","GB"];var i=0;while(b>1024&&i<3){b/=1024;i++}return b.toFixed(i?1:0)+" "+u[i]}
 function forCur(sPath){
   if(!CUR)return true;
@@ -619,11 +633,91 @@ function headlineOf(sc){
    Nothing is worked out locally: the daemon sends the same words it puts in
    the pin (pairs_view), so the strip cannot disagree with either the pin or
    the block below it. */
+/* The owner's claim, and the only place it is made.
+
+   This appears ONLY under a project whose own bridge-logs were found to
+   carry rows written under a different path - almost always the same
+   project on the machine it came from. It names every path found and how
+   many lines sit under each, because "is this you?" is not answerable
+   without them.
+
+   It does nothing until it is pressed, and pressing it records the claim
+   and NOTHING ELSE: nothing reads moved_from yet (see handle_adopt_history).
+   The row is drawn from the server's own answer every render, so there is
+   no local edit here for the next render to overwrite - the §5.8 hazard is
+   avoided by not having the state rather than by latching it. */
+function adoptRow(p){
+  var f=(D.carried_found||{})[p];
+  if(!f||!f.paths)return "";
+  var was=Object.keys(f.paths);
+  if(!was.length)return "";
+  var already=((D.moved_from||{})[p]||[]);
+  return '<div class="gline" style="padding-left:18px;align-items:flex-start">'+
+    '<span class="dim" style="flex:1">carries history written under '+
+    (was.length===1?'another path':was.length+' other paths')+': '+
+    was.sort().map(function(w){
+      return esc(w)+' <span class="dim">('+f.paths[w]+
+        ' line'+(f.paths[w]===1?'':'s')+')</span>'}).join(', ')+
+    '. Nothing has been changed.'+
+    (already.length?' Already recorded: '+already.map(esc).join(', ')+'.':'')+
+    '</span><button class="btn adopt" data-adopt="'+esc(p)+
+    '" data-was="'+esc(was.join("|"))+'">this project moved here</button></div>';
+}
+
+/* One button per row, because the owner asked for one per project: "I can
+   see old projects from another computer in the bridge, I need a button to
+   remove them from this list so they do not get in the way, for each
+   project separately." It sits on the row that already names the project,
+   so the panel's rule holds: no claim, and no action, without the project
+   it is about next to it.
+
+   ARMED IS A LATCH, NOT A DOM STATE, and that is SS5.8 again: renderPairs
+   rebuilds the strip's innerHTML on every poll, so an armed flag written
+   onto the button is wiped a second or two later and the second press
+   arrives at a fresh unarmed button - the confirmation would be impossible
+   to complete rather than merely awkward. The latch lives out here and the
+   render reads it, the same shape as _launchTouched. It holds ONE path,
+   so arming another row disarms this one, and it times out: a control that
+   sits armed out of sight is a control that goes off when somebody scrolls
+   back and clicks what they think is the first press. */
+var FORGET_ARMED="",FORGET_AT=0,FORGET_ARM_SEC=12;
+function forgetArmed(p){
+  if(FORGET_ARMED!==p)return false;
+  if((Date.now()-FORGET_AT)/1000>FORGET_ARM_SEC){FORGET_ARMED="";
+    return false}
+  return true;
+}
+function forgetBtn(p,r){
+  var on=forgetArmed(p),nm=r.name||p;
+  return '<button class="btn'+(on?' warn':'')+'" data-forget="'+esc(p)+
+    '" title="'+esc(on
+      ?'Press again to take '+nm+' out of the list. The FOLDER is not '+
+       'touched: hooks, .mcp.json, .gitignore and bridge-logs stay exactly '+
+       'as they are, and the calibration measurements are kept. To take the '+
+       'hooks out as well, use \u201cstop watching\u201d on the settings page.'
+      :'remove '+nm+' from the bridge\u2019s list - the folder is not touched')+
+    '">'+(on?'remove '+esc(nm)+'?':'remove')+'</button>';
+}
 function renderPairs(){
   var box=$("#pairs"),rows=D.pairs||{};
   var paths=Object.keys(rows).sort(function(a,b){
     return rows[a].name<rows[b].name?-1:1});
-  if(paths.length<2){box.style.display="none";box.innerHTML="";return}
+  /* A single pair normally has no strip - there is nothing to choose
+     between. It gets one when some project is carrying history under
+     another path, because that row is the only place the question is
+     asked, and a bridge watching one project is exactly the case a move
+     produces. Every row is labelled, so the panel's rule still holds. */
+  var found=D.carried_found||{};
+  /* ...and when a project is only in the live state and not in the config
+     - a ghost carried over from another machine is exactly one pair with
+     nothing to switch to, and the row is the only place it can be removed
+     from. */
+  var cfgp=(D.config||{}).projects||{};
+  var ghost=paths.some(function(p){
+    return !Object.keys(cfgp).some(function(k){
+      return ((D.canon||{})[k]||k)===p})});
+  if(paths.length<2&&!ghost&&!paths.some(function(p){return found[p]})){
+    box.style.display="none";box.innerHTML="";return}
   box.style.display="";
   var canonCur=(D.canon||{})[CUR]||CUR;
   box.innerHTML='<div class="lab" style="margin-bottom:8px">all pairs - '+
@@ -655,8 +749,39 @@ function renderPairs(){
       '<span class="dim" style="flex:1;text-align:right">'+esc(r.state||"")+
       (r.iteration?' · iteration '+r.iteration:'')+
       (r.debt_open?' · <span class="bad" title="temporary solutions declared and still open - see bridge-logs/DEBT.md">debt '+r.debt_open+'</span>':'')+
-      '</span></div>';
+      '</span>'+forgetBtn(p,r)+'</div>'+adoptRow(p);
   }).join("");
+  $$("#pairs [data-forget]").forEach(function(el){el.onclick=function(ev){
+    /* the row underneath switches project on click; this must not */
+    ev.stopPropagation();
+    var p=el.dataset.forget;
+    if(!forgetArmed(p)){
+      /* Two presses on the button itself, not a confirm() box. The panel
+         does use confirm() on the settings page and this deliberately does
+         not: that page is static while the strip repaints on every poll,
+         and a modal dialog holds the whole page - including the poll - for
+         as long as it is open. Said plainly so the difference does not read
+         as an inconsistency: it is one, and it is on purpose. */
+      FORGET_ARMED=p;FORGET_AT=Date.now();renderPairs();return}
+    FORGET_ARMED="";
+    el.disabled=true;el.textContent="removing...";
+    postSecret("/forget-project",{path:p}).then(function(r){
+      if(!r.ok){alert(r.error||"it was not removed");tick();return}
+      /* if the project on screen was the one removed, stop showing it */
+      if(((D.canon||{})[CUR]||CUR)===p)CUR="";
+      tick().then(function(){renderPanel()});
+    }).catch(function(){tick()});
+  }});
+  $$("#pairs [data-adopt]").forEach(function(el){el.onclick=function(ev){
+    /* the row underneath switches project on click; this must not */
+    ev.stopPropagation();
+    el.disabled=true;el.textContent="recording...";
+    postSecret("/adopt-history",{path:el.dataset.adopt,
+                                 from:el.dataset.was.split("|")})
+      .then(function(){tick()})
+      .catch(function(){el.disabled=false;
+                        el.textContent="this project moved here"});
+  }});
   $$("#pairs [data-pair]").forEach(function(el){el.onclick=function(){
     var want=el.dataset.pair;
     /* the selector and the config keep the path as it was typed; the strip

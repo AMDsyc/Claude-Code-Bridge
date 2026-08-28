@@ -332,14 +332,74 @@ def now():
 norm = store.norm
 
 
-PATH_KEYED = ("loops", "inflight", "awaiting", "loop_off", "loop_off_told",
-              "waiting_on_you",
-              "seed", "planner_seed", "handover", "last_feedback",
-              "paused", "note", "idle_spin", "noart", "frames", "debt",
-              "unanswered", "checks", "handover_failed")
-PAIR_KEYED = ("pids", "down", "launches", "last_session", "channels",
-              "autostart_tried", "autostart_told", "stopfail", "stop_seen",
-              "compact_wait", "compact_failed", "chan_backlog")
+# ---- every place a project path appears in STATE, in ONE list ------------
+#
+# There were two lists and they were not enough. Counted on the live state
+# 2026-08-28, after this project moved from E: to C: - 268 references to the
+# old drive across 27 containers, and TWELVE of those containers were in
+# neither list, so nothing walked them: `assessed`, `compactions`,
+# `handover_log`, `last_task`, `quiet_pairs`, `rc`, `said`, `session_roles`,
+# `sessions`, `strangers`, `telemetry`, `tscript`, `windows`. A list that
+# does not know about a container is worse than no list, because both of its
+# readers believe they are complete.
+#
+# Two readers now, and that is the reason it is one list rather than three:
+# the "project moved" migration re-keys by it, and removing a project from
+# the watch list clears by it. A container added to STATE and forgotten here
+# is invisible to both, so `test_multipair` walks the live state of a
+# throwaway daemon at the end of its run and fails on any path-shaped key
+# sitting somewhere this does not name.
+#
+# The kinds:
+#   "path"   dict keyed by norm(path)
+#   "pair"   dict keyed by "norm(path)|role"
+#   "value"  dict whose VALUES carry the path in a "path" field
+#   "rows"   list of dicts, each carrying a "path" field
+STATE_PATHS = {
+    # keyed by the project
+    "loops": "path", "inflight": "path", "awaiting": "path",
+    "loop_off": "path", "loop_off_told": "path", "waiting_on_you": "path",
+    "seed": "path", "planner_seed": "path", "handover": "path",
+    "last_feedback": "path", "paused": "path", "note": "path",
+    "idle_spin": "path", "noart": "path", "frames": "path", "debt": "path",
+    "unanswered": "path", "checks": "path", "handover_failed": "path",
+    "carried_found": "path",
+    # the twelve the two old lists missed, path half
+    "assessed": "path", "last_task": "path", "quiet_pairs": "path",
+    "strangers": "path", "tasks_open": "path",
+    # keyed by the project AND the role
+    "pids": "pair", "down": "pair", "launches": "pair",
+    "last_session": "pair", "channels": "pair", "autostart_tried": "pair",
+    "autostart_told": "pair", "stopfail": "pair", "stop_seen": "pair",
+    "compact_wait": "pair", "compact_failed": "pair", "chan_backlog": "pair",
+    # ...and the pair half of the twelve. `channels_view` is rebuilt from
+    # CHANNELS on every /state, so re-keying it changes nothing that lasts -
+    # it is here because the guard would otherwise report it as unlisted,
+    # and an exception nobody wrote down is how the first two lists rotted.
+    "channels_view": "pair", "compactions": "pair", "rc": "pair",
+    "said": "pair", "telemetry": "pair", "tscript": "pair",
+    "windows": "pair",
+    # the path is inside the value, not in the key
+    "sessions": "value", "session_roles": "value",
+    # a list of records, each naming its own project
+    "handover_log": "rows",
+}
+
+PATH_KEYED = tuple(n for n, k in STATE_PATHS.items() if k == "path")
+PAIR_KEYED = tuple(n for n, k in STATE_PATHS.items() if k == "pair")
+
+# Top-level STATE keys that are a prefix followed by a path (or a
+# path|role). The path is always the TAIL, which is what the migration
+# matches on - `acted:` alone has tags of one and two segments
+# ("acted:clinch:<path>", "acted:stall:executor:<path>"), so splitting on
+# a colon is not a way to find it.
+#
+# `warned:` is deliberately NOT here. It is "warned:<role>:<sid8>" - a
+# session key, not a path - and `migrate_keys` was folding it through
+# norm() all the same, which lowercases a session id and leaves a latch
+# that can never be matched again.
+STATE_PATH_PREFIXES = ("acted:", "cut_for_handover:", "hoheld:", "jump:",
+                       "pctgap:", "tight:")
 
 
 def migrate_keys():
@@ -368,7 +428,10 @@ def migrate_keys():
         for sess in (STATE.get("sessions") or {}).values():
             if sess.get("path"):
                 sess["path"] = norm(sess["path"])
-        for pref in ("tight:", "hoheld:", "jump:", "warned:"):
+        # "warned:" used to be in this list and is not a path at all -
+        # "warned:<role>:<sid8>" - so norm() lowercased a session id and
+        # left a latch nothing could match again. See STATE_PATH_PREFIXES.
+        for pref in ("tight:", "hoheld:", "jump:", "cut_for_handover:"):
             for old in [k for k in list(STATE) if k.startswith(pref)]:
                 new = pref + norm(old[len(pref):])
                 if new != old:
@@ -675,7 +738,7 @@ def _warn_unmarked_projects(projects):
                 "pair started here would be blind until install runs: %s"
                 % (os.path.basename(str(key).rstrip("\\/")) or key,
                    "; ".join(gaps)),
-                level="warn")
+                project_name(key), "", "warn", project_dir=key)
 
 
 def project_name(event_or_path):
@@ -1054,6 +1117,495 @@ def reseed_proctrack():
                       "again" % (seeded, "" if seeded == 1 else "s"),
                       level="log")
     return seeded
+
+
+def move_state_keys(old, new):
+    """Re-key everything in STATE that names `old` so that it names `new`.
+
+    Walks STATE_PATHS, which is the one inventory - see the note there for
+    why there is one and not three.
+
+    COLLISION POLICY: the entry already under the new key WINS, and the old
+    one is dropped rather than merged. Two reasons, and the second is the
+    load-bearing one. `migrate_keys` has always resolved a collision that
+    way (`d.setdefault(new, d.pop(old))`), so this is the rule the state
+    already lives by; and an entry under the new key describes a session,
+    channel or window on THIS machine, running now, while the old one
+    describes one on a computer that is not here. Merging two live records
+    of "which pid is the executor" would produce a record that is true of
+    neither.
+
+    Nothing is lost silently: every dropped entry is counted, and what was
+    dropped is written into the trace the caller journals.
+
+    No file I/O and no lock is taken here - the caller holds the lock for
+    the whole move so that no watcher sees a half-migrated STATE, and this
+    function does nothing that could block while it does.
+    """
+    moved = collided = 0
+    for name, kind in STATE_PATHS.items():
+        v = STATE.get(name)
+        if kind in ("path", "pair"):
+            if not isinstance(v, dict):
+                continue
+            for key in list(v):
+                if kind == "path":
+                    hit, tail = (key == old), ""
+                else:
+                    head, _, role = key.rpartition("|")
+                    hit, tail = (head == old), "|" + role
+                if not hit:
+                    continue
+                fresh = new + tail
+                if fresh in v:
+                    v.pop(key)
+                    collided += 1
+                else:
+                    v[fresh] = v.pop(key)
+                    moved += 1
+        elif kind == "value":
+            if not isinstance(v, dict):
+                continue
+            for rec in v.values():
+                if isinstance(rec, dict) and norm(rec.get("path")) == old:
+                    rec["path"] = new
+                    rec["path_was"] = old
+                    moved += 1
+        elif kind == "rows":
+            if not isinstance(v, list):
+                continue
+            for rec in v:
+                if isinstance(rec, dict) and norm(rec.get("path")) == old:
+                    rec["path"] = new
+                    rec["path_was"] = old
+                    moved += 1
+
+    # The top-level keys that are a prefix plus a path. Matched on the TAIL,
+    # never by splitting on a colon: "acted:" carries tags of one and two
+    # segments, so the only reliable thing about these keys is that the path
+    # is at the end of them.
+    for key in list(STATE):
+        if not key.startswith(STATE_PATH_PREFIXES):
+            continue
+        for tail in (old, old + "|"):
+            i = key.find(tail)
+            if i <= 0 or (tail == old and not key.endswith(old)):
+                continue
+            fresh = key[:i] + new + key[i + len(old):]
+            if fresh == key:
+                break
+            if fresh in STATE:
+                STATE.pop(key)
+                collided += 1
+            else:
+                STATE[fresh] = STATE.pop(key)
+                moved += 1
+            break
+    return moved, collided
+
+
+def drop_project_state(path):
+    """Take a project out of STATE entirely, and say what was taken.
+
+    The SECOND consumer of STATE_PATHS, and the reason that inventory is one
+    thing and not three. `move_state_keys` re-keys, this deletes, and both
+    walk the same list in the same order - so a container added to the
+    inventory is covered by both on the day it is added, and a container
+    left out of it is missed by both, visibly, rather than by one of them
+    silently. The old removal path did keep a second list, four containers
+    long (`rc`, `down`, `pids`, `inflight`), which is precisely how the
+    panel ended up showing rows for projects that had been removed: the
+    session records under `sessions` were never in that list, and
+    `pair_paths()` builds a row from a session record alone.
+
+    Returns (total, {container: how many}). The breakdown is not decoration
+    - a removal is the owner's decision and it is irreversible, so what it
+    took has to be writable into a trace afterwards.
+
+    No file I/O and no lock: the caller holds `_lock` across the whole
+    removal so nothing observes a half-emptied STATE, and this does nothing
+    that could block while it holds it.
+
+    What it deliberately does NOT touch: `moved_trace`, `forget_trace` and
+    anything else whose rows carry `from`/`to` rather than `path`. Those are
+    records of what the BRIDGE did, not state about the project, and a
+    removal that erased its own evidence would be the one kind that cannot
+    be reviewed afterwards.
+    """
+    old = norm(path)
+    took = {}
+
+    def hit(name, n=1):
+        if n:
+            took[name] = took.get(name, 0) + n
+
+    for name, kind in STATE_PATHS.items():
+        v = STATE.get(name)
+        if kind in ("path", "pair"):
+            if not isinstance(v, dict):
+                continue
+            for key in list(v):
+                if kind == "path":
+                    gone = (key == old)
+                else:
+                    gone = (key.rpartition("|")[0] == old)
+                if gone:
+                    v.pop(key)
+                    hit(name)
+        elif kind == "value":
+            if not isinstance(v, dict):
+                continue
+            for key in list(v):
+                rec = v.get(key)
+                if isinstance(rec, dict) and norm(rec.get("path")) == old:
+                    v.pop(key)
+                    hit(name)
+        elif kind == "rows":
+            if not isinstance(v, list):
+                continue
+            keep = [r for r in v
+                    if not (isinstance(r, dict) and norm(r.get("path")) == old)]
+            hit(name, len(v) - len(keep))
+            STATE[name] = keep
+
+    # The top-level keys that are a prefix plus a path, matched on the TAIL
+    # exactly as move_state_keys matches them - "acted:" carries tags of one
+    # and of two segments, so the only reliable thing about these keys is
+    # that the path is at the end.
+    for key in list(STATE):
+        if not key.startswith(STATE_PATH_PREFIXES):
+            continue
+        if key.endswith(old) or (old + "|") in key:
+            STATE.pop(key)
+            hit("<prefixed keys>")
+
+    return sum(took.values()), took
+
+
+def project_live_reason(path):
+    """Is somebody working in this project right now? The refusal, in words.
+
+    A removal empties every record the pair runs on - which window is the
+    executor, which port its channel answers on, what it has compacted at -
+    so doing it under a live pair would not stop the windows, it would
+    orphan them: they keep running, keep firing hooks, and the bridge no
+    longer knows who they are. That is worse than either outcome the owner
+    was choosing between, so it is refused rather than warned about.
+
+    Named, not counted. "This pair is busy" sends a person looking; "the
+    executor window (pid 8124) is still running" tells them which window to
+    close. Same reason `refuse_replacement` names a pid (SS5.14).
+
+    Empty string means nothing is running, and it fails OPEN: a record with
+    no pid, or a pid the OS will not answer about, is not evidence that a
+    window is there. A removal blocked by a ghost record is a button that
+    does nothing, for ever, with no way round it.
+    """
+    for name, what in (("pids", "window"), ("channels", "channel")):
+        for key, rec in list((STATE.get(name) or {}).items()):
+            if key.rpartition("|")[0] != norm(path):
+                continue
+            pid = (rec or {}).get("pid") if isinstance(rec, dict) else None
+            if pid and sessions.pid_alive(pid):
+                return ("the %s %s (pid %s) is still running - close that "
+                        "window first, or hand the pair over, and then "
+                        "remove the project"
+                        % (key.rpartition("|")[2] or "session", what, pid))
+    return ""
+
+
+def forget_project(path, why):
+    """Remove a project from the bridge's list. The owner's decision.
+
+    Removes it from `config.json` - `projects` and its colour in `marks`,
+    which are the only two places in that file that hold a path - and from
+    STATE, by the inventory. NOTHING in the project folder is touched: no
+    hooks, no `.mcp.json`, no `.gitignore` line, and above all not
+    `bridge-logs/`, which is the carried history and belongs to the folder
+    rather than to this machine's list (ANALYSIS-portable-history.md 2).
+    Taking the hooks out is `uninstall()`, a different decision with a
+    different button.
+
+    `calibration.json` is not touched either, deliberately. A calibration
+    entry is a MEASUREMENT of what a window on this machine survived; the
+    right moment to decide its fate is adoption, where a local measurement
+    and a carried one are weighed against each other with a policy
+    (`store.calib_move`). Deleting measurements as a side effect of tidying
+    a list would throw away the only evidence `plan_for` has, and would do
+    it silently.
+
+    ONE CONSEQUENCE WORTH EXPECTING. The finding "this folder carries
+    history under another path" lives in `STATE["carried_found"]`, so a
+    removal clears it - but the rows it was read FROM are in the project's
+    own bridge-logs, which are untouched. Add the project again and the
+    finding comes back, correctly: nothing about the folder changed, so the
+    same evidence produces the same offer. That is the merge working, not a
+    bug, and it is written here because a returning offer looks like one.
+
+    The trace is `STATE["forget_trace"]`, in the spirit of `moved_trace`:
+    a removal cannot be undone, so what it took has to be readable
+    afterwards.
+    """
+    key = norm(path)
+    if not key:
+        return {"ok": False, "error": "no project named"}
+    busy = project_live_reason(key)
+    if busy:
+        return {"ok": False, "error": busy, "live": True}
+    name = project_name(key)
+    with _lock:
+        was_watched = False
+        for spelling in list(CFG.get("projects") or {}):
+            if norm(spelling) == key:
+                CFG["projects"].pop(spelling, None)
+                was_watched = True
+        mark = ""
+        for spelling in list(CFG.get("marks") or {}):
+            if norm(spelling) == key:
+                mark = CFG["marks"].pop(spelling, "") or mark
+        if was_watched or mark:
+            store.save_config(CFG)
+        dropped, took = drop_project_state(key)
+        rec = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "path": key,
+               "name": name, "why": why, "in_config": was_watched,
+               "mark": mark, "state_dropped": dropped,
+               "containers": took}
+        trail = STATE.setdefault("forget_trace", [])
+        trail.append(rec)
+        del trail[:-40]
+        save_state()
+    # Bridge-side only. `project_dir=` would write the line into the
+    # project's own bridge-logs, and this is the one action whose whole
+    # promise is that the folder is not touched.
+    store.journal("project", "Removed %s from the list: %d record%s dropped "
+                  "(%s)%s. The folder was not touched - hooks, .mcp.json and "
+                  "bridge-logs are as they were, and calibration is kept."
+                  % (name, dropped, "" if dropped == 1 else "s",
+                     ", ".join("%s %d" % (k, n)
+                               for k, n in sorted(took.items())) or "nothing",
+                     "" if was_watched else "; it was not in the config, only "
+                     "in the bridge's live state"),
+                  name, "", "log")
+    return {"ok": True, "path": key, "name": name, "in_config": was_watched,
+            "state_dropped": dropped, "containers": took}
+
+
+def migrate_moved_project(path):
+    """Apply the owner's claim that this project used to live somewhere else.
+
+    ANALYSIS-portable-history.md step 7, and the ONLY step that touches what
+    the bridge decides from. Steps 1-6 move what a person reads; this moves
+    the measurements, so it runs on a written-down decision
+    (`projects[path]["moved_from"]`, set at /adopt-history and nowhere else)
+    and never on a guess.
+
+    Idempotent by construction: once an old key has been re-keyed it no
+    longer exists, so a second pass finds nothing to move. The trace records
+    what happened anyway, because "it did nothing" and "it was never asked"
+    look the same in a journal otherwise.
+
+    Never raises: it runs at startup and behind an endpoint, and a bad claim
+    must cost a warning rather than a boot.
+    """
+    with _lock:
+        entry = (CFG.get("projects") or {}).get(norm(path)) or {}
+        claims = [norm(c) for c in (entry.get("moved_from") or [])]
+    new = norm(path)
+    claims = [c for c in claims if c and c != new]
+    done = []
+    for old in claims:
+        try:
+            with _lock:
+                # BEFORE the move, while they are still under the old key -
+                # afterwards a local record and a carried one sit in the
+                # same list and nothing tells them apart. A compaction
+                # record is evidence, and where it was measured is part of
+                # it (rule 33). Tagged here rather than inside
+                # move_state_keys, which walks every container the same way
+                # and must not learn what any one of them means.
+                for key, rows in (STATE.get("compactions") or {}).items():
+                    if key.rpartition("|")[0] != old or not \
+                            isinstance(rows, list):
+                        continue
+                    for row in rows:
+                        if isinstance(row, dict):
+                            row.setdefault("carried_from", old)
+                moved, collided = move_state_keys(old, new)
+                if moved or collided:
+                    save_state()
+            cal = store.calib_move(old, new)
+        except Exception:
+            store.journal("project", "Could not apply the move of %s from "
+                          "%s: %s" % (project_name(path), old,
+                                      traceback.format_exc()[-200:]),
+                          project_name(path), "", "warn", project_dir=path)
+            continue
+        rec = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "from": old,
+               "to": new, "state_moved": moved, "state_dropped": collided,
+               "calib_moved": cal.get("moved", 0),
+               "calib_kept_local": cal.get("kept_local", 0)}
+        done.append(rec)
+        if moved or collided or cal.get("moved") or cal.get("kept_local"):
+            # The trace, in the spirit of path_was: a record on disk of what
+            # this did, so a wrong claim can be understood after the fact
+            # rather than guessed at. Bounded, because STATE is read whole
+            # on every /state.
+            with _lock:
+                trail = STATE.setdefault("moved_trace", [])
+                trail.append(rec)
+                del trail[:-40]
+                save_state()
+            store.journal("project", "Applied the move of %s: %d record%s "
+                          "re-keyed from %s, %d dropped because this machine "
+                          "already had one, %d calibration entr%s adopted, "
+                          "%d left alone because a local measurement already "
+                          "existed"
+                          % (project_name(path), moved,
+                             "" if moved == 1 else "s", old, collided,
+                             cal.get("moved", 0),
+                             "y" if cal.get("moved") == 1 else "ies",
+                             cal.get("kept_local", 0)),
+                          project_name(path), "", "log", project_dir=path)
+    return done
+
+
+def migrate_moved_projects():
+    """Every claim on file, applied. Startup path; never raises."""
+    with _lock:
+        paths = list(CFG.get("projects") or {})
+    out = []
+    for p in paths:
+        try:
+            out += migrate_moved_project(p)
+        except Exception:
+            store.journal("bridge", "Could not apply a project move: %s"
+                          % traceback.format_exc()[-200:], level="warn")
+    return out
+
+
+def note_carried_paths(path):
+    """Record that this folder carries history written under another path.
+
+    ANALYSIS-portable-history.md step 5, and it is deliberately only half a
+    feature: it REPORTS. A row inside <project>/bridge-logs is about that
+    project by construction, so re-keying it into the feed needs nobody's
+    permission - but a path is not a project, and saying "e:\\projects\\game and
+    c:\\projects\\game are the same work" is a claim about identity that only the
+    owner can make. `relayout.retired_tree_users` is the same shape and was
+    written for the same reason.
+
+    So this writes nothing to config.json and starts no migration. It leaves
+    a finding in STATE for the panel to offer, and says it once at `warn`.
+
+    The finding does not go away by itself: the carrier keeps the old paths
+    for ever, because the merge never rewrites the folder it reads. A path
+    the owner has already claimed at /adopt-history is dropped from what is
+    offered, which is the only thing that shrinks the list.
+    """
+    found = store.scan_project_history(path)
+    mine = norm(path)
+    others = {p: n for p, n in (found.get("paths") or {}).items()
+              if p and p != mine}
+    with _lock:
+        claimed = [norm(p) for p in
+                   ((CFG.get("projects") or {}).get(mine) or {})
+                   .get("moved_from", [])]
+    others = {p: n for p, n in others.items() if p not in claimed}
+    with _lock:
+        book = STATE.setdefault("carried_found", {})
+        was = (book.get(mine) or {}).get("paths") or {}
+        if others:
+            book[mine] = {"paths": others, "at": time.time()}
+        else:
+            book.pop(mine, None)
+        save_state()
+    # Once per new finding, not once per start: the same folder is scanned
+    # at every boot and at every /config, and a warning that repeats is a
+    # warning people stop reading.
+    if others and others != was:
+        store.journal("project", "%s carries history written under another "
+                      "path: %s. Nothing has been changed - if that is this "
+                      "same project moved, say so in the panel and the "
+                      "bridge will record it."
+                      % (project_name(path),
+                         "; ".join("%s (%d line%s)"
+                                   % (p, n, "" if n == 1 else "s")
+                                   for p, n in sorted(others.items()))),
+                      project_name(path), "", "warn", project_dir=path)
+    return others
+
+
+def merge_carried_history(why, only=None):
+    """Read back the journal a project folder carried here, once.
+
+    ANALYSIS-portable-history.md step 3. `journal()` has always written each
+    line into the project's own bridge-logs as well as into data/logs, so
+    the carrier was already full; nothing read it back, and a project moved
+    to another machine arrived with a history the bridge could not see. On
+    2026-08-28 this project moved E: -> C: and every line written before the
+    move stayed invisible to the feed.
+
+    A move is an event, not background work, so this runs at exactly two
+    moments and never on a tick: here at startup, and where a project enters
+    the watch list (/config, /add-project).
+
+    Deliberately NOT under _lock and deliberately not touching STATE. It is
+    file work - read the carrier, append what is missing to data/logs - and
+    holding the lock across it would serialise the whole daemon behind other
+    people's disks. The projects are copied out of CFG once, before any I/O.
+
+    `only` narrows it to one project. Nothing here raises: this is a startup
+    path, and a folder that cannot be read must cost a warning, never a boot.
+    """
+    with _lock:
+        paths = [only] if only else list(CFG.get("projects") or {})
+    for path in paths:
+        if not path or not os.path.isdir(path):
+            continue
+        try:
+            # Step 5, before the merge and from the same files: WHOSE paths
+            # does this folder carry? The merge re-keys rows on their way
+            # into data/logs, but it never rewrites the carrier, so this
+            # finding stays true until a person acts on it - which is the
+            # point. It reports and repairs nothing; the claim "these two
+            # paths are one project" is the owner's and is made at
+            # /adopt-history, never here.
+            note_carried_paths(path)
+            got = store.merge_project_history(path)
+        except Exception:                      # an edge path never raises
+            # Names one project, so it carries one: the same principle the
+            # other lines here follow, and it costs nothing when the folder
+            # is the unreadable thing - journal() skips a base it cannot
+            # write to instead of raising.
+            store.journal("project", "Could not read the carried history of "
+                          "%s: %s" % (project_name(path),
+                                      traceback.format_exc()[-200:]),
+                          project_name(path), "", "warn", project_dir=path)
+            continue
+        if got.get("errors"):
+            store.journal("bridge", "Parts of the carried history of %s "
+                          "could not be read and were skipped: %s"
+                          % (project_name(path), "; ".join(got["errors"][:3])),
+                          project_name(path), "", "warn", project_dir=path)
+        if got.get("no_path"):
+            # A pathless row passes EVERY project's feed filter, so letting
+            # imported ones through would flood every pair's feed at once.
+            store.journal("bridge", "%d carried line%s of %s named no "
+                          "project and %s not imported - a line with no path "
+                          "shows in every project's feed"
+                          % (got["no_path"], "" if got["no_path"] == 1 else "s",
+                             project_name(path),
+                             "was" if got["no_path"] == 1 else "were"),
+                          project_name(path), "", "warn", project_dir=path)
+        if got.get("added"):
+            store.journal("bridge", "Took %d line%s of history %s had "
+                          "carried with it, over %d day%s (%d written on "
+                          "another machine) - %s"
+                          % (got["added"], "" if got["added"] == 1 else "s",
+                             project_name(path), got["days"],
+                             "" if got["days"] == 1 else "s",
+                             got["rekeyed"], why),
+                          project_name(path), "", "log", project_dir=path)
 
 
 def migrate_compaction_points():
@@ -2037,6 +2589,12 @@ def wall_view(sess, path):
            "room_to_wall": max(0, wall - used),
            "room_to_wall_low": (max(0, wall_low - used) if wall_low else None),
            "compact": compact or None, "compact_source": compact_src,
+           # Did this number come from a compaction somebody SAW, or from
+           # the percentage the bridge asked for? `assumed` above answers
+           # that for the window and plan_for refuses to decide without it;
+           # the compaction point had no such flag, so an assumption was
+           # read as a measurement one branch further down. See rule 1b.
+           "compact_measured": bool(measured_compact),
            "compact_due": bool(compact and used >= compact),
            # Rule 8: without the compaction point there is no way to know
            # whether a compaction fires before the wall does, so the distance
@@ -2829,6 +3387,18 @@ def compaction_survivable(path, role):
     best = None
     hist = (STATE.get("compactions") or {}).get(
         "%s|%s" % (norm(path), role)) or []
+    # A record carried across from another machine (step 7 of the portable
+    # history: it is tagged where it is adopted, never inferred here) is
+    # evidence about THAT computer's client and window. It is real evidence
+    # and it is not thrown away - it is what a freshly moved pair has
+    # instead of nothing - but the moment this machine has measured the
+    # same pair even once, the local measurement is the current one and the
+    # carried figures step aside. Rule 33, applied where it can act rather
+    # than only where it is written down.
+    local = [r for r in hist if isinstance(r, dict)
+             and not r.get("carried_from")]
+    if any(r.get("tokens") and r.get("after") for r in local):
+        hist = local
     for row in hist:
         if row.get("tokens") and row.get("after"):
             n = int(row["tokens"])
@@ -3255,9 +3825,37 @@ def plan_for(sess, path):
     #     does fail has its own immediate path: StopFailure with an
     #     invalid/context error rotates the executor there and then, which
     #     is when a replacement is genuinely earned.
+    #
+    #     AND THE POINT HAS TO BE ONE SOMEBODY SAW. "no compaction is coming"
+    #     is a claim about where compaction fires, so it may only be made
+    #     from a measured point. With none on record `wall_view` falls back
+    #     to the percentage the bridge asked for - and §5.29 measured that
+    #     the percentage does NOT move the point in this client build: ten
+    #     samples from windows given 80 and 70 all landed at 996k-999k. So
+    #     the fallback is not a weak estimate, it is a number already known
+    #     to be wrong, and reading it here turned an assumption into "so
+    #     none is coming".
+    #
+    #     2026-08-28, one of this bridge's own pairs. The project had
+    #     moved from one drive to another; calibration and the
+    #     compaction history are keyed by project path, so both stayed
+    #     behind under the old key and the live pair started with an
+    #     empty entry. `compact` became 700k (70% of 1M, assumed) and
+    #     `wall` 967k (window - RESERVED_TOKENS, assumed, because
+    #     compaction_survivable had no rows either). A session carrying 970k
+    #     - 24k BELOW the 994k point its own ten samples record - read as
+    #     "270k past a compaction point that never fired", and was handed
+    #     over. Thirteen times between 07:08:23 and 09:12:56.
+    #
+    #     Falling through instead lands on rule 2, which says "compacting"
+    #     and stands aside - which is what the bridge did before 2026-08-21,
+    #     when these sessions compacted at 998k and lived (§5.32). The
+    #     narrowness matters: §5.22's poisoned 776k was a MEASURED point, so
+    #     that case still fires here, and `compaction_point`'s newest-sample
+    #     anchor (§5.29) is what keeps a poisoned one from lasting.
     wall = compaction_too_big(path, sess.get("role") or "executor",
                               wv.get("window"))
-    if compact and wall and used >= wall:
+    if compact and wall and used >= wall and wv.get("compact_measured"):
         coming = compact < wall and used - compact <= LARGEST_TURN_SEEN
         if not coming:
             why = ("%dk past a compaction point of %dk that never fired - "
@@ -3815,7 +4413,7 @@ def remap_archive(path, why=""):
     except Exception:
         store.journal("archive", "Could not start the archive map rebuild "
                       "(%s): %s" % (why, traceback.format_exc()[-200:]),
-                      project_name(path), "", "log")
+                      project_name(path), "", "log", project_dir=path)
 
 
 def last_session_id(path, role):
@@ -3832,8 +4430,16 @@ def last_session_id(path, role):
     return best
 
 
-def mark_registered(path, role):
-    """A session proved it is alive: it started, or its channel connected."""
+def mark_registered(path, role, via="session"):
+    """A session proved it is alive: it started, or its channel connected.
+
+    `via` says WHICH, and the difference decides one thing only: whether
+    this ends a failed-handover streak. "session" is a SessionStart, fired
+    by the window itself as it comes up. "channel" is a registration on
+    /channel/register, which a channel PROCESS sends - and a channel process
+    outlives the window that spawned it and heartbeats every 45 s whatever
+    became of it (§5.3).
+    """
     key = "%s|%s" % (norm(path), role)
     with _lock:
         entry = (STATE.get("pids") or {}).get(key)
@@ -3847,7 +4453,33 @@ def mark_registered(path, role):
         # simply closed: nothing else clears it but a completed handover,
         # and a pair that cannot be handed over at all is a worse fault than
         # the loop the count exists to stop.
-        (STATE.get("handover_failed") or {}).pop(norm(path), None)
+        #
+        # BUT THE EVENT MUST NOT BE ABLE TO PRODUCE ITS OWN WITNESS (rule
+        # 30). Handing over STOPS the old window; its channel process lives
+        # on and re-registers within 45 s, so the corpse of the window that
+        # failed to be replaced was clearing the streak that counts the
+        # failure. Measured here 2026-08-28: thirteen handovers between
+        # 07:08:23 and 09:12:56, the count reaching 1 and being wiped every
+        # cycle, so `handover_blocked`'s hold at HANDOVER_FAILS_BEFORE_HOLD
+        # was never once reached. The journal shows the clearing witness
+        # each time - "Noticed a live executor window (its channel is
+        # answering)", 31-45 s after each handover. Same shape as 2026-08-22
+        # (§5.29), where the hold was written; the hold worked, and this
+        # unwrote it.
+        #
+        # So: only a SessionStart, and only for a role the failed handover
+        # was actually waiting for. Both halves are load-bearing - a channel
+        # registration is exactly what a leftover can fake, and a planner
+        # coming up is no evidence at all about an executor's replacement.
+        # A record with no roles is one written before this existed and
+        # clears on any role, because what it was waiting for cannot be
+        # established.
+        book = STATE.get("handover_failed") or {}
+        rec = book.get(norm(path))
+        if rec is not None and via == "session":
+            roles = rec.get("roles") if isinstance(rec, dict) else None
+            if not roles or role in roles:
+                book.pop(norm(path), None)
         save_state()
 
 
@@ -4134,6 +4766,12 @@ def expire_handover(path):
         rec = book.setdefault(norm(path), {"n": 0, "at": 0})
         rec["n"] = int(rec.get("n") or 0) + 1
         rec["at"] = time.time()
+        # WHICH half never arrived. The streak is stored per project, but
+        # only a window for one of these roles is evidence that the thing
+        # swallowing them is over - a planner coming up says nothing about
+        # an executor handover, and it used to end the streak all the same.
+        rec["roles"] = sorted(set(list(rec.get("roles") or []) +
+                                  list(waiting or [])))
         save_state()
     store.journal("rotation", "The handover started %d min ago never "
                   "finished - %s never came up. Clearing it so the bridge "
@@ -9692,18 +10330,51 @@ class Handler(BaseHTTPRequestHandler):
                     STATE["channels_view"] = {
                         "%s|%s" % k: {"online": time.time() - c["ts"] < 120}
                         for k, c in CHANNELS.items()}
+                # OUTSIDE the lock: pairs_view reaches open_debt, which
+                # reads files, and file I/O under _lock once serialised the
+                # whole daemon - see the note in do_POST.
+                rows = pairs_view()
+                # The "all pairs" feed shows lines from several projects at
+                # once, and the panel labels each one by looking its path up
+                # in `pairs` - which is what makes that view legal at all
+                # (every line names its own pair). A line whose project has
+                # been removed finds nothing there and draws UNLABELLED,
+                # which the panel's own key reads as "this line is about
+                # the bridge itself". So a removed project would go on
+                # speaking, in the one voice reserved for the bridge.
+                # events.jsonl is append-only and is not rewritten - the
+                # history is still there for anyone reading the files. This
+                # is the VIEW dropping rows it cannot label, and it is why
+                # removal takes a project out of the feed as well as out of
+                # the strip.
+                feed = store.recent_events(40, project=want_feed)
+                if not want_feed:
+                    feed = [e for e in feed
+                            if not e.get("path") or e.get("path") in rows]
                 return self._send(200, {
                     "state": STATE,
-                    "events": store.recent_events(40, project=want_feed),
+                    "events": feed,
                     "feed_project": norm(want_feed) if want_feed else "",
                     # One row per pair for the strip above the panel. Its
                     # words come from the same place the pin's do, so the
                     # two cannot end up disagreeing about a project.
-                    "pairs": pairs_view(),
+                    "pairs": rows,
                     # True while the old folder layout is still half moved,
                     # so the panel can put the button in front of the owner
                     # at the moment it means something instead of burying it.
                     "relayout_pending": relayout.pending(),
+                    # Projects whose own bridge-logs carry rows written
+                    # under a different path - almost always the same
+                    # project on the machine it came from. Read from the
+                    # finding note_carried_paths left, never scanned here:
+                    # /state is polled every couple of seconds, and walking
+                    # everybody's log folders on each poll would be file I/O
+                    # on the panel's clock. It is offered, not acted on -
+                    # the claim belongs to the owner (/adopt-history).
+                    "carried_found": STATE.get("carried_found") or {},
+                    "moved_from": {norm(p): (c or {}).get("moved_from") or []
+                                   for p, c in
+                                   (CFG.get("projects") or {}).items()},
                     "headline": status_headline(),
                     "canon": {p: norm(p) for p in CFG.get("projects", {})},
                     "loop_off": STATE.get("loop_off") or {},
@@ -9782,8 +10453,16 @@ class Handler(BaseHTTPRequestHandler):
                     "handoff": {p: store.read_handoff(p)[:2000]
                                 for p in proj}})
             with open(PANEL, "rb") as fh:
-                return self._send(200, fh.read(),
-                                  "text/html; charset=utf-8")
+                page = fh.read()
+            # The panel needs the secret to reach /adopt-history, which
+            # writes config.json. Substituted here rather than stored in
+            # the file, so the value is never on disk in the package and
+            # verify_package still hashes a file that has no secret in it.
+            # See the note beside SECRET in panel.html for why this does
+            # not weaken what the secret actually protects.
+            page = page.replace(b"__BRIDGE_SECRET__",
+                                SECRET.encode("utf-8", "replace"))
+            return self._send(200, page, "text/html; charset=utf-8")
         except (ConnectionResetError, ConnectionAbortedError,
                 BrokenPipeError):
             return          # browser closed a poll mid-flight - routine
@@ -9857,7 +10536,10 @@ class Handler(BaseHTTPRequestHandler):
                            # same key
                            "ppid": body.get("ppid")}
                     save_state()
-                mark_registered(path, role)
+                # via="channel": a channel process, which outlives its
+                # window and re-registers every 45 s (§5.3), so this may
+                # not end a failed-handover streak. See mark_registered.
+                mark_registered(path, role, via="channel")
                 with _lock:
                     have = [k for k, v in (STATE.get("sessions") or {}).items()
                             if norm(v.get("path")) == path
@@ -10257,10 +10939,30 @@ class Handler(BaseHTTPRequestHandler):
                 warn_config_handedits([k for k in CONFIG_KEYS
                                        if k in body])
                 with _lock:
+                    # What the owner CLAIMED must survive a settings write.
+                    # This endpoint replaces the whole projects dict with
+                    # the panel's copy, so anything the panel does not know
+                    # to send back is erased by the next unrelated toggle -
+                    # the same shape as §5.8, where a chain edit could not
+                    # survive its own render. `moved_from` is written by
+                    # /adopt-history and by nothing else, so it is carried
+                    # across here rather than trusted to the round trip.
+                    # It is deliberately one-way: there is no gesture that
+                    # takes a claim back, and inventing one silently would
+                    # be worse than leaving it to a hand-edit.
+                    kept_moved = {
+                        norm(k): list((v or {}).get("moved_from") or [])
+                        for k, v in (CFG.get("projects") or {}).items()
+                        if isinstance(v, dict) and v.get("moved_from")}
                     for key in CONFIG_KEYS:
                         if key in body:
                             CFG[key] = body[key]
                     if "projects" in body:
+                        for k, v in (CFG.get("projects") or {}).items():
+                            old = kept_moved.get(norm(k))
+                            if old and isinstance(v, dict) \
+                                    and not v.get("moved_from"):
+                                v["moved_from"] = old
                         # This endpoint writes the whole projects dict, so a
                         # project can enter the watch list here without ever
                         # passing handle_add_project - which is the only
@@ -10286,29 +10988,72 @@ class Handler(BaseHTTPRequestHandler):
                         CFG["projects"] = folded
                         _warn_unmarked_projects(folded)
                     store.save_config(CFG)
+                if "projects" in body:
+                    # OUTSIDE the lock on purpose: this reads and appends
+                    # journal files, and file I/O under _lock is what once
+                    # serialised the whole daemon behind half a megabyte of
+                    # JSON. A project entering the watch list is one of the
+                    # two moments a carried history is read back.
+                    merge_carried_history("it entered the watch list")
                 return self._send(200, {"ok": True})
             if p.startswith("/remove-project"):
+                # "Stop watching": take the hooks back OUT of the folder,
+                # and then forget the project. Two halves, and only this
+                # endpoint does the first - the strip's button does the
+                # second alone, because a project carried from another
+                # machine has no hooks here to remove.
+                #
+                # The state half used to be four container names written
+                # out here by hand. `sessions` was not among them, and
+                # `pair_paths()` builds a row from a session record, so
+                # every "removed" project kept its row in the strip. It
+                # goes through the one inventory now (rule 28, one name
+                # one file: STATE_PATHS has two consumers, no copies).
                 from . import install as installer
                 target = norm(body.get("path") or "")
+                busy = project_live_reason(target)
+                if busy:
+                    return self._send(200, {"ok": False, "error": busy,
+                                            "live": True})
                 try:
                     removed = installer.uninstall(target)
                 except Exception as exc:
                     return self._send(200, {"ok": False, "error": str(exc)})
-                with _lock:
-                    (CFG.get("projects") or {}).pop(target, None)
-                    for k in list(CFG.get("projects") or {}):
-                        if norm(k) == target:
-                            CFG["projects"].pop(k, None)
-                    store.save_config(CFG)
-                    (STATE.get("loops") or {}).pop(target, None)
-                    for d0 in ("rc", "down", "pids", "inflight"):
-                        for k in list(STATE.get(d0) or {}):
-                            if k.startswith(target + "|") or k == target:
-                                STATE[d0].pop(k, None)
-                    save_state()
-                store.journal("project", "Stopped watching %s"
-                              % os.path.basename(target), level="log")
-                return self._send(200, {"ok": True, "removed": removed})
+                out = forget_project(target, "the owner stopped watching it")
+                # This one line DOES go into the folder, unlike the one
+                # forget_project writes: uninstall has just changed files
+                # in there, so the folder's own record should say so.
+                store.journal("project", "Stopped watching %s - the bridge took its own hooks, status line and channel entry back out"
+                              % os.path.basename(target),
+                              project_name(target), "", "log",
+                              project_dir=target)
+                out["removed"] = removed
+                return self._send(200, out)
+            if p.startswith("/forget-project"):
+                # Remove a project from the bridge's LIST, and nothing
+                # else. The owner asked for this per row: "I can see old
+                # projects from another computer in the bridge, I need a
+                # button to remove them from this list so they do not get
+                # in the way, for each project separately."
+                #
+                # Secret-checked like /adopt-history and for the same
+                # reason: it writes config.json and empties state, and
+                # anything that can reach localhost should not be able to
+                # delete somebody's pair.
+                if self.headers.get("X-Bridge-Secret") != SECRET:
+                    return self._send(403, {"error": "bad secret"})
+                return self._send(200, forget_project(
+                    norm(body.get("path") or ""),
+                    "the owner removed it from the list"))
+            if p.startswith("/adopt-history"):
+                # The one place the claim "these two paths are one project"
+                # is made, and it is made by a person pressing a button.
+                # Secret-checked like /verdict and /task, because it writes
+                # config.json - anything that can reach localhost should not
+                # be able to reassign somebody's history.
+                if self.headers.get("X-Bridge-Secret") != SECRET:
+                    return self._send(403, {"error": "bad secret"})
+                return self._send(200, handle_adopt_history(body))
             if p.startswith("/add-project"):
                 return self._send(200, handle_add_project(body))
             if p.startswith("/remote"):
@@ -10440,14 +11185,94 @@ def handle_add_project(body):
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
     store.journal("project", "Added project %s" % os.path.basename(path),
-                  os.path.basename(path), level="log")
+                  os.path.basename(path), "", "log", project_dir=path)
     with _lock:
         # norm(), not the path as typed: everything the bridge keys is
         # keyed by norm(), so abspath()'s preserved capitals made a
         # second project that existed in config.json and nowhere else.
         CFG.setdefault("projects", {}).setdefault(norm(path), {})
         store.save_config(CFG)
+    # The other of the two moments (see merge_carried_history). Outside the
+    # `with _lock` above, because it is file work.
+    merge_carried_history("it was added to the bridge", norm(path))
     return {"ok": True, "added": added, "path": path}
+
+
+def handle_adopt_history(body):
+    """Record the owner's claim that a path this folder carries was itself.
+
+    ANALYSIS-portable-history.md steps 6 and 7. Writes
+    `projects[<path>]["moved_from"]` and then acts on it, by calling
+    `migrate_moved_project`.
+
+    The two halves stayed separate deliberately, and still are. The claim
+    is the OWNER'S: no amount of evidence in a carried folder makes the
+    bridge decide that two paths are one project, because the wrong guess
+    silently mixes two histories and there is no undo. `note_carried_paths`
+    only ever OFFERS. Recording is idempotent - the list is a set in list
+    form, merged rather than replaced, because findings arrive one path at
+    a time as a folder is carried between machines - and the migration is
+    idempotent too, so pressing twice records once and moves nothing the
+    second time.
+
+    Written down BEFORE it is applied, in that order: if the migration
+    raises, the claim survives in the config and `migrate_moved_projects()`
+    retries it at the next start. The other way round, a crash would lose
+    both.
+
+    The list is a set in list form: pressing twice records once. Merged
+    rather than replaced, because the findings arrive one path at a time as
+    a folder is carried between machines, and each press is about the paths
+    in front of the person at that moment.
+    """
+    path = norm(body.get("path") or "")
+    if not path:
+        return {"ok": False, "error": "no project named"}
+    claims = body.get("from")
+    if isinstance(claims, str):
+        claims = [claims]
+    claims = [norm(c) for c in (claims or []) if str(c).strip()]
+    claims = [c for c in claims if c and c != path]
+    if not claims:
+        return {"ok": False, "error": "no earlier path named"}
+    with _lock:
+        entry = (CFG.get("projects") or {}).get(path)
+        if entry is None:
+            return {"ok": False,
+                    "error": "%s is not a project this bridge watches"
+                             % os.path.basename(path.rstrip("\\/")) or path}
+        have = list(entry.get("moved_from") or [])
+        added = [c for c in claims if c not in have]
+        entry["moved_from"] = have + added
+        store.save_config(CFG)
+    if added:
+        store.journal("project", "You said %s was this project on another "
+                      "machine: %s. Recorded - the bridge has changed "
+                      "nothing else, and no migration reads this yet."
+                      % ("this path" if len(added) == 1 else "these paths",
+                         "; ".join(added)),
+                      project_name(path), "", "log", project_dir=path)
+    # The claim is recorded; now act on it. This is the only caller
+    # besides startup, and it is what makes the button do something on
+    # the spot rather than at the next restart (rule 31: say who a
+    # change reaches and when - this one reaches the running daemon).
+    if added:
+        try:
+            migrate_moved_project(path)
+        except Exception:
+            store.journal("project", "The claim was recorded but could not "
+                          "be applied: %s" % traceback.format_exc()[-200:],
+                          project_name(path), "", "warn", project_dir=path)
+    # Recompute the finding so the panel stops offering what was just
+    # claimed. Outside the lock, because it reads log files.
+    try:
+        note_carried_paths(path)
+    except Exception:
+        pass                                   # an offer is not worth a 500
+    with _lock:
+        out = list(((CFG.get("projects") or {}).get(path) or {})
+                   .get("moved_from") or [])
+    return {"ok": True, "path": path, "moved_from": out, "added": added}
 
 
 def handle_telegram(step, body):
@@ -10676,6 +11501,22 @@ def main():
     if moved:
         store.journal("bridge", "Re-keyed %d stored entries to the canonical "
                       "path form" % moved, level="log")
+
+    # AFTER the key migrations, because a project whose key is about to be
+    # folded should be merged under the key it will end up with, and BEFORE
+    # the watchers below, because at this point nothing else is reading or
+    # writing the journal files.
+    merge_carried_history("the bridge started")
+    # Fold the calibration keys before anything reads them, then apply
+    # any move the owner has claimed. Both are no-ops after the first
+    # run; both are here, after the key migrations and before the
+    # watchers, for the same reason the merge is.
+    _cal_folded = store.migrate_calib_keys()
+    if _cal_folded:
+        store.journal("bridge", "Folded %d calibration entr%s onto the "
+                      "canonical path form" % (_cal_folded,
+                         "y" if _cal_folded == 1 else "ies"), level="log")
+    migrate_moved_projects()
 
     gone = forget_unmanaged()
     if gone:

@@ -168,6 +168,57 @@ What it writes into the project:
 Then start the pair from the panel. Two Claude Code windows come up, one per
 role.
 
+## Carrying a project to another computer
+
+A folder brought from another machine brings its history and not its key.
+Everything the bridge measures is keyed by the project's path, and
+`E:\projects\game` and `C:\projects\game` are two keys for one piece of work.
+The pair starts with nothing measured, and the arithmetic falls back on figures
+nobody took here — 70% of the window for the compaction point, `window - 33000`
+for the wall. On a 1M window both are wrong by hundreds of thousands of tokens,
+and a session gets replaced for a wall it never reached.
+
+`bridge-logs/` travels with the project and every line in it records the path it
+was written under, so the bridge can see this without guessing. It merges those
+lines into the feed — a row inside a project's own logs is about that project by
+construction — and says so on the strip: *carries history written under another
+path: E:\… (1894 lines). Nothing has been changed.*
+
+It stops there, deliberately. A path is not a project: saying two paths are the
+same work is a claim about identity, and a wrong one mixes two histories with no
+way back. The button on the finding — **this project moved here** — is the only
+place that claim is made, and only pressing it re-keys the state and the
+calibration onto the current path.
+
+What comes across is marked with the path it was measured under and the day it
+arrived, because a figure from another computer is about that computer's client
+and its window. A local measurement is never replaced by a carried one, however
+much richer the carried one looks; a local entry that has measured nothing is
+replaced, because an initial estimate is not evidence. What the move did is
+written down and kept.
+
+## Removing a project
+
+The **remove** button on a strip row takes the project out of the bridge's list
+— the config and the live state — and touches nothing in the folder: not the
+hooks, not `.mcp.json`, not the `.gitignore` line, and above all not
+`bridge-logs/`, which is carried history and belongs to the folder rather than
+to this machine. Taking the hooks back out is `uninstall` — *stop watching* on
+the projects tab — a different decision with a different button. The
+calibration is kept as well: a measurement's fate is decided when a project is
+adopted, not when a list is tidied.
+
+It works for a project the config does not know about at all, which is the case
+that made it necessary: a machine that has moved shows rows for pairs that
+survive only as leftover session records. A pair with a window still running is
+refused by name — *the executor window (pid 8124) is still running* — because
+emptying those records would not stop the window, it would orphan it. Two
+presses: the first arms the button and says what will and will not happen.
+
+Add the project again later and the carried-history offer comes back. That is
+the same evidence in the same untouched folder producing the same offer, not a
+fault.
+
 ## The panel
 
 At `http://127.0.0.1:8765/`.
@@ -178,7 +229,15 @@ Each row shows how far through its life each half is: not how full its window
 is, but how close it is to being replaced. Window fill resets at every
 compaction and only tells you where you are inside one cycle; the panel keeps
 it in the hover. Click a row to bring that project below. With one project the
-strip is hidden — there is nothing to choose between.
+strip is hidden — there is nothing to choose between, unless that one project
+is carrying history under another path, or is a leftover the config no longer
+knows about: both are questions the row is the only place to ask.
+
+Each row also carries a **remove** button, which takes that project out of the
+bridge's list. It is described under *Removing a project* below; it is on the
+row rather than on a settings page because the owner asked for one per project,
+and because a button that acts on a project belongs beside the name of the
+project it acts on.
 
 **Everything below the strip is one project**, the one selected in the strip
 or the dropdown. State, buttons, gauges, the note box and the feed all belong
@@ -365,6 +424,12 @@ counting compactions and not by distance alone.
 Rotation writes a handoff, starts the replacement, and gives it the thread.
 Only the half whose own numbers ran out is replaced, and only in the pair whose
 numbers they are — the other projects carry on untouched.
+
+Those numbers are keyed by the project's path, so a folder carried between
+machines arrives with none of them and is measured afresh — see *Carrying a
+project to another computer*. Until the move is claimed the bridge says its
+figures are assumptions and will not conclude from them that no compaction is
+coming.
 
 The account's five-hour limit is the one thing measured across all pairs
 rather than per project, because that is what it belongs to.

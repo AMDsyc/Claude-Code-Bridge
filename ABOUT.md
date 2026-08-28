@@ -103,6 +103,17 @@ is not a framework and it does not try to be one.
   where the fix lives. Refusal costs the report nothing.
 - **Debt register.** A declared temporary solution is written to
   `bridge-logs/DEBT.md`, counted, and shown until it is explicitly closed.
+- **A project that changed computers.** A folder carries its own logs, and every
+  line in them records the path it was written under - so the bridge can see that
+  a project used to live somewhere else, and says so. It does not act on it: that
+  two paths are one piece of work is a claim about identity, and it belongs to
+  the owner, who makes it with a button. Only then are the measurements moved -
+  and marked with where they were taken, because a figure from another machine
+  is about that machine.
+- **Removing a project from the list.** One button per row. It clears the list
+  and the live state and touches nothing in the folder - hooks, `.mcp.json` and
+  `bridge-logs/` are left as they are, and a pair with a window still running is
+  refused by name.
 - **Archive and search over it.** Everything the pair said is kept per project
   and indexed; a headless agent can be asked questions about it.
 - **Telegram, optional.** Only what needs a human: something is stuck, a run

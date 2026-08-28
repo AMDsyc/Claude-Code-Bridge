@@ -24,6 +24,7 @@ Two rules here matter more than anything else in this file:
   line rather than the whole log.
 """
 
+import hashlib
 import json
 import os
 import time
@@ -557,6 +558,208 @@ def recent_events(limit=40, project=None):
     return rows[-limit:][::-1]
 
 
+# ---- portable history: the project folder carries its own journal ---------
+#
+# ANALYSIS-portable-history.md. `journal()` above already writes every line
+# twice - once to data/logs and, when project_dir is given, into the
+# project's own bridge-logs. That copy is the carrier: measured 2026-08-28,
+# the project copy of that day held 1894 rows, byte-identical to the 1894
+# rows the central journal held for the same project. What was missing was
+# reading it back, so a project arriving on a new machine brought its
+# history with it and the bridge could not see it.
+#
+# Everything here is FILE work only. It never takes _lock, never reads or
+# writes STATE, and never writes into the project folder - the carrier is
+# read-only. That is the safety property of the whole feature: what the
+# bridge DECIDES from stays in STATE, and this moves only what a person
+# reads.
+
+# Fields that are about the machine the row was written on, not about the
+# event. They are excluded from the fingerprint so that the same event
+# recorded under E:\ and re-keyed to C:\ is recognised as one row - which is
+# the whole point - and so that merging an already-merged row cannot create
+# a duplicate of itself.
+MACHINE_LOCAL_FIELDS = ("path", "path_was")
+
+
+def row_fingerprint(row):
+    """What makes two journal rows the same event, as 16 hex characters.
+
+    Everything except the machine-local fields: `at`, `kind`, `text`,
+    `project`, `session`, `level` and `extra` are written once and do not
+    change when the folder is carried to another computer.
+
+    The stamp is one-second, so two genuinely different events in the same
+    second with the same text, kind and level fold into one. That is
+    accepted deliberately: such rows are indistinguishable to a reader too,
+    and a missed duplicate is cheaper than a doubled feed.
+    """
+    if not isinstance(row, dict):
+        return ""
+    body = {k: v for k, v in row.items() if k not in MACHINE_LOCAL_FIELDS}
+    try:
+        blob = json.dumps(body, sort_keys=True, ensure_ascii=False,
+                          default=str)
+    except Exception:
+        # A row that cannot be serialised has no identity we can compare,
+        # and this is an edge path: give it none rather than raise.
+        return ""
+    return hashlib.sha256(blob.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _day_names(base):
+    """The <date> folders under a bridge-logs directory, oldest first."""
+    out = []
+    try:
+        for name in os.listdir(base):
+            if len(name) == 10 and name[4] == "-" and name[7] == "-" \
+                    and name.replace("-", "").isdigit() \
+                    and os.path.isdir(os.path.join(base, name)):
+                out.append(name)
+    except OSError:
+        return []
+    return sorted(out)
+
+
+def scan_project_history(project):
+    """What a project's own bridge-logs holds, without changing anything.
+
+    Inspection only: it opens files, counts and returns. Nothing is written,
+    no lock is taken. The `paths` count per day is what makes a move
+    visible - a project that came from another machine carries rows whose
+    `path` is that machine's spelling, and the difference between those and
+    norm(project) is the finding a person is later asked about.
+    """
+    out = {"project": norm(project), "days": [], "rows": 0,
+           "paths": {}, "unreadable": []}
+    base = os.path.join(project or "", "bridge-logs")
+    if not project or not os.path.isdir(base):
+        return out
+    for day in _day_names(base):
+        f = os.path.join(base, day, "events.jsonl")
+        if not os.path.exists(f):
+            continue
+        rows = _read_events(f)          # never raises; skips broken lines
+        if not rows and os.path.getsize(f) > 0:
+            out["unreadable"].append(day)
+        out["days"].append({"day": day, "rows": len(rows)})
+        out["rows"] += len(rows)
+        for r in rows:
+            p = r.get("path") or ""
+            out["paths"][p] = out["paths"].get(p, 0) + 1
+    return out
+
+
+def merge_day(project, day):
+    """Bring one day of a project's own journal into data/logs/<day>/.
+
+    Direction is one way, project -> bridge, and it is the only direction
+    there can be: the other machine is not here to be written to, and the
+    bridge does not write into anybody's past.
+
+    Three things this does and a person should be able to check:
+
+    - IDEMPOTENT. The target day is read first and turned into a set of
+      fingerprints; only rows missing from it are appended. Run twice and
+      the file is byte-identical, which is what the case asserts.
+    - RE-KEYED. An imported row carries the path of the machine it was
+      written on, and the feed filter is an exact match against
+      norm(project) - so without this the history would sit in the file and
+      appear in no feed at all. Re-keying is not a guess here and needs
+      nobody's permission: a row found inside <project>/bridge-logs is
+      about that project by construction, because that is where it lies.
+      The original is kept as `path_was` so a wrong import is reversible.
+    - REFUSED IF PATHLESS. `_feed_rows` lets a row with no path through
+      EVERY project's filter, because a pathless line is about the bridge
+      itself. An imported row must therefore never be pathless, or one
+      import would flood every feed at once. Today none can be - only rows
+      that had a project_dir reach the carrier - but the rule is written
+      down and counted rather than left to that.
+
+    The day comes from the FOLDER NAME, never from a row's `at`: two
+    machines' clocks drift, and taking the day from the stamp would scatter
+    one day across two files. For the same reason nothing here is compared
+    against local time, and `last_seen` - a clock with no date (§6.5) - is
+    not touched at all, because it lives in STATE and STATE is not this
+    function's business.
+
+    Returns a dict; it never raises. A broken row is skipped, a broken file
+    is reported and the caller carries on - this runs on the startup path.
+    """
+    out = {"day": day, "read": 0, "added": 0, "already": 0,
+           "no_path": 0, "rekeyed": 0, "error": ""}
+    src = os.path.join(project or "", "bridge-logs", day, "events.jsonl")
+    if not project or not os.path.exists(src):
+        return out
+    want = norm(project)
+    try:
+        incoming = _read_events(src)
+        out["read"] = len(incoming)
+        if not incoming:
+            return out
+
+        target_dir = os.path.join(LOGS, day)
+        target = os.path.join(target_dir, "events.jsonl")
+        seen = set()
+        for r in _read_events(target):
+            fp = row_fingerprint(r)
+            if fp:
+                seen.add(fp)
+
+        fresh = []
+        for row in incoming:
+            if not isinstance(row, dict):
+                continue
+            if not (row.get("path") or ""):
+                out["no_path"] += 1
+                continue
+            fp = row_fingerprint(row)
+            if not fp or fp in seen:
+                out["already"] += 1
+                continue
+            seen.add(fp)
+            keep = dict(row)
+            if keep.get("path") != want:
+                keep["path_was"] = keep.get("path")
+                keep["path"] = want
+                out["rekeyed"] += 1
+            fresh.append(json.dumps(keep, ensure_ascii=False))
+
+        if not fresh:
+            return out
+        # Append-only, and the directory is made here rather than through
+        # day_dir(), which always builds TODAY and would create the wrong
+        # folder for an imported older day.
+        os.makedirs(target_dir, exist_ok=True)
+        with open(target, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(fresh) + "\n")
+        out["added"] = len(fresh)
+    except Exception as exc:
+        out["error"] = "%s: %s" % (type(exc).__name__, exc)
+    return out
+
+
+def merge_project_history(project):
+    """Every day this project carries that the bridge has not got.
+
+    The whole of what a caller needs; `merge_day` is the unit underneath it.
+    Never raises, for the same reason: both callers are startup paths.
+    """
+    total = {"project": norm(project), "days": 0, "added": 0, "already": 0,
+             "no_path": 0, "rekeyed": 0, "errors": []}
+    base = os.path.join(project or "", "bridge-logs")
+    if not project or not os.path.isdir(base):
+        return total
+    for day in _day_names(base):
+        one = merge_day(project, day)
+        total["days"] += 1
+        for k in ("added", "already", "no_path", "rekeyed"):
+            total[k] += one[k]
+        if one["error"]:
+            total["errors"].append("%s %s" % (day, one["error"]))
+    return total
+
+
 # ---- calibration (model x project) ----------------------------------------
 
 def load_calibration():
@@ -570,7 +773,103 @@ def save_calibration(cal):
 
 
 def calib_key(model, project):
-    return "%s|%s" % ((model or "?").lower(), os.path.normpath(project or "?"))
+    """model|project, folded the way every other key in the bridge is.
+
+    It used to be `os.path.normpath` with no `normcase`, and it was the only
+    place in the package that compared a Windows path without folding its
+    case - see `norm` above for why that matters. C:\\path\\to\\Game and
+    c:\\path\\to\\game are one folder and were two calibration entries, so a
+    session could be measured under one spelling and read under the other,
+    and arrive at a window with no measurements at all. `migrate_calib_keys`
+    folds what is already on disk.
+    """
+    return "%s|%s" % ((model or "?").lower(), norm(project) or "?")
+
+
+def migrate_calib_keys():
+    """Fold existing calibration keys onto the canonical path form.
+
+    Runs at every start, like the other migrations, and is a no-op once it
+    has run. A collision - the same model and the same folder under two
+    spellings - keeps the entry with the most compaction samples, because
+    samples are the whole value of the record and the other spelling's
+    entry is the same pair measured under a different name.
+    """
+    with _lock:
+        cal = _read_json(CALIB_PATH, {})
+        moved = 0
+        for old in list(cal):
+            model, _, proj = old.partition("|")
+            new = calib_key(model, proj)
+            if new == old or not proj:
+                continue
+            here, there = cal.get(new), cal[old]
+            if here is None:
+                cal[new] = cal.pop(old)
+            else:
+                mine = len((here or {}).get("compact_samples") or [])
+                theirs = len((there or {}).get("compact_samples") or [])
+                cal[new] = there if theirs > mine else here
+                cal.pop(old)
+            moved += 1
+        if moved:
+            _write_atomic(CALIB_PATH, cal)
+        return moved
+
+
+def calib_move(old_project, new_project):
+    """Bring one project's calibration across from the path it used to have.
+
+    Called only from the "project moved" migration, which runs only on the
+    owner's written claim.
+
+    COLLISION POLICY, and it is the opposite of the one used for STATE.
+    A calibration entry is a MEASUREMENT, and rule 33 says evidence has a
+    shelf life: the client went 2.1.227 -> 2.1.240 in three days, and a
+    figure measured on another computer is about that computer's client and
+    its window. So a local entry that has actually measured something - one
+    compaction sample or more - is never replaced by a carried one, however
+    rich the carried one is. A local entry that has measured NOTHING is
+    replaced, because "initial estimate" is not evidence and the carried
+    figure is.
+
+    What is adopted is MARKED. `how` says where it came from in words,
+    `carried_from` holds the path it was measured under, and
+    `carried_at` when it was brought across - so `compaction_point` and
+    `compaction_survivable` can tell a figure measured here from one that
+    travelled, and so can a person reading the panel. Nothing is deleted:
+    the entry the old key held moves, it does not evaporate.
+    """
+    out = {"moved": 0, "kept_local": 0}
+    with _lock:
+        cal = _read_json(CALIB_PATH, {})
+        changed = False
+        for key in list(cal):
+            model, _, proj = key.partition("|")
+            if norm(proj) != norm(old_project):
+                continue
+            entry = dict(cal[key] or {})
+            fresh = calib_key(model, new_project)
+            here = cal.get(fresh) or {}
+            if len(here.get("compact_samples") or []):
+                # This machine has measured this pair itself. Fresh local
+                # evidence outranks a carried figure, always.
+                out["kept_local"] += 1
+                cal.pop(key)
+                changed = True
+                continue
+            entry["carried_from"] = norm(old_project)
+            entry["carried_at"] = time.strftime("%Y-%m-%d %H:%M")
+            entry["how"] = ("%s (measured on another machine, under %s)"
+                            % (entry.get("how") or "measured",
+                               norm(old_project)))
+            cal[fresh] = entry
+            cal.pop(key)
+            out["moved"] += 1
+            changed = True
+        if changed:
+            _write_atomic(CALIB_PATH, cal)
+    return out
 
 
 def calib_get(model, project, window):

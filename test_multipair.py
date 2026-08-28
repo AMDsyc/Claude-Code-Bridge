@@ -43,6 +43,8 @@ import ast
 import inspect
 import json
 import os
+import re
+import socket
 import sys
 import tempfile
 import threading
@@ -150,6 +152,25 @@ for _n in NAMES:
     os.makedirs(PROJ[_n], exist_ok=True)
 A, B, C = (PROJ[n] for n in NAMES)
 
+def _holds(v, kind, path):
+    """Does this container still name `path`? Shape-aware, like the inventory.
+
+    Used by case 50 to ask the removal the only question that matters, and
+    written once rather than inline three times: a per-shape test copied
+    about is the very drift STATE_PATHS exists to stop.
+    """
+    if kind in ("path", "pair"):
+        return isinstance(v, dict) and any(
+            k == path or k.rpartition("|")[0] == path for k in v)
+    if kind == "value":
+        return isinstance(v, dict) and any(
+            isinstance(r, dict) and daemon.norm(r.get("path")) == path
+            for r in v.values())
+    if kind == "rows":
+        return isinstance(v, list) and any(
+            isinstance(r, dict) and daemon.norm(r.get("path")) == path
+            for r in v)
+    return False
 
 def canon(p):
     return daemon.norm(p)
@@ -265,6 +286,23 @@ print("throwaway daemon on 127.0.0.1:%d - the real one on 8765 is never "
 print("three projects: %s" % ", ".join(NAMES))
 
 
+def _server_gone(exc):
+    """Turn "the shared daemon went quiet" into a sentence.
+
+    Every call in this suite goes to one server, so when that server is
+    not there any more EVERY case after the point fails, and each of them
+    fails with a bare URLError naming a port. That is what an accidental
+    early SRV.shutdown() looked like for a week: a hang with no handler
+    thread, read as a daemon that had died of something in the bridge.
+    Six words here instead of a stack trace.
+    """
+    return RuntimeError(
+        "the suite's shared daemon on 127.0.0.1:%d did not answer (%s). "
+        "Nothing in the bridge does that: look for a shutdown() or a "
+        "server_close() called on SRV before the end of the run - the "
+        "socket stays bound after shutdown(), so this shows up as a hang "
+        "rather than as a refusal." % (PORT, exc))
+
 def post(path, payload, secret=False, timeout=60):
     """POST and give back the parsed body, whatever the status.
 
@@ -286,15 +324,44 @@ def post(path, payload, secret=False, timeout=60):
     except urllib.error.HTTPError as exc:
         out = json.loads(exc.read().decode("utf-8") or "{}")
         code = exc.code
+    except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
+        raise _server_gone(exc)
     if isinstance(out, dict):
         out["status"] = code
     return out
 
 
+def post_rc(path, payload, secret=True):
+    """post(), but handing back (status, body) as two things.
+
+    The cases about REFUSALS read better this way - `(200, True)` and
+    `(403, None)` say what happened in one line - and secret-checked
+    endpoints are the rule rather than the exception among them, so the
+    default is the other way round from post(). Same server, same handler:
+    the difference is the shape of the answer, not where it came from.
+    """
+    head = {"Content-Type": "application/json"}
+    if secret:
+        head["X-Bridge-Secret"] = daemon.SECRET
+    req = urllib.request.Request(
+        "http://127.0.0.1:%d%s" % (PORT, path),
+        data=json.dumps(payload).encode("utf-8"), headers=head)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8") or "{}")
+    except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
+        raise _server_gone(exc)
+
+
 def get(path):
     url = "http://127.0.0.1:%d%s" % (PORT, path)
-    with urllib.request.urlopen(url, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
+        raise _server_gone(exc)
 
 
 def state():
@@ -3140,7 +3207,6 @@ check("and nothing was written into the source tree",
       os.path.isdir(os.path.join(daemon.ROOT, "crashes")), False)
 note("windows opened in the whole run", len(launches()))
 
-SRV.shutdown()
 
 print("\n42. the pinned links stay fresh without a word in the chat")
 print("    The owner: the links have to BE current, and he does not want a")
@@ -3243,6 +3309,879 @@ check("sync_links says so in as many words",
 check("and it opens no connection of its own to check them",
       any(w in inspect.getsource(daemon.sync_links)
           for w in ("urlopen", "urllib", "http.client", "requests")), False)
+
+print("\n43. an ASSUMED compaction point may not conclude 'none is coming'")
+print("    2026-08-28, on this bridge. A project moved drive, and")
+print("    and STATE['compactions'] are keyed by project path, so both")
+print("    stayed under the old key and the live pair started empty.")
+print("    plan_for rule 1b then read two fallbacks as if they were facts:")
+print("    compact = 700k (70% of the window, the percentage the bridge")
+print("    asked for) and wall = 967k (window - RESERVED_TOKENS, because")
+print("    compaction_survivable had no rows either). A session carrying")
+print("    970k - 24k BELOW the 994 509 its own ten samples record - read")
+print("    as '270k past a compaction point that never fired'.")
+print("    Thirteen handovers between 07:08:23 and 09:12:56")
+ASSUMED = os.path.join(TMP, "assumed-point")
+os.makedirs(ASSUMED, exist_ok=True)
+with daemon._lock:
+    daemon.CFG.setdefault("projects", {})[canon(ASSUMED)] = {}
+_sid43 = "assumed-exec-1"
+_sess43 = {"role": "executor", "path": canon(ASSUMED), "session_id": _sid43,
+           "model": "Opus 5", "window": 1000000, "window_observed": True,
+           "context_tokens": 970000, "state": "idle",
+           "last_seen": daemon.now(), "seen_at": time.time(),
+           "turn_costs": [30000]}
+with daemon._lock:
+    daemon.STATE.setdefault("sessions", {})["executor:%s" % _sid43[:8]] = _sess43
+    daemon.STATE.setdefault("last_session", {})[
+        "%s|executor" % canon(ASSUMED)] = _sid43
+    # The window was launched with autocompact 70, and that is what
+    # makes the fallback a NUMBER rather than nothing: without this
+    # the point is simply unknown and rule 1b never reads it at all,
+    # which is a different situation from the one that broke.
+    daemon.STATE.setdefault("pids", {})[
+        "%s|executor" % canon(ASSUMED)] = {
+            "pid": 999001, "at": time.time(), "registered": True,
+            "model_req": "opus", "autocompact": 70}
+    daemon.save_state()
+
+_wv43 = daemon.wall_view(_sess43, ASSUMED)
+check("no compaction was ever seen for this project",
+      bool(_wv43.get("compact_measured")), False)
+check("so the point on offer is the percentage, not a measurement",
+      "set by the bridge" in (_wv43.get("compact_source") or ""), True)
+check("and the wall is the unmeasured reserve arithmetic",
+      daemon.compaction_survivable(ASSUMED, "executor"), None)
+print("   both ends of rule 1b are therefore assumptions, and the session")
+print("   is past the assumed wall - the exact shape of the incident")
+check("the session is past that wall",
+      970000 >= daemon.compaction_too_big(ASSUMED, "executor", 1000000), True)
+
+_p43 = daemon.plan_for(_sess43, ASSUMED)
+check("plan_for does NOT hand it over", _p43["do"] == "handover", False)
+check("it stands aside and lets the session compact", _p43["do"], "compacting")
+
+print("   THE SABOTAGE (rule 19): give the project a real measurement that")
+print("   says the point is genuinely below the wall and genuinely passed,")
+print("   and the branch must fire again - 1b is narrowed, not disabled")
+with daemon._lock:
+    daemon.STATE.setdefault("compactions", {})[
+        "%s|executor" % canon(ASSUMED)] = [
+            {"tokens": 700000, "after": 120000, "session": _sid43,
+             "at": time.time() - 7200}]
+    daemon.save_state()
+_wv43b = daemon.wall_view(_sess43, ASSUMED)
+check("now the point is measured", bool(_wv43b.get("compact_measured")), True)
+_p43b = daemon.plan_for(_sess43, ASSUMED)
+check("and rule 1b fires on the measured one", _p43b["do"], "handover")
+check("naming the measured point in its reason",
+      "never fired" in _p43b["why"], True)
+with daemon._lock:
+    (daemon.STATE.get("compactions") or {}).pop(
+        "%s|executor" % canon(ASSUMED), None)
+    daemon.save_state()
+
+
+print("\n44. the failed-handover streak may not be cleared by the corpse")
+print("    §5.29 counts a handover whose replacement never registered and")
+print("    holds after two. mark_registered ends the streak, because a")
+print("    window coming up proves whatever swallowed the others is over.")
+print("    But handing over STOPS the old window, and its channel PROCESS")
+print("    outlives it and re-registers within 45 s (§5.3) - so the corpse")
+print("    of the window that failed to arrive was clearing the count of")
+print("    its own failure. Rule 30: the event produced its own witness.")
+print("    Live: thirteen handovers, the count reaching 1 and being wiped")
+print("    every cycle, the hold never once reached")
+STREAK = os.path.join(TMP, "streak-project")
+os.makedirs(STREAK, exist_ok=True)
+with daemon._lock:
+    daemon.CFG.setdefault("projects", {})[canon(STREAK)] = {}
+daemon.CFG.setdefault("thresholds", {})["handover_grace"] = 600
+
+
+def _fail_one_handover(roles=("executor",)):
+    """One cycle: a handover started 11 minutes ago that nobody answered."""
+    with daemon._lock:
+        daemon.STATE["handover"] = dict(daemon.STATE.get("handover") or {})
+        daemon.STATE["handover"][canon(STREAK)] = {
+            "at": time.time() - 660, "reason": "test",
+            "waiting": list(roles), "roles": list(roles), "iteration": 1}
+        daemon.save_state()
+    daemon.expire_handover(STREAK)
+    return ((daemon.STATE.get("handover_failed") or {})
+            .get(canon(STREAK)) or {}).get("n")
+
+
+def _streak_blocked():
+    return daemon.handover_blocked(STREAK, ("executor",)) is not None
+
+with daemon._lock:
+    daemon.STATE["handover_failed"] = {}
+    daemon.save_state()
+check("one failure does not hold - the second attempt is allowed",
+      (_fail_one_handover(), _streak_blocked()), (1, False))
+check("two in a row do hold", (_fail_one_handover(), _streak_blocked()),
+      (2, True))
+
+print("   now the corpse: a REAL POST to /channel/register, which is how")
+# A real POST, on the SAME server every other case uses. It briefly had
+# one of its own, on a diagnosis that was wrong: the shared daemon was
+# said to "stop answering after the telegram section". It does stop, and
+# nothing mysterious does it - the suite called SRV.shutdown() itself,
+# between case 41 and case 42. shutdown() ends serve_forever but leaves
+# the socket LISTENING, so the OS completes the handshake out of the
+# backlog and the client waits for an answer nobody is left to write:
+# a hang, with no handler thread in the dump, which reads exactly like a
+# daemon that died. It is stopped at the very end now, and closed as well
+# as stopped, so a use after the stop says so instead of hanging.
+_code44, _r44 = post_rc("/channel/register",
+                        {"project": STREAK, "role": "executor",
+                         "port": 51234, "pid": 4242, "ppid": 4241,
+                         "session_id": "corpse-1"})
+check("the endpoint took it", _code44, 200)
+check("but the streak survives a channel registration",
+      ((daemon.STATE.get("handover_failed") or {})
+       .get(canon(STREAK)) or {}).get("n"), 2)
+check("and the hold still stands", _streak_blocked(), True)
+
+print("   a PLANNER coming up is no evidence about an EXECUTOR handover")
+daemon.mark_registered(STREAK, "planner", via="session")
+check("so a planner SessionStart leaves it alone",
+      ((daemon.STATE.get("handover_failed") or {})
+       .get(canon(STREAK)) or {}).get("n"), 2)
+
+print("   THE SABOTAGE (rule 19): the replacement really comes up. §5.29's")
+print("   reason must survive - otherwise the hold is permanent for a pair")
+print("   whose stuck window somebody simply closed")
+daemon.mark_registered(STREAK, "executor", via="session")
+check("an executor SessionStart clears it",
+      (daemon.STATE.get("handover_failed") or {}).get(canon(STREAK)), None)
+check("and handovers run again", _streak_blocked(), False)
+
+print("   the record says WHICH half never arrived, so 'no evidence about")
+print("   this role' is decidable at all")
+with daemon._lock:
+    daemon.STATE["handover_failed"] = {}
+    daemon.save_state()
+_fail_one_handover(("planner",))
+check("a failed planner handover records the planner",
+      ((daemon.STATE.get("handover_failed") or {})
+       .get(canon(STREAK)) or {}).get("roles"), ["planner"])
+with daemon._lock:
+    daemon.STATE["handover_failed"] = {}
+    (daemon.STATE.get("handover") or {}).pop(canon(STREAK), None)
+    daemon.save_state()
+with daemon._lock:
+    (daemon.CFG.get("projects") or {}).pop(canon(STREAK), None)
+    (daemon.CFG.get("projects") or {}).pop(canon(ASSUMED), None)
+
+print("\n45. a project folder brought its own history, and the bridge reads it")
+print("    ANALYSIS-portable-history.md step 3. journal() has always written")
+print("    each line into the project's bridge-logs as well as data/logs, so")
+print("    the carrier was full; nothing read it back. On 2026-08-28 this")
+print("    project moved E: -> C: and every line written before the move was")
+print("    invisible to the feed - the rows were on disk under the old path,")
+print("    and the feed filter is an exact match against norm(project)")
+print("   a move is an EVENT, not background work, so this runs at exactly")
+print("   two moments: daemon start, and a project entering the watch list.")
+print("   Driven here through the second one, on the real endpoint")
+CARRY = os.path.join(TMP, "carried-in")
+_c_today = time.strftime("%Y-%m-%d")
+os.makedirs(os.path.join(CARRY, "bridge-logs", _c_today), exist_ok=True)
+_C_OLD = "e:" + chr(92) + "otherbox" + chr(92) + "carried-in"
+with open(os.path.join(CARRY, "bridge-logs", _c_today, "events.jsonl"),
+          "w", encoding="utf-8") as _fh:
+    for _n, _t in ((0, "written before the move"),
+                   (1, "and this one too"),
+                   (2, "")):
+        _fh.write(json.dumps(
+            {"at": "%sT07:0%d:00" % (_c_today, _n), "kind": "loop",
+             "text": _t or "no project named this line",
+             "project": "Carried_in",
+             "path": _C_OLD if _t else "",
+             "session": "executor", "level": "log"},
+            ensure_ascii=False) + "\n")
+
+print("   before it is watched, the bridge knows nothing about it")
+check("nothing of it in the feed yet",
+      any("before the move" in (r.get("text") or "")
+          for r in daemon.store.recent_events(200, project=CARRY)), False)
+
+print("   now the real POST - the project enters the watch list")
+with daemon._lock:
+    _c_before = dict(daemon.CFG.get("projects") or {})
+_c_projects = dict(_c_before)
+_c_projects[CARRY] = {}
+# On case 44's own server, for the reason written there: the shared one
+# stops answering POSTs after the telegram section. Still the real
+# endpoint, the real handler and the real order of events.
+_code45, _r45 = post_rc("/config", {"projects": _c_projects})
+check("the endpoint took it", _code45, 200)
+
+_c_feed = daemon.store.recent_events(300, project=CARRY)
+_c_mine = [r for r in _c_feed if "before the move" in (r.get("text") or "")
+           or "this one too" in (r.get("text") or "")]
+check("both carried lines are now in this pair's feed", len(_c_mine), 2)
+check("re-keyed onto this machine's path",
+      {r.get("path") for r in _c_mine}, {canon(CARRY)})
+check("with the machine they came from kept beside them",
+      {r.get("path_was") for r in _c_mine}, {_C_OLD})
+
+print("   the pathless line is refused: _feed_rows lets a row with no path")
+print("   through EVERY project's filter, so importing one would put it in")
+print("   every pair's feed at once")
+check("it did not come in",
+      any("no project named this line" in (r.get("text") or "")
+          for r in daemon.store.recent_events(300, project=A)), False)
+
+print("   THE SABOTAGE (rule 19): do it again. A second start must not")
+print("   double the history - that is the whole of 'idempotent'")
+_c_n1 = len([r for r in daemon.store.recent_events(300, project=CARRY)
+             if "before the move" in (r.get("text") or "")])
+daemon.merge_carried_history("a second time, as a restart would")
+_c_n2 = len([r for r in daemon.store.recent_events(300, project=CARRY)
+             if "before the move" in (r.get("text") or "")])
+check("the same line is there once, not twice", (_c_n1, _c_n2), (1, 1))
+
+print("   and the carrier is read-only - the bridge never writes into the")
+print("   folder it is reading, or the two copies would drift apart")
+check("the project's own day still holds exactly what it held",
+      sorted(os.listdir(os.path.join(CARRY, "bridge-logs", _c_today))),
+      ["events.jsonl"])
+
+print("   it is called from both moments, and from nowhere else - a tick")
+print("   would make a move into background work")
+_src45 = inspect.getsource(daemon)
+check("startup calls it", "merge_carried_history(\"the bridge started\")"
+      in _src45, True)
+check("and so does a project entering the watch list",
+      "merge_carried_history(\"it entered the watch list\")" in _src45, True)
+check("and add-project", "merge_carried_history(\"it was added to the "
+      "bridge\", norm(path))" in _src45, True)
+print("   never under _lock: it is file work, and file I/O under the lock is")
+print("   what once serialised the whole daemon behind somebody else's disk")
+_mch = inspect.getsource(daemon.merge_carried_history)
+check("the lock is taken only to copy the project list out",
+      _mch.count("with _lock:"), 1)
+print("   asked of the CODE, not of the prose: the docstring says the word",)
+print("   and a substring test would have passed on the docstring alone")
+_mast = ast.parse(_mch)      # a top-level function: no dedent needed
+check("and STATE is named nowhere in what it executes",
+      any(isinstance(_n, ast.Name) and _n.id == "STATE"
+          for _n in ast.walk(_mast)), False)
+
+with daemon._lock:
+    daemon.CFG["projects"] = _c_before
+
+print("\n46. a finding is REPORTED, and nothing is repaired")
+print("    step 5. A row inside <project>/bridge-logs is about that project")
+print("    by construction, so re-keying it into the feed needs nobody's")
+print("    permission. A PATH is not a project: saying that one path and")
+print("    another are the same work is a claim about identity, and it")
+print("    is the owner's. relayout.retired_tree_users is the same shape")
+FOUND = os.path.join(TMP, "found-project")
+_f_today = time.strftime("%Y-%m-%d")
+os.makedirs(os.path.join(FOUND, "bridge-logs", _f_today), exist_ok=True)
+_F_OLD = "e:" + chr(92) + "someoldbox" + chr(92) + "found-project"
+with open(os.path.join(FOUND, "bridge-logs", _f_today, "events.jsonl"),
+          "w", encoding="utf-8") as _fh:
+    for _n in range(3):
+        _fh.write(json.dumps(
+            {"at": "%sT06:0%d:00" % (_f_today, _n), "kind": "loop",
+             "text": "line %d from the old machine" % _n,
+             "project": "Found_project", "path": _F_OLD,
+             "session": "executor", "level": "log"},
+            ensure_ascii=False) + "\n")
+
+_cfg46 = json.dumps(daemon.CFG.get("projects") or {}, sort_keys=True)
+with daemon._lock:
+    daemon.CFG.setdefault("projects", {})[canon(FOUND)] = {}
+daemon.merge_carried_history("a fixture", canon(FOUND))
+
+_f46 = (daemon.STATE.get("carried_found") or {}).get(canon(FOUND)) or {}
+check("the other path is on the finding", sorted(_f46.get("paths") or {}),
+      [_F_OLD])
+check("with how many lines sit under it",
+      (_f46.get("paths") or {}).get(_F_OLD), 3)
+check("and it says so at warn, in this pair's own feed",
+      any(r.get("level") == "warn"
+          and "carries history written under another path" in (r.get("text") or "")
+          for r in daemon.store.recent_events(200, project=FOUND)), True)
+
+print("   it repairs NOTHING - no claim is recorded, and the config is")
+print("   exactly what it was but for the project having been added")
+check("no moved_from was invented",
+      "moved_from" in json.dumps(daemon.CFG.get("projects") or {}), False)
+check("and /state offers the finding for the panel to show",
+      sorted((get("/state").get("carried_found") or {}).get(canon(FOUND),
+                                                            {}).get("paths")
+             or {}), [_F_OLD])
+
+print("   THE SABOTAGE (rule 19): a folder whose history was written HERE")
+print("   must produce no finding at all, or the panel would ask about")
+print("   every project it has ever seen")
+NOFIND = os.path.join(TMP, "no-finding")
+os.makedirs(os.path.join(NOFIND, "bridge-logs", _f_today), exist_ok=True)
+with open(os.path.join(NOFIND, "bridge-logs", _f_today, "events.jsonl"),
+          "w", encoding="utf-8") as _fh:
+    _fh.write(json.dumps({"at": "%sT06:00:00" % _f_today, "kind": "loop",
+                          "text": "written right here", "project": "No_find",
+                          "path": canon(NOFIND), "session": "executor",
+                          "level": "log"}, ensure_ascii=False) + "\n")
+with daemon._lock:
+    daemon.CFG["projects"][canon(NOFIND)] = {}
+daemon.note_carried_paths(NOFIND)
+check("nothing is found, so nothing is asked",
+      canon(NOFIND) in (daemon.STATE.get("carried_found") or {}), False)
+
+
+print("\n47. the owner says it, once, at one endpoint")
+print("    step 6. /adopt-history is the only place the claim is made. It")
+print("    writes projects[path]['moved_from'] and THEN applies it; this")
+print("    case is about the recording, case 48 about the applying")
+print("   secret-checked like /verdict and /task, because it writes")
+print("   config.json: anything that can reach localhost must not be able")
+print("   to reassign somebody's history")
+_bc47, _bad47 = post_rc("/adopt-history", {"path": FOUND,
+                        "from": [_F_OLD]}, secret=False)
+check("without the secret it is refused", _bc47, 403)
+check("and nothing was recorded",
+      "moved_from" in json.dumps(daemon.CFG.get("projects") or {}), False)
+
+_oc47, _ok47 = post_rc("/adopt-history", {"path": FOUND,
+                       "from": [_F_OLD]})
+check("with it, the claim is taken", _oc47, 200)
+check("and reported back", _ok47.get("moved_from"), [_F_OLD])
+with daemon._lock:
+    _entry47 = (daemon.CFG.get("projects") or {}).get(canon(FOUND)) or {}
+check("it is in the config", _entry47.get("moved_from"), [_F_OLD])
+
+print("   pressing twice records once - the list is a set in list form")
+_again47 = post_rc("/adopt-history", {"path": FOUND,
+                   "from": [_F_OLD]})[1]
+check("the second press adds nothing", _again47.get("added"), [])
+check("and the list did not grow", _again47.get("moved_from"), [_F_OLD])
+
+print("   and the panel stops offering what was just claimed, so the button")
+print("   does not sit there asking a question already answered")
+check("the finding is gone",
+      canon(FOUND) in (daemon.STATE.get("carried_found") or {}), False)
+
+print("   a claim about a project the bridge does not watch is refused, and")
+print("   a claim naming no earlier path is refused - both by name")
+check("unknown project", post_rc("/adopt-history",
+      {"path": os.path.join(TMP, "never-heard-of"),
+       "from": [_F_OLD]})[1].get("ok"), False)
+check("no path named",
+      post_rc("/adopt-history", {"path": FOUND, "from": []})[1]
+      .get("ok"), False)
+check("and a project may not claim itself",
+      post_rc("/adopt-history", {"path": FOUND, "from": [FOUND]})[1]
+      .get("ok"), False)
+
+print("   SS5.8: what the owner claimed must survive the next settings")
+print("   write. /config replaces the whole projects dict with the panel's")
+print("   copy, so a claim the panel did not send back would be erased by")
+print("   the next unrelated toggle")
+with daemon._lock:
+    _plain47 = {k: {} for k in (daemon.CFG.get("projects") or {})}
+_code47, _r47 = post_rc("/config", {"projects": _plain47})
+check("the settings write went through", _code47, 200)
+with daemon._lock:
+    _after47 = (daemon.CFG.get("projects") or {}).get(canon(FOUND)) or {}
+check("and the claim is still there", _after47.get("moved_from"), [_F_OLD])
+
+print("   the claim is written down BEFORE it is acted on, so a migration")
+print("   that raises leaves the decision on disk to be retried at the")
+print("   next start - the other order would lose both (case 48 drives")
+print("   the migration itself)")
+_src47 = inspect.getsource(daemon.handle_adopt_history)
+_i47a, _i47b = (_src47.find("store.save_config"),
+                _src47.find("migrate_moved_project("))
+check("it applies the claim at all", _i47b > 0, True)
+check("and the config write comes first", 0 <= _i47a < _i47b, True)
+check("and a failure to apply is journalled, not swallowed",
+      "could not" in _src47 and '"warn"' in _src47, True)
+with daemon._lock:
+    daemon.CFG["projects"] = json.loads(_cfg46)
+
+print("\n48. the break of 2026-08-28, and the claim that repairs it")
+print("    This project moved E: -> C:. calibration.json and")
+print("    STATE['compactions'] are keyed by project path, so every")
+print("    measurement stayed under the old key and the live pair started")
+print("    empty. plan_for rule 1b then read two FALLBACKS as facts - a")
+print("    compaction point of 700k (the percentage) and a wall of 967k")
+print("    (window minus the reserve) - and handed over a session carrying")
+print("    970k, 24k BELOW the 994 509 its own samples record")
+M7 = os.path.join(TMP, "moved-pair")
+os.makedirs(M7, exist_ok=True)
+M7C = canon(M7)
+M7OLD = daemon.norm("e:" + os.sep + "projects" + os.sep + "carried-project")
+_sid7 = "moved-exec"
+with daemon._lock:
+    _cfg7 = json.dumps(daemon.CFG.get("projects") or {})
+    daemon.CFG.setdefault("projects", {})[M7C] = {}
+    daemon.STATE.setdefault("sessions", {})["executor:%s" % _sid7[:8]] = {
+        "role": "executor", "path": M7C, "session_id": _sid7,
+        "model": "Opus 5", "window": 1000000, "window_observed": True,
+        "context_tokens": 970000, "state": "idle",
+        "last_seen": daemon.now(), "seen_at": time.time(),
+        "turn_costs": [30000, 28000]}
+    daemon.STATE.setdefault("last_session", {})["%s|executor" % M7C] = _sid7
+    daemon.STATE.setdefault("pids", {})["%s|executor" % M7C] = {
+        "pid": 1, "at": time.time(), "registered": True, "autocompact": 70}
+    # every measurement sits under the path the OTHER machine used
+    daemon.STATE.setdefault("compactions", {})["%s|executor" % M7OLD] = [
+        {"tokens": t, "after": 120000, "session": "old-sid", "at": 1.0}
+        for t in (999595, 998685, 994509)]
+    daemon.STATE.setdefault("said", {})["%s|executor" % M7OLD] = {"n": 1}
+    daemon.STATE.setdefault("assessed", {})[M7OLD] = time.time()
+    daemon.STATE["acted:clinch:%s" % M7OLD] = 1.0
+    daemon.save_state()
+daemon.store.calib_update("opus 5", M7OLD, compact_at_tokens=994509,
+                          compact_at_window=1000000,
+                          compact_samples=[999595, 998685, 994509],
+                          how="PreCompact fired")
+
+_s7 = daemon.STATE["sessions"]["executor:%s" % _sid7[:8]]
+_wv7 = daemon.wall_view(_s7, M7)
+check("the live pair has no compaction point of its own",
+      _wv7.get("compact_measured"), False)
+check("so the number on offer is the percentage of the window",
+      _wv7.get("compact"), 700000)
+check("and the wall is the unmeasured reserve arithmetic",
+      daemon.compaction_too_big(M7, "executor", 1000000), 967000)
+print("   today's guard already stops 1b firing on that: a point nobody")
+print("   measured may not be used to conclude no compaction is coming")
+_p7a = daemon.plan_for(_s7, M7)
+check("no handover is ordered", _p7a["do"] == "handover", False)
+check("it stands aside instead", _p7a["do"], "compacting")
+print("   but it stands aside for the WRONG reason - it believes the")
+print("   session is past a 700k point, when the truth is it is 24k short")
+print("   of a 994k one. The guard saved the session; only the migration")
+print("   makes the numbers true")
+check("the reason names the assumed point", "700k" in _p7a["why"], True)
+
+print("   the owner's claim, through the real endpoint")
+_c7, _r7 = post_rc("/adopt-history", {"path": M7, "from": [M7OLD]})
+check("it was taken", (_c7, _r7.get("moved_from")), (200, [M7OLD]))
+
+_wv7b = daemon.wall_view(_s7, M7)
+check("now the point is measured", _wv7b.get("compact_measured"), True)
+check("and it is the one this pair really compacts at",
+      _wv7b.get("compact"), 994509)
+_p7b = daemon.plan_for(_s7, M7)
+check("plan_for still says compacting", _p7b["do"], "compacting")
+check("and now for the true reason", "994k" in _p7b["why"], True)
+
+print("   the whole inventory moved, not the calibration alone - including")
+print("   three containers that were in NEITHER of the two old lists, and a")
+print("   top-level key that is a prefix followed by a path")
+check("compactions, which was in neither list",
+      "%s|executor" % M7C in (daemon.STATE.get("compactions") or {}), True)
+check("said, which was in neither list",
+      "%s|executor" % M7C in (daemon.STATE.get("said") or {}), True)
+check("assessed, which was in neither list",
+      M7C in (daemon.STATE.get("assessed") or {}), True)
+check("acted:clinch:<path>, matched by its tail",
+      "acted:clinch:%s" % M7C in daemon.STATE, True)
+check("and nothing at all is left under the old path",
+      [k for k in daemon.STATE if M7OLD in k] +
+      [k for n in daemon.STATE_PATHS
+       for k in (daemon.STATE.get(n) or {}) if M7OLD in str(k)], [])
+
+print("   the carried measurements are MARKED, so nothing downstream can")
+print("   take a figure from another computer for one measured here (rule")
+print("   33: evidence has a shelf life, and a different machine is a")
+print("   different horizon)")
+check("every carried compaction row says where it came from",
+      sorted({r.get("carried_from") for r in
+              (daemon.STATE["compactions"].get("%s|executor" % M7C)
+               or [{}])}), [M7OLD])
+_cal7 = (daemon.store.load_calibration()
+         .get(daemon.store.calib_key("opus 5", M7C)) or {})
+check("so does the calibration entry", _cal7.get("carried_from"), M7OLD)
+check("and its how says where it was measured",
+      "another machine" in (_cal7.get("how") or ""), True)
+_tr7 = ((daemon.STATE.get("moved_trace") or []) or [{}])[-1]
+check("the trace records the move that happened",
+      (_tr7.get("from"), _tr7.get("to"), _tr7.get("calib_moved")),
+      (M7OLD, M7C, 1))
+check("and how much it moved", (_tr7.get("state_moved") or 0) >= 4, True)
+
+print("   idempotent: the same claim again moves nothing, because nothing")
+print("   is left under the old key to move")
+_n7 = len(daemon.STATE.get("moved_trace") or [])
+daemon.migrate_moved_project(M7)
+check("no second trace entry", len(daemon.STATE.get("moved_trace") or []), _n7)
+
+print("   THE SABOTAGE (rule 19): a pair that has measured the same thing")
+print("   HERE keeps its own numbers. A carried figure never overwrites a")
+print("   local measurement, however much richer it looks - the local one")
+print("   is about this machine and the carried one is not")
+M8 = os.path.join(TMP, "moved-pair-with-local")
+os.makedirs(M8, exist_ok=True)
+M8C = canon(M8)
+with daemon._lock:
+    daemon.CFG["projects"][M8C] = {}
+    daemon.STATE["compactions"]["%s|executor" % M7OLD] = [
+        {"tokens": 999595, "after": 120000, "session": "old", "at": 1.0}]
+    daemon.STATE["compactions"]["%s|executor" % M8C] = [
+        {"tokens": 701000, "after": 90000, "session": "here", "at": 2.0}]
+    daemon.save_state()
+daemon.store.calib_update("opus 5", M7OLD, compact_at_tokens=994509,
+                          compact_at_window=1000000,
+                          compact_samples=[994509], how="PreCompact fired")
+daemon.store.calib_update("opus 5", M8C, compact_at_tokens=701000,
+                          compact_at_window=1000000,
+                          compact_samples=[701000], how="PreCompact fired")
+_c8, _r8 = post_rc("/adopt-history", {"path": M8, "from": [M7OLD]})
+check("the claim was taken all the same", _c8, 200)
+_cal8 = daemon.store.load_calibration()
+check("but the local calibration is untouched",
+      (_cal8.get(daemon.store.calib_key("opus 5", M8C)) or {})
+      .get("compact_at_tokens"), 701000)
+check("and it is the local compactions that decide what is survivable",
+      daemon.compaction_survivable(M8, "executor"), 701000)
+check("the trace says the carried entry was kept out, and why",
+      (daemon.STATE.get("moved_trace") or [])[-1].get("calib_kept_local"), 1)
+with daemon._lock:
+    daemon.CFG["projects"] = json.loads(_cfg7)
+    daemon.save_state()
+
+
+print("\n49. one inventory of the paths in STATE, and a standing guard")
+print("    PATH_KEYED and PAIR_KEYED were two lists that between them were")
+print("    supposed to cover every container in STATE holding a project")
+print("    path. They did not: counted on this project's own live state")
+print("    after the move, 268 references to the old drive across 27")
+print("    containers, and TWELVE of those containers appeared in neither")
+print("    list. migrate_keys believed itself complete; so did step 7")
+print("   the guard is deliberately NOT one list compared with another -")
+print("   that only ever restates itself, and would have passed happily on")
+print("   the day the lists were wrong. It walks the STATE this suite has")
+print("   actually built through the real endpoints and asks of every")
+print("   path-shaped key: is the container holding it one the inventory")
+print("   names? Its limit, said plainly: it can only see containers this")
+print("   suite fills. That is why it runs LAST, after every fixture")
+_PATHY = re.compile("[a-zA-Z]:[/" + re.escape(os.sep) + "]")
+
+
+def _pathish(x):
+    return isinstance(x, str) and bool(_PATHY.match(x))
+
+
+_unlisted, _kinds49 = [], set()
+for _name, _v in sorted(daemon.STATE.items()):
+    if _PATHY.search(_name):
+        if any(_name.startswith(p) for p in daemon.STATE_PATH_PREFIXES):
+            _kinds49.add("prefixed")
+        else:
+            _unlisted.append("top-level key %r" % _name)
+        continue
+    _kind = daemon.STATE_PATHS.get(_name)
+    if isinstance(_v, dict):
+        for _k, _val in _v.items():
+            if _pathish(_k) and _kind not in ("path", "pair"):
+                _unlisted.append("%s: path-shaped keys" % _name)
+                break
+            if isinstance(_val, dict) and _pathish(_val.get("path")) \
+                    and _kind != "value":
+                _unlisted.append("%s: values carry a path" % _name)
+                break
+    elif isinstance(_v, list):
+        for _row in _v:
+            if isinstance(_row, dict) and _pathish(_row.get("path")) \
+                    and _kind != "rows":
+                _unlisted.append("%s: rows carry a path" % _name)
+                break
+
+check("every path in this daemon's STATE lies where the inventory says",
+      sorted(set(_unlisted)), [])
+print("   and the guard is worth something only if the run reached all")
+print("   four shapes the inventory distinguishes")
+check("all four shapes were exercised",
+      sorted({k for n, k in daemon.STATE_PATHS.items() if daemon.STATE.get(n)}),
+      ["pair", "path", "rows", "value"])
+check("prefixed top-level keys too", "prefixed" in _kinds49, True)
+
+print("   THE SABOTAGE (rule 19): put paths in a container the inventory")
+print("   does not name, and the same walk must go red - that is its")
+print("   entire job, and a guard that cannot fail is not a guard")
+with daemon._lock:
+    daemon.STATE["a_container_nobody_listed"] = {canon(A): {"x": 1}}
+_sab49 = []
+for _name, _v in sorted(daemon.STATE.items()):
+    if _PATHY.search(_name) or not isinstance(_v, dict):
+        continue
+    if any(_pathish(_k) for _k in _v) and \
+            daemon.STATE_PATHS.get(_name) not in ("path", "pair"):
+        _sab49.append(_name)
+check("it names the container nobody listed", _sab49,
+      ["a_container_nobody_listed"])
+with daemon._lock:
+    daemon.STATE.pop("a_container_nobody_listed", None)
+    daemon.save_state()
+
+print("   the two old lists still exist and still work, but they are now")
+print("   VIEWS of the one inventory - so they cannot drift from it, and")
+print("   there is one place to add a container rather than three")
+check("PATH_KEYED is derived", sorted(daemon.PATH_KEYED),
+      sorted(n for n, k in daemon.STATE_PATHS.items() if k == "path"))
+check("PAIR_KEYED is derived", sorted(daemon.PAIR_KEYED),
+      sorted(n for n, k in daemon.STATE_PATHS.items() if k == "pair"))
+check("and the containers that were in neither list are in it now",
+      sorted(n for n in ("assessed", "compactions", "handover_log",
+                         "last_task", "quiet_pairs", "rc", "said",
+                         "session_roles", "sessions", "strangers",
+                         "telemetry", "tscript", "windows")
+             if n not in daemon.STATE_PATHS), [])
+
+print("\n50. removing a project from the list, per row")
+print("    The owner: \"I can see old projects from another computer in the")
+print("    bridge, I need a button to remove them from this list so they do")
+print("    not get in the way, for each project separately.\" Those projects")
+print("    are GHOSTS - they are not in config.json at all. pair_paths()")
+print("    builds a row from a session record alone, and the old removal")
+print("    path cleared four containers by hand with `sessions` not among")
+print("    them, so a removed project kept its row for ever")
+R1 = os.path.join(TMP, "removable")
+os.makedirs(R1, exist_ok=True)
+R1C = canon(R1)
+_cfg50 = json.dumps(daemon.CFG.get("projects") or {}, sort_keys=True)
+post_rc("/config", {"projects": dict(
+    json.loads(_cfg50), **{R1C: {}})})
+check("it is watched", R1C in (get("/state").get("config") or {})
+      .get("projects", {}), True)
+
+print("   real events, through the real endpoints, so the state it leaves")
+print("   behind is the state a working pair leaves behind")
+post_rc("/loop", {"action": "start", "project": R1})
+post_rc("/event", {"hook_event_name": "SessionStart", "role": "executor",
+                   "session_id": "rm-exec", "project_dir": R1, "cwd": R1})
+post_rc("/status", {"role": "executor", "payload": {
+    "session_id": "rm-exec",
+    "workspace": {"current_dir": R1, "project_dir": R1},
+    "model": {"display_name": "Opus 5", "id": "claude-opus-5"},
+    "context_window": {"context_window_size": 1000000,
+                       "used_percentage": 30.0,
+                       "current_usage": {"input_tokens": 10,
+                                         "cache_creation_input_tokens": 90,
+                                         "cache_read_input_tokens": 299900,
+                                         "output_tokens": 4000}}}})
+post_rc("/event", {"hook_event_name": "PreToolUse", "role": "executor",
+                   "session_id": "rm-exec", "project_dir": R1, "cwd": R1,
+                   "tool_name": "Bash",
+                   "tool_input": {"command": "py -c \"print(1)\""}})
+post_rc("/event", {"hook_event_name": "PreCompact", "role": "executor",
+                   "session_id": "rm-exec", "project_dir": R1, "cwd": R1})
+_st50 = get("/state")
+check("the pair has a row in the strip", R1C in _st50["pairs"], True)
+check("and lines of its own in the all-pairs feed - said BEFORE, so the",
+      len([e for e in (_st50.get("events") or [])
+           if e.get("path") == R1C]) > 0, True)
+print("   check that they are gone afterwards can actually fail (rule 19)")
+_before50 = sorted(n for n, k in daemon.STATE_PATHS.items()
+                   if _holds(daemon.STATE.get(n), k, R1C))
+check("and it has left records in several containers",
+      len(_before50) >= 4, True)
+note("containers it filled", _before50)
+
+print("   removal, through the real endpoint. Secret-checked like")
+print("   /adopt-history: it writes config.json and empties state, and")
+print("   anything that can reach localhost must not be able to delete")
+print("   somebody's pair")
+check("without the secret it is refused",
+      post_rc("/forget-project", {"path": R1}, secret=False)[0], 403)
+check("and it is still there", R1C in get("/state")["pairs"], True)
+
+_mark50 = (daemon.CFG.get("marks") or {}).get(R1C)
+_c50, _r50 = post_rc("/forget-project", {"path": R1})
+check("with it, the project is removed", (_c50, _r50.get("ok")), (200, True))
+_st50b = get("/state")
+check("it is out of the strip", R1C in _st50b["pairs"], False)
+check("out of the selector, which reads the config",
+      R1C in (_st50b.get("config") or {}).get("projects", {}), False)
+check("its colour was taken while it existed - said first, so the next",
+      bool(_mark50), True)
+print("   check can fail (rule 19); marks is the other half of config.json")
+print("   that holds a path, and the only one besides projects")
+check("and it is released now",
+      R1C in (daemon.CFG.get("marks") or {}), False)
+check("and out of the all-pairs feed, which can no longer label its lines",
+      [e for e in (_st50b.get("events") or []) if e.get("path") == R1C], [])
+
+print("   and the state is clean BY THE INVENTORY - not by a list written")
+print("   out here, which is the mistake being repaired. Any container the")
+print("   inventory names may not still hold this path")
+check("nothing left anywhere in STATE_PATHS",
+      sorted(n for n, k in daemon.STATE_PATHS.items()
+             if _holds(daemon.STATE.get(n), k, R1C)), [])
+check("nor in a prefixed top-level key",
+      [k for k in daemon.STATE
+       if k.startswith(daemon.STATE_PATH_PREFIXES) and R1C in k], [])
+
+print("   a removal cannot be undone, so it leaves a trace - the same")
+print("   shape as moved_trace, and for the same reason")
+_t50 = (daemon.STATE.get("forget_trace") or [])[-1]
+check("the trace names the project", _t50.get("path"), R1C)
+check("says it was in the config", _t50.get("in_config"), True)
+check("counts what it took", _t50.get("state_dropped") >= 4, True)
+check("and names every container it took it from",
+      sorted(set(_before50) - set(_t50.get("containers") or {})), [])
+check("there is a journal line about it, and it is bridge-wide",
+      any("Removed removable from the list" in (r.get("text") or "")
+          and not r.get("path")
+          for r in daemon.store.recent_events(200)), True)
+
+print("   THE FOLDER IS NOT TOUCHED. bridge-logs is carried history and")
+print("   belongs to the folder, not to this machine's list; the hooks are")
+print("   uninstall's business, a different decision with its own button")
+check("the folder is still there", os.path.isdir(R1), True)
+_in_folder = []
+for _root, _dirs, _files in os.walk(os.path.join(R1, "bridge-logs")):
+    for _f in _files:
+        _in_folder += [_l for _l in open(os.path.join(_root, _f),
+                                         encoding="utf-8", errors="replace")
+                       if "Removed" in _l and "from the list" in _l]
+check("and the bridge wrote nothing into it about the removal",
+      _in_folder, [])
+
+print("\n   a GHOST: never in config, only in the live state. This is the")
+print("   case the owner actually has, and the case the old path could not")
+print("   do at all")
+GH = os.path.join(TMP, "ghost-from-the-old-box")
+os.makedirs(GH, exist_ok=True)
+GHC = canon(GH)
+with daemon._lock:
+    daemon.STATE.setdefault("sessions", {})["executor:ghost123"] = {
+        "role": "executor", "path": GHC, "session_id": "ghost123",
+        "model": "Opus 5", "window": 1000000, "context_tokens": 300000,
+        "state": "idle", "last_seen": daemon.now(), "seen_at": time.time()}
+    daemon.STATE.setdefault("compactions", {})["%s|executor" % GHC] = [
+        {"tokens": 900000, "after": 100000}]
+    daemon.STATE.setdefault("handover_log", []).append(
+        {"path": GHC, "role": "executor", "at": "x"})
+    daemon.STATE["acted:clinch:%s" % GHC] = 1.0
+    daemon.save_state()
+check("the ghost has a row, with nothing in the config behind it",
+      (GHC in get("/state")["pairs"],
+       GHC in (get("/state").get("config") or {}).get("projects", {})),
+      (True, False))
+_gr = post_rc("/forget-project", {"path": GH})[1]
+check("it is removed all the same", _gr.get("ok"), True)
+check("and the trace says it was never watched", _gr.get("in_config"), False)
+check("the row is gone", GHC in get("/state")["pairs"], False)
+check("and so is every record it had",
+      sorted(n for n, k in daemon.STATE_PATHS.items()
+             if _holds(daemon.STATE.get(n), k, GHC)) +
+      [k for k in daemon.STATE
+       if k.startswith(daemon.STATE_PATH_PREFIXES) and GHC in k], [])
+
+print("\n   A LIVE PAIR IS REFUSED, BY NAME. Emptying the records under a")
+print("   running window does not stop it - it orphans it: the windows keep")
+print("   firing hooks and the bridge no longer knows whose they are. Worse")
+print("   than either answer, so it is refused rather than warned about")
+LV = os.path.join(TMP, "live-pair")
+os.makedirs(LV, exist_ok=True)
+LVC = canon(LV)
+post_rc("/config", {"projects": dict(json.loads(_cfg50), **{LVC: {}})})
+with daemon._lock:
+    daemon.STATE.setdefault("pids", {})["%s|executor" % LVC] = {
+        "pid": os.getpid(), "at": time.time()}   # this process really is alive
+    daemon.save_state()
+_lr = post_rc("/forget-project", {"path": LV})[1]
+check("refused", _lr.get("ok"), False)
+check("and it says which window, with its pid - not \"the pair is busy\"",
+      ("executor" in (_lr.get("error") or "")
+       and str(os.getpid()) in (_lr.get("error") or "")), True)
+check("nothing was removed", LVC in (get("/state").get("config") or {})
+      .get("projects", {}), True)
+check("and the records are all still there",
+      "%s|executor" % LVC in (daemon.STATE.get("pids") or {}), True)
+print("   it fails OPEN: a record whose pid the OS says is gone is not")
+print("   evidence of a window, and a removal blocked by a dead record")
+print("   would be a button that never works again")
+with daemon._lock:
+    _rec50 = (daemon.STATE.get("pids") or {}).get("%s|executor" % LVC)
+    if isinstance(_rec50, dict):
+        _rec50["pid"] = 999999999
+check("with the window gone, the same call goes through",
+      post_rc("/forget-project", {"path": LV})[1].get("ok"), True)
+
+print("\n   ADDING IT BACK IS A CLEAN START - and the carried-history")
+print("   finding comes back with it. That is the merge working, not a")
+print("   bug: removal clears STATE['carried_found'], but the rows it was")
+print("   read from are in the folder's own bridge-logs, which removal does")
+print("   not touch. Same folder, same evidence, same offer")
+BK = os.path.join(TMP, "removed-and-back")
+_bk_today = time.strftime("%Y-%m-%d")
+os.makedirs(os.path.join(BK, "bridge-logs", _bk_today), exist_ok=True)
+BKC, _BK_OLD = canon(BK), "e:" + chr(92) + "oldbox" + chr(92) + "back"
+with open(os.path.join(BK, "bridge-logs", _bk_today, "events.jsonl"),
+          "w", encoding="utf-8") as _fh:
+    for _n in range(2):
+        _fh.write(json.dumps(
+            {"at": "%sT07:0%d:00" % (_bk_today, _n), "kind": "loop",
+             "text": "line %d from the old machine" % _n,
+             "project": "Back", "path": _BK_OLD, "session": "executor",
+             "level": "log"}, ensure_ascii=False) + "\n")
+with daemon._lock:
+    daemon.CFG.setdefault("projects", {})[BKC] = {}
+daemon.merge_carried_history("a fixture", BKC)
+check("the finding is offered", sorted(
+    ((daemon.STATE.get("carried_found") or {}).get(BKC) or {}).get("paths")
+    or {}), [_BK_OLD])
+post_rc("/adopt-history", {"path": BK, "from": [_BK_OLD]})
+with daemon._lock:
+    daemon.STATE.setdefault("loops", {})[BKC] = {"active": True,
+                                                 "iteration": 4}
+    daemon.save_state()
+check("removal takes the finding with it",
+      post_rc("/forget-project", {"path": BK})[1].get("ok"), True)
+check("no finding left", BKC in (daemon.STATE.get("carried_found") or {}),
+      False)
+check("and no claim left either - the config entry went with it",
+      BKC in (daemon.CFG.get("projects") or {}), False)
+
+with daemon._lock:
+    daemon.CFG.setdefault("projects", {})[BKC] = {}
+daemon.merge_carried_history("added again", BKC)
+check("added back, the loop record is NOT resurrected",
+      (daemon.STATE.get("loops") or {}).get(BKC), None)
+check("the claim is not resurrected either - it is the owner's to make again",
+      (daemon.CFG["projects"][BKC] or {}).get("moved_from"), None)
+check("but the finding legitimately returns, because the folder still has "
+      "the rows", sorted(
+          ((daemon.STATE.get("carried_found") or {}).get(BKC) or {})
+          .get("paths") or {}), [_BK_OLD])
+
+print("\n   THE SABOTAGE (rule 19): a container the removal walks must")
+print("   actually be walked. Put the path back into one and the same")
+print("   check must go red")
+with daemon._lock:
+    daemon.STATE.setdefault("said", {})["%s|executor" % GHC] = {"n": 1}
+check("the walk finds it",
+      sorted(n for n, k in daemon.STATE_PATHS.items()
+             if _holds(daemon.STATE.get(n), k, GHC)), ["said"])
+with daemon._lock:
+    daemon.STATE["said"].pop("%s|executor" % GHC, None)
+    daemon.CFG["projects"] = json.loads(_cfg50)
+    daemon.save_state()
+
+check("and the shared server answered for the whole run - the day",
+      get("/state").get("pairs") is not None, True)
+print("   somebody stops it early again, every case after that point goes")
+print("   red here rather than hanging one by one for its own timeout")
+
+# Stopped where stopping is what is wanted, and CLOSED as well as stopped.
+# shutdown() ends serve_forever and leaves the socket listening, so a
+# request after it hangs for the client's whole timeout with no handler
+# thread anywhere - which is what an early shutdown() looked like for a
+# week. server_close() drops the listening socket, so the same mistake
+# reports itself as a refused connection instead.
+SRV.shutdown()
+SRV.server_close()
 
 print("\n" + ("-" * 60))
 if FAILED:

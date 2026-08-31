@@ -1,6 +1,6 @@
 # Rules of honest work
 
-Thirty-three rules. Every one of them has already been broken by somebody
+Thirty-four rules. Every one of them has already been broken by somebody
 working on this bridge. They are short on purpose: this text goes in front of
 every task and every report, so its length is paid for on every delivery.
 
@@ -235,6 +235,20 @@ turned out to be broken a few hours later.
     *Check:* name the horizon on which your evidence still holds, and what
     refreshes it. A failure inside that horizon settles the question -
     successes above it do not count.
+
+34. **A round trip costs more than the work.** What is paid is the size of
+    the window, not the size of the message: a report wakes the planner, a
+    verdict wakes the executor, together about a million tokens however long
+    the text. So do not send what the recipient learns nothing actionable
+    from. By the same reckoning, stopping in the middle of a task is the most
+    expensive thing you can do: a turn broken off by a question whose answer
+    was already in the task pays a whole round trip and moves nothing. If you
+    know the next step, take it. Ask only when the answer changes what gets
+    done, and ask at once. A report at the end of a finished piece, and a
+    verdict on a report, are never surplus.
+    *Check:* name what the recipient will do differently for having read it.
+    Nothing to name - do not send it. If you end a turn with a question, show
+    that its answer was not already in the task.
 
 ## What stands in the way of the action
 

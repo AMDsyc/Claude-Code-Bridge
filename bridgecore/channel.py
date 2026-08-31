@@ -567,8 +567,15 @@ def handle_request(msg):
         if params.get("name") == "loop":
             args = params.get("arguments") or {}
             act = str(args.get("action") or "start").lower()
+            # WHO started it. The daemon tells the planner "the loop is on"
+            # so it knows reports are coming - which is news from a panel
+            # button or a chat command, and is not news when the planner
+            # pressed it itself through this very tool. Only this call can
+            # say so; every other caller leaves the field out, and the
+            # daemon reads a missing field as "tell them".
             out = post_daemon("/loop", {"project": PROJECT,
-                                        "action": act}, timeout=30)
+                                        "action": act,
+                                        "by": ROLE}, timeout=30)
             if out and out.get("ok"):
                 text = ("the loop is %s" % ("on again - send the executor a "
                                             "task and its finished turns "

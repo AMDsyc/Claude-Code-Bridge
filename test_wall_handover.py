@@ -269,6 +269,35 @@ def finish_turn(role, sid, msg, verdict="done", feedback=OKFB):
     return out
 
 
+def settled():
+    """Let anything assess() started finish, before denying that it did.
+
+    THE CLASS THIS EXISTS FOR. assess() decides a handover and starts it in
+    a thread, then returns; `len(launches()) - before == 0` on the next line
+    is racing that thread and wins, so it is green whether or not a handover
+    was fired. A negative check has to outlive what it denies - the same
+    defect sabotage found in test_multipair case 61, where a helper answered
+    a negative on its first look, before the 1.5 s delivery timer.
+
+    Joining, not sleeping. A number of seconds would be a guess about how
+    long a launch takes, which is the shape 5.38 refused for a transcript;
+    join() is exact, and free when there is nothing to join. It works
+    because the threads are NAMED - see the comment at the handover site in
+    daemon.py.
+
+    Returns what it waited for, so a caller can put it in the record rather
+    than trust that it did something.
+    """
+    waited = []
+    for t in threading.enumerate():
+        if t is threading.current_thread() or not t.is_alive():
+            continue
+        if (t.name or "").startswith(("handover", "rotate")):
+            waited.append(t.name)
+            t.join(60)
+    return waited
+
+
 def backdate(role, minutes=15):
     """Make a session look silent, which is what assess() waits for.
 
@@ -385,6 +414,12 @@ backdate("executor")
 before = len(launches())
 res = daemon.assess(PROJ)
 note("assess while the reading is stale", res)
+# THE DECISION FIRST, because it is what the call returns and therefore
+# cannot race the thread it would have started. The two effect checks below
+# corroborate it; on their own they were green by construction.
+check("assess did not decide on a handover", "runway" in json.dumps(res),
+      False)
+note("anything assess started, waited for", settled())
 check("no handover was fired off the stale reading",
       len(launches()) - before, 0)
 check("and none is recorded as under way",
@@ -467,19 +502,24 @@ check("and only one window was opened in total, not two",
 print("\n    the arithmetic was written down before it ran")
 hl = (daemon.STATE.get("handover_log") or [])
 check("a decision row was kept", bool(hl), True)
-row = hl[-1]
-check("for the executor", row["role"], "executor")
-check("with the size it was carrying", row["used"], FLOORS[-1])
+# Empty is exactly the case the check above is for, and reading it
+# anyway would raise and take every block below this one with it - in
+# silence, with no summary. .get() lets each of the eight fail on its
+# own line instead.
+row = hl[-1] if hl else {}
+check("for the executor", row.get("role"), "executor")
+check("with the size it was carrying", row.get("used"), FLOORS[-1])
 check("the window and where it came from",
-      (row["window"], "observed" in (row["window_source"] or "")),
+      (row.get("window"), "observed" in (row.get("window_source") or "")),
       (WINDOW, True))
 check("the compaction point and where it came from",
-      (row["compact_at"], "seen compacting" in (row["compact_source"] or "")),
+      (row.get("compact_at"),
+       "seen compacting" in (row.get("compact_source") or "")),
       (min(FIRED), True))
-check("every floor this session stood on", row["floors"], FLOORS)
-check("and the climb between them", row["floor_rise"], 65000)
-check("five of five compactions", (row["compactions_done"], row["budget"]),
-      (5, 5))
+check("every floor this session stood on", row.get("floors"), FLOORS)
+check("and the climb between them", row.get("floor_rise"), 65000)
+check("five of five compactions",
+      (row.get("compactions_done"), row.get("budget")), (5, 5))
 jrow = journal_has("Handover decided for the executor")
 check("and the same arithmetic reached the journal", bool(jrow), True)
 note("journal line", (jrow[-1]["text"] if jrow else "")[:240])
@@ -806,7 +846,12 @@ note("the line in the state report that names it",
      [l for l in rep.splitlines() if "neither the cycle" in l][0][:170])
 before = len(launches())
 backdate("executor")
-daemon.assess(STRANGE)
+_res_strange = daemon.assess(STRANGE)
+# Same repair as A2's: the synchronous decision, then the effect once
+# anything assess() started has been joined.
+check("assess did not decide on a handover",
+      "runway" in json.dumps(_res_strange), False)
+note("anything assess started, waited for", settled())
 check("no window was opened for it", len(launches()) - before, 0)
 
 # ---------------------------------------------------------------------------

@@ -195,6 +195,15 @@ DEFAULT_CONFIG = {
 PROJECT_DEFAULTS = {
     "chains": {"executor": ["opus", "sonnet"], "planner": ["fable", "opus"]},
     "commit_each_iteration": True,
+    # WHERE THIS PROJECT'S REPOSITORY IS, relative to the project path.
+    # Empty means "the project path itself", which is the only thing the
+    # bridge ever assumed and which is right for most projects. It is
+    # DECLARED and never searched for: hunting up or down the tree for a
+    # .git would mean the bridge choosing a repository nobody named, and
+    # `git add -A` in the wrong one is not a mistake you notice quickly.
+    # Same shape as `checks`, `modes` and `moved_from` - stated, not
+    # inferred. This bridge's own project needs "source".
+    "repo": "",
     "conditional_review": False,
     "readonly_planner": True,
     # "compact": let Claude Code compact the session as it normally would and
@@ -333,6 +342,49 @@ def _read_json(path, fallback):
     return json.loads(json.dumps(fallback))
 
 
+# How long os.replace is given to win against somebody else's open handle,
+# and how long it waits between tries.
+#
+# 2026-08-30 22:00:26 is why this exists. A plain /status POST - the status
+# line redrawing - went touch_session -> remember_session -> save_state and
+# died on
+#
+#   PermissionError: [WinError 5] ... state.json.tmp -> state.json
+#
+# taking a whole daemon crash bundle with it, and that save was lost.
+# Nothing was wrong with the write: on Windows os.replace fails while ANY
+# other process holds the destination open, and an ordinary Python open()
+# for reading does exactly that - CPython does not pass FILE_SHARE_DELETE.
+# So every reader of state.json is a coin toss against the writer, and the
+# reader that afternoon was the investigation reading its own bridge.
+#
+# A retry and not a lock: the window is milliseconds wide, the temp file is
+# already complete and fsynced before any of this, and a lock would put
+# waiting on a path that must not raise. Six tries over ~1.1 s covers a
+# reader that is merely reading; something holding the file longer than
+# that is a fault worth seeing, so the last failure is raised exactly as
+# before.
+REPLACE_TRIES = 6
+REPLACE_WAIT = 0.05
+
+
+def _replace_with_retry(tmp, path):
+    """os.replace, but it survives another process reading the destination."""
+    for attempt in range(REPLACE_TRIES):
+        try:
+            os.replace(tmp, path)
+            return
+        except OSError as exc:
+            # 5 = access denied, 32 = sharing violation. Both mean "somebody
+            # has it open"; anything else is a real problem and goes straight
+            # up, because retrying a wrong path or a full disk only delays
+            # the report of it.
+            last = attempt == REPLACE_TRIES - 1
+            if getattr(exc, "winerror", None) not in (5, 32) or last:
+                raise
+            time.sleep(REPLACE_WAIT * (attempt + 1))
+
+
 def _write_atomic(path, data):
     _ensure_dirs()
     tmp = path + ".tmp"
@@ -340,7 +392,7 @@ def _write_atomic(path, data):
         json.dump(data, fh, ensure_ascii=False, indent=2)
         fh.flush()
         os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    _replace_with_retry(tmp, path)
 
 
 def load_config():
@@ -405,9 +457,54 @@ def load_state():
         return _read_json(STATE_PATH, DEFAULT_STATE)
 
 
+# How many replaces of state.json in a row may lose before it stops being
+# somebody reading and starts being a fault worth a person's attention.
+STATE_WRITE_FAILS_TELL = 5
+_state_write_fails = [0]
+
+
 def save_state(state):
+    """Write STATE. A replace that loses does NOT come back up.
+
+    The retry in _replace_with_retry wins against a reader that lets go -
+    an antivirus pass, a `type state.json`, one read in a script. It cannot
+    win against a handle held open across the whole window, and on
+    2026-08-30 that is what happened: an investigation had state.json open
+    while the status line's /status POST went touch_session ->
+    remember_session -> save_state, os.replace raised WinError 5 four
+    frames down, and a crash bundle came out of a status redraw.
+
+    So this one write is allowed to lose. Not swallowed silently, and not
+    swallowed anywhere else - config.json and models.json still raise,
+    because they are written rarely and losing one matters. STATE is
+    different in kind: it is held in memory, it is the memory that is
+    authoritative (see CFG's docstring for the same argument), and it is
+    written again within seconds by the next thing that touches it. The
+    complete .tmp is left on disk, so nothing that was serialised is lost
+    even if the daemon stops here.
+
+    A run of them is a different animal - a file genuinely locked, a
+    read-only disk - and the count is what tells them apart.
+    """
+    lost = None
     with _lock:
-        _write_atomic(STATE_PATH, state)
+        try:
+            _write_atomic(STATE_PATH, state)
+            _state_write_fails[0] = 0
+        except OSError as exc:
+            if getattr(exc, "winerror", None) not in (5, 32):
+                raise
+            _state_write_fails[0] += 1
+            lost = (exc, _state_write_fails[0])
+    # Outside the lock: journal() is file work, and file work under a lock
+    # every writer needs is how one slow disk becomes everybody's problem.
+    if lost:
+        journal("bridge",
+                "Could not replace state.json - something has it open (%s). "
+                "The complete copy is beside it as state.json.tmp and the "
+                "next save will carry it; %d in a row."
+                % (lost[0], lost[1]), "", "",
+                "warn" if lost[1] >= STATE_WRITE_FAILS_TELL else "log")
 
 
 def update_state(**fields):

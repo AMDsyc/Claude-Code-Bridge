@@ -280,8 +280,30 @@ The four verdicts:
 
 `done` does **not** end the run. Only `stop` does, and `loop` turns it back on.
 
+**A verdict's words reach the executor for `done` as well as `continue`.** Worth
+saying because it was not always true: `done` built its feedback and sent it
+nowhere, so every acceptance arrived as silence and the next piece of work
+written into it was lost. `stop` and `wait` deliberately deliver nothing —
+there is nothing to act on and nothing to move.
+
+**An acceptance that asks for nothing is held rather than spent on a wake of its
+own.** A message costs the size of the window it lands in, not its own length,
+so waking the executor to say "accepted" and nothing else costs a full round
+trip: the wake, the turn it ends, the report that turn fires, and the planner
+woken to read that. Those words are kept and ride with the next thing the
+executor is woken for anyway; if nothing wakes it within the hour they go
+alone. A `done` carrying the next piece is never held, and neither is
+`continue` — the executor is blocked waiting for those words by name.
+
 The planner also has `task`, to hand the executor new work, and `check`, to
 run this project's acceptance.
+
+When a long command the executor started finishes, the bridge writes a line in
+the log and leaves the planner alone. It used to deliver the news instead, and
+that was expensive for nothing: a delivery costs whatever the receiving window
+is already carrying, not the length of the message, and the notice asked the
+planner for no decision. It reads the line when it next wakes for a reason of
+its own.
 
 ## The acceptance gates
 
@@ -421,6 +443,13 @@ point, the distance to the wall, and how much of its life a session has spent.
 A session is handed over when its cycle can no longer hold five turns — not by
 counting compactions and not by distance alone.
 
+A measurement is only ever attributed to the session it was taken from. When a
+compaction fires, the size that goes into the calibration is that session's
+own; if two windows of one role happen to be live, a neighbour's figure is not
+borrowed, and where the compacting session has reported no size of its own the
+sample is not written at all — with a line in the log saying why. A skipped
+measurement is cheap; one attributed to the wrong window is not.
+
 Rotation writes a handoff, starts the replacement, and gives it the thread.
 Only the half whose own numbers ran out is replaced, and only in the pair whose
 numbers they are — the other projects carry on untouched.
@@ -454,6 +483,31 @@ figures say.
 | `archive_model` | `sonnet` | the model the search agent runs on |
 | `retention.days` | `7` | how long the bridge keeps its own logs |
 
+### One trap worth an hour of your evening: the two compaction settings multiply
+
+The bridge tells each session where to compact by passing
+`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` — a **percent**, `autocompact_pct`, 70 by
+default. Claude Code also has its own `autoCompactWindow` setting in a
+project's `.claude/settings.json`, in **tokens**.
+
+They do not override one another. They **compose**: `autoCompactWindow` becomes
+the window the percent is taken of. Set it to 700000 believing you have asked
+for a 700k threshold and you have actually asked for 70% of 700k — and
+compaction will fire around **477k**, on a window that is really a million.
+
+Nothing warns you, because nothing is broken: every part is doing its job. What
+you see is sessions being replaced about **1.5× more often than they should
+be**, each replacement paying for a fresh context, and no obvious reason why.
+Measured here over nine compactions: 476,221–482,049 tokens, against a control
+project with no `autoCompactWindow` that ran to the full million.
+
+**So set `autoCompactWindow` to the real window size (or leave it alone) and
+control the threshold with `autocompact_pct`.** If you want to know where your
+sessions actually compact rather than where you asked them to, the client
+writes it down itself: search a transcript under `~/.claude/projects/` for
+`compact_boundary` and read `preTokens`. That is the client's own number, not
+the bridge's, which is why it settles the question.
+
 Environment variables:
 
 | variable | what it does |
@@ -466,7 +520,7 @@ Environment variables:
 
 ## The rules
 
-`HONESTY.md` holds twenty-eight rules both halves are handed at every session
+`HONESTY.md` holds thirty-four rules both halves are handed at every session
 start, and which are put in front of every task and every report. They are not
 advice: each one came from something that actually went wrong, and several of
 them are the gates described above rather than text — a rule nothing refuses
@@ -479,7 +533,7 @@ file reaches the next delivery without a restart.
 
 ## Running the tests
 
-Five suites, no runner, no dependencies. Each is a flat script that exits 1 on
+Six suites, no runner, no dependencies. Each is a flat script that exits 1 on
 failure, and each puts its own state in a temp folder, so none of them touch
 anything real.
 
@@ -489,8 +543,14 @@ python test_archive.py          # the archive map
 python test_search.py           # the search agent, against a stub
 python test_wall_handover.py    # a handover simulated end to end
 python test_multipair.py        # three pairs on one throwaway daemon
+python test_wake_sim.py         # seeded runs of a pair through faults
 python -m py_compile bridgecore/*.py
 ```
+
+`test_wake_sim.py` runs the same pair ten times with the order of the faults
+shuffled by a seed, so a fix that only works when things go wrong in one
+particular order is caught. It also carries sabotage modes: switch one on and
+the run must go red, which is how a test that cannot fail gets found.
 
 A run leaves `__pycache__` behind, and a `.pyc` carries `co_filename` - the
 absolute path of the source on the machine that compiled it. `.gitignore`
@@ -530,7 +590,7 @@ Written down because finding out afterwards is worse than reading it here.
   stops being unattended.
 - **English only.** The panel, the messages and the rules are English. There
   is no localisation and no plan stated for one.
-- **No tests over the panel itself.** The five suites cover the daemon, the
+- **No tests over the panel itself.** The six suites cover the daemon, the
   loop, the archive and the handover arithmetic. `panel.html` is checked only
   by a handful of assertions about its structure — nothing drives it in a
   browser.
@@ -556,6 +616,59 @@ you change it you have to publish your changes under the same licence. The
 Affero part matters for a tool like this — running a modified version as a
 service other people reach over a network counts, so the source of what is
 running has to be available to them. It cannot be closed up and resold.
+
+## Changes
+
+Newest first. Short on purpose — what changed, not why in detail.
+
+**2026-08-30**
+- A tracked process finishing no longer wakes the planner; it leaves a line in
+  the log instead.
+- A compaction sample is attributed only to the session that compacted. A
+  neighbouring window's size is never borrowed, and where the session reported
+  no size of its own nothing is written.
+- The launch panel can choose which model a session *starts* on, and the head
+  of the chain is labelled.
+- A sixth suite, `test_wake_sim.py`: seeded runs of a pair through faults, with
+  sabotage modes that must turn the run red.
+
+**2026-08-28**
+- A project can be carried to another computer: the bridge notices the old path
+  and offers to adopt the history, which only the owner can confirm.
+- A repeatedly refused channel registration now says once that the recorded
+  window may be stale, instead of only logging the refusal.
+
+**2026-08-23**
+- Queued is not delivered: the bridge tracks whether a window has actually read
+  what was handed to its channel.
+
+**2026-08-22**
+- Compaction is treated as recoverable rather than fatal, and a session is no
+  longer replaced for being large when it has survived that size before.
+- A session that can never compact is replaced early and calmly instead of at
+  the wall.
+- A pair waiting on a person is told apart from a pair that is busy, and only
+  the first rings anybody.
+- A stopped loop stops producing nudges.
+- Four pairs proven running on one daemon.
+
+**2026-08-21**
+- The watchdog gained its tiers, and a dead turn is repaired by handing the
+  work back rather than by waking a human.
+- Several pairs going quiet at once is recognised as an outage rather than as
+  several separate faults.
+- Windowed runs are quiet: nothing the automation opens takes focus.
+- A channel's seat is decided by which window spawned it, before age.
+
+**2026-08-19**
+- One name, one file, with a gate that refuses a repeated name.
+- The planner runs the acceptance, because the planner cannot run anything
+  else.
+- Silence is not consent: the pair is held when the planner stops answering.
+
+**2026-08-18**
+- First public release. Two sessions on one project, one working, one
+  reviewing; AGPL-3.0.
 
 ---
 

@@ -139,6 +139,31 @@ def check(name, got, want):
         FAILED.append(name)
 
 
+def read_or_fail(path, what):
+    """Read a file whose existence a check has JUST asserted.
+
+    Returns "" when it is not there, and says so. The form this replaces
+    was: check the file exists, then open it on the next line regardless of
+    the answer - so `check` marked FAIL, and the read three characters
+    later raised and killed the script, taking every block below it with
+    it. Silently: the output simply stops, with no summary and no FAIL
+    line, which reads like a hang rather than a failure. Measured on the
+    public tree, where QUIET.md is deliberately absent: 83 of 103 blocks
+    ran, and the twenty that did not were never reported missing.
+
+    A check that has already spoken must not be able to un-speak itself by
+    crashing. Every caller has to be safe with "" - that is the point: the
+    dependent checks then fail on their own terms, in the output, where a
+    person can see which ones.
+    """
+    if not path or not os.path.isfile(path):
+        print("   !! %s is not there, so the checks below it cannot pass"
+              % (what,))
+        return ""
+    return open(path, encoding="utf-8").read()
+
+
+
 def note(name, got, why=""):
     print("  ..   %s: %r%s" % (name, got, ("  - " + why) if why else ""))
 
@@ -767,39 +792,97 @@ print("    then reads as 'nothing happened' while it was working")
 # timing rather than on the code under test.
 QUIET = os.path.join(TMP, "quiet-project")
 os.makedirs(QUIET, exist_ok=True)
-store.journal("loop", "QUIET-MARK", "quiet-project", project_dir=QUIET)
-for _i in range(60):
-    store.journal("loop", "chatty beta %d" % _i, "beta", project_dir=B)
-store.journal("bridge", "BRIDGE-WIDE-MARK")
 
-sixty_later = [e.get("text") for e in store.recent_events(40)]
+
+def _matching_now():
+    """How many of today's rows this project's filter lets through.
+
+    A line with no path is ABOUT THE BRIDGE and passes every project's
+    filter by design, so this number moves whenever any daemon thread
+    journals - which is the whole difficulty below.
+    """
+    return len([r for r in store._read_events(
+        os.path.join(store.day_dir(), "events.jsonl"))
+        if not r.get("path") or r.get("path") == canon(QUIET)])
+
+
+CHATTY = 60          # the separation the fixture puts between the two bounds
+
+
+def _quiet_reading(tries=8):
+    """Lay the fixture, then read with a window that is not already stale.
+
+    THE FLAKE THIS REPLACES. Sizing the window by what actually matches is
+    what makes the case say what it means - but counting and then reading
+    is two reads with a gap, and every path-less line landing in that gap
+    is a matching row the window no longer covers. Measured: one control
+    run in five went red, always on the same three checks, and it reads
+    like a defect in recent_events when it is nothing but another thread
+    doing its job.
+
+    THE ACCEPTANCE TEST IS NOT STILLNESS. That was tried first and is both
+    too strict and beside the point: under a journal that never stops it
+    fails where the old single-shot form passed, and it fails on its own
+    bookkeeping rather than on the claim. What the reading actually needs
+    is a window at least as large as the matching rows present when it was
+    taken - and it may lag by up to CHATTY, because the sixty beta lines
+    are exactly the distance the case puts between "big enough to keep the
+    mark when filtered" and "small enough to lose it when not". Drift
+    inside that separation cannot change either answer. The number is the
+    fixture's own, measured here, not a tolerance chosen to make a red go
+    away.
+
+    Returns the readings and whether the window was still good for them.
+    """
+    out = None
+    for _ in range(tries):
+        # LAID AFRESH each attempt, and it has to be. A refused reading is
+        # not just stale, it is unrecoverable for the panel's half: that
+        # window is a fixed forty rows server-side, so a mark with two
+        # hundred matching lines now after it can never come back into it,
+        # however carefully we read. Re-laying puts the mark back at the
+        # top; the sixty beta lines that follow are what bury it in the
+        # UNFILTERED order, which is the other half of the claim.
+        store.journal("loop", "QUIET-MARK", "quiet-project", project_dir=QUIET)
+        for _i in range(60):
+            store.journal("loop", "chatty beta %d" % _i, "beta", project_dir=B)
+        store.journal("bridge", "BRIDGE-WIDE-MARK")
+        n1 = _matching_now()
+        out = {
+            "forty": [e.get("text") for e in store.recent_events(40)],
+            "filtered": [e.get("text") for e in
+                         store.recent_events(n1, project=canon(QUIET))],
+            "raw": [e.get("text") for e in store.recent_events(n1)],
+            "feed": get("/state?project="
+                        + urllib.parse.quote(QUIET))["events"],
+        }
+        out["drift"] = _matching_now() - n1
+        if out["drift"] < CHATTY:
+            out["still"] = True
+            return out
+        time.sleep(0.25)
+    out["still"] = False
+    return out
+
+
+_q12 = _quiet_reading()
+check("the window was read before enough lines landed to move either "
+      "bound - otherwise nothing below means anything", _q12["still"], True)
+note("matching rows that landed while it was reading", _q12.get("drift"))
+sixty_later = _q12["forty"]
 check("cut without filtering, the quiet pair's line is gone",
       "QUIET-MARK" in sixty_later, False)
 check("because the chatty one has taken nearly all of the window",
       len([t for t in sixty_later if t.startswith("chatty beta")]) > 30, True)
-# The limit is MEASURED, not 40. A line with no path is about the bridge
-# and passes every project's filter by design, so enough of them landing
-# after the mark push it out of a 40-row window and this reads as a defect
-# in recent_events when it is nothing but noise from another thread. It
-# cost a false red on 2026-08-22 that could not be reproduced in thirteen
-# runs; the mechanism is exact, though - 40 path-less lines after the mark
-# and it is gone. Sizing the window by what actually matches the filter
-# makes the case say what it means: FILTERING HAPPENS BEFORE TRIMMING.
-_matching = len([r for r in store._read_events(
-    os.path.join(store.day_dir(), "events.jsonl"))
-    if not r.get("path") or r.get("path") == canon(QUIET)])
-filtered = [e.get("text")
-            for e in store.recent_events(_matching, project=canon(QUIET))]
+filtered = _q12["filtered"]
 check("filtering first, it survives", "QUIET-MARK" in filtered, True)
 print("   and the same window, unfiltered, does NOT hold it - which is the")
 print("   whole claim: the filter runs first, the cut second")
-check("cut first and it would be lost",
-      "QUIET-MARK" in [e.get("text") for e in store.recent_events(_matching)],
-      False)
+check("cut first and it would be lost", "QUIET-MARK" in _q12["raw"], False)
 check("with none of the sixty that buried it",
       [t for t in filtered if t.startswith("chatty beta")], [])
 
-feed_q = get("/state?project=" + urllib.parse.quote(QUIET))["events"]
+feed_q = _q12["feed"]
 texts_q = [e.get("text") for e in feed_q]
 check("the panel's own feed shows it too", "QUIET-MARK" in texts_q, True)
 check("and carries none of beta's",
@@ -1774,8 +1857,8 @@ check("with what is temporary",
 check("and with what closes it", "config.json" in row["how"], True)
 check("it is written where the project can see it, not only in our state",
       os.path.exists(os.path.join(DPROJ, "bridge-logs", "DEBT.md")), True)
-_debt = open(os.path.join(DPROJ, "bridge-logs", "DEBT.md"),
-             encoding="utf-8").read()
+_debt = read_or_fail(os.path.join(DPROJ, "bridge-logs", "DEBT.md"),
+                     "DEBT.md")
 check("the file says how many are open", "Open: **1**" in _debt, True)
 check("and carries the line unshortened",
       "the exception list is hard-coded" in _debt, True)
@@ -1810,8 +1893,8 @@ check("the closing report arrives",
 check("nothing is owed any more", daemon.open_debt(DPROJ), [])
 check("but the line is kept, not deleted - the pile is the evidence",
       len(daemon.debt_rows(DPROJ)), 1)
-_debt2 = open(os.path.join(DPROJ, "bridge-logs", "DEBT.md"),
-              encoding="utf-8").read()
+_debt2 = read_or_fail(os.path.join(DPROJ, "bridge-logs", "DEBT.md"),
+                      "DEBT.md")
 check("the register shows it closed and by what",
       ("Open: **0**" in _debt2 and "config.json" in _debt2), True)
 post("/verdict", {"project": DPROJ, "verdict": "continue", "feedback":
@@ -2301,7 +2384,7 @@ try:
                                "YOU - nothing is running", path=WAITP)
     check("needs_you carries the pair", len(_rang), 1)
     check("and it is the kind that reaches a phone",
-          _rang[0][0] in daemon.TELEGRAM_KINDS, True)
+          (_rang[0][0] if _rang else None) in daemon.TELEGRAM_KINDS, True)
 
     print("   once per wait: the latch is set, and work going out clears it")
     with daemon._lock:
@@ -2495,15 +2578,41 @@ try:
     check("and no failure was recorded against the client",
           daemon.compaction_failed_at(CMP, "executor"), None)
 
-    print("   the sabotage: the SAME error with no compaction under way is")
-    print("   still a wall hit, immediately - the branch is not disarmed")
-    _seat_compactor()
+    print("   the sabotage: the SAME error with nothing to say it is an")
+    print("   overflow is still a wall hit, immediately - the branch is not")
+    print("   disarmed. It is the SESSION that changes here, not the error:")
+    print("   an invalid_request with no numbers in it, from a session at")
+    print("   300k of a 1M window, is a broken request and nothing else")
+    print("   (this test moved on 2026-08-30 - see case 55. Before it, ANY")
+    print("   invalid_request with no PreCompact rotated at once, and that")
+    print("   is what killed the executor at 18:27:43: the client never")
+    print("   sends a PreCompact when the API refuses first. What decides")
+    print("   now is the text and the size, so the sabotage has to take")
+    print("   both away, and this one does)")
+    _seat_compactor(tokens=300000)
     _r = post("/event", {"hook_event_name": "StopFailure", "cwd": CMP,
                          "role": "executor", "session_id": _csid,
                          "error": "invalid_request",
                          "error_type": "invalid_request"})
-    check("a prompt-too-long out of the blue rotates at once",
+    check("a broken request well below the wall rotates at once",
           [w for _p, w in _rot35], ["hit the wall"])
+    check("and it left no wait behind",
+          (daemon.STATE.get("compact_wait") or {}).get(
+              "%s|executor" % canon(CMP)), None)
+
+    print("   and the other side of that boundary, so it is a boundary and")
+    print("   not a rule: the same wordless error from a session already at")
+    print("   the size where a compaction stops fitting IS waited for")
+    del _rot35[:]
+    _seat_compactor(tokens=999000)
+    post("/event", {"hook_event_name": "StopFailure", "cwd": CMP,
+                    "role": "executor", "session_id": _csid,
+                    "error": "invalid_request",
+                    "error_type": "invalid_request"})
+    check("nobody was rotated", _rot35, [])
+    check("the size alone was enough to wait",
+          (daemon.STATE.get("compact_wait") or {}).get(
+              "%s|executor" % canon(CMP), {}).get("via"), "prompt_too_long")
 finally:
     daemon.rotate_executor = _real_rot
     daemon.notify = _real_n35
@@ -2551,9 +2660,14 @@ try:
         daemon.save_state()
     check("the success ABOVE the failure is refuted, the ones below stand",
           daemon.compaction_survivable(CMP, "executor"), 996906)
+    print("   'by a turn' is measured for this pair now, not a literal, so")
+    print("   the case states the turn it is arguing from")
+    daemon.note_turn_cost(CMP, "executor", 200000, _csid)
+    _tw34 = daemon.turn_widest(CMP, "executor")
+    check("the width is this pair's own", _tw34, (200000, "measured"))
     check("and the ceiling sits below the failure, by a turn",
           daemon.compaction_too_big(CMP, "executor", 1000000),
-          998685 - daemon.LARGEST_TURN_SEEN)
+          998685 - _tw34[0])
 
     print("   the sabotage: take the failure away and the old successes")
     print("   stand again - which is what the bridge did until today")
@@ -2563,9 +2677,16 @@ try:
         daemon.save_state()
     check("without a failure the highest success rules",
           daemon.compaction_survivable(CMP, "executor"), 999875)
+    # Anchored first: without this the expectation calls the very
+    # function under test, so a wrong turn figure moves both sides of the
+    # comparison together and the check passes on it (rule 19). The sibling
+    # check above pins the width the same way.
+    _ord35 = daemon.turn_ordinary(CMP, "executor")
+    check("the ordinary turn is this pair's own, measured", _ord35,
+          (200000, "measured"))
     check("and the ceiling is a turn ABOVE it - the zone that killed us",
           daemon.compaction_too_big(CMP, "executor", 1000000),
-          999875 + daemon.LARGEST_TURN_SEEN)
+          999875 + _ord35[0])
 finally:
     daemon.rotate_executor = _real_rot36
     daemon.notify = _real_n36
@@ -2671,9 +2792,13 @@ try:
             "active": True, "iteration": 1}
         # The window is still up - that is the whole situation: the
         # turn died inside a living console, and our own pid is the
-        # one process this suite can be sure is alive.
+        # one process this suite can be sure is alive. REGISTERED,
+        # because that is what "still up" means on this record since
+        # 2026-08-30: a pid on its own says a process exists, and a
+        # window sitting on a startup dialog is a process that never
+        # became a session (case 53). This one did - it ran turns.
         daemon.STATE.setdefault("pids", {})["%s|executor" % canon(FRZ)] = {
-            "pid": os.getpid()}
+            "pid": os.getpid(), "at": time.time(), "registered": True}
         daemon.save_state()
     print("   the bridge has been watching this file: it knows its size and")
     print("   when it last saw work in it")
@@ -3439,7 +3564,7 @@ _code44, _r44 = post_rc("/channel/register",
                         {"project": STREAK, "role": "executor",
                          "port": 51234, "pid": 4242, "ppid": 4241,
                          "session_id": "corpse-1"})
-check("the endpoint took it", _code44, 200)
+check("the endpoint took it", (_code44, _r44.get("ok")), (200, True))
 check("but the streak survives a channel registration",
       ((daemon.STATE.get("handover_failed") or {})
        .get(canon(STREAK)) or {}).get("n"), 2)
@@ -3651,7 +3776,9 @@ check("and nothing was recorded",
 
 _oc47, _ok47 = post_rc("/adopt-history", {"path": FOUND,
                        "from": [_F_OLD]})
-check("with it, the claim is taken", _oc47, 200)
+# ok, not the status code: /adopt-history answers 200 when it REFUSES too,
+# so a check on the code alone passes either way (rule 19).
+check("with it, the claim is taken", (_oc47, _ok47.get("ok")), (200, True))
 check("and reported back", _ok47.get("moved_from"), [_F_OLD])
 with daemon._lock:
     _entry47 = (daemon.CFG.get("projects") or {}).get(canon(FOUND)) or {}
@@ -3837,7 +3964,12 @@ daemon.store.calib_update("opus 5", M8C, compact_at_tokens=701000,
                           compact_at_window=1000000,
                           compact_samples=[701000], how="PreCompact fired")
 _c8, _r8 = post_rc("/adopt-history", {"path": M8, "from": [M7OLD]})
-check("the claim was taken all the same", _c8, 200)
+# The case says the claim is taken AND the calibration untouched. On the
+# status code alone a refused claim leaves the calibration untouched too,
+# so both halves went green for the wrong reason. The body decides.
+check("the claim was taken all the same", (_c8, _r8.get("ok")), (200, True))
+check("and it is the claim that was recorded", _r8.get("moved_from"),
+      [M7OLD])
 _cal8 = daemon.store.load_calibration()
 check("but the local calibration is untouched",
       (_cal8.get(daemon.store.calib_key("opus 5", M8C)) or {})
@@ -4204,6 +4336,55 @@ with open(_TREE, "w", encoding="utf-8") as _fh:
         "time.sleep(180)\n")
 
 
+def _kill_chain(pids):
+    """Kill EVERY process in the chain, not only the one we started.
+
+    `p.kill()` reaches the head and nothing else, and the head is the only
+    thing subprocess knows about - the fixture is a CHAIN on purpose,
+    because the question under test is parentage, and on Windows killing a
+    parent leaves its children running. They exit on their own when their
+    sleep runs out, which is why this looked like nothing for weeks; found
+    2026-08-31 with three runs' worth still alive, one of them holding a
+    directory open so it could not be deleted. A run that leaves a process
+    behind will one day take a port or a file from the next run, and the red
+    will look like a defect in the code.
+
+    Returns the pids that were still there after the wait, so the caller
+    checks a FACT rather than a hope. It used to be `os.kill(pid, 9)` and
+    nothing else: on Windows that is TerminateProcess, which returns before
+    the process is reaped, and the descendants are not Popen objects so
+    there was nobody to wait on them. The check that followed therefore
+    raced, and was green here and red on the planner's run of the same code.
+    A longer sleep would only have moved the boundary (S5.38).
+    """
+    left = []
+    for pid in pids:
+        try:
+            if not sessions.terminate_and_wait(pid, 30):
+                left.append(pid)
+        except Exception:
+            left.append(pid)
+    return left
+
+
+def _alive(pid):
+    """Is this pid still running?
+
+    sessions.pid_alive, which is the project's own and correct on Windows
+    (OpenProcess plus WaitForSingleObject - see 5.14, where asking only
+    whether OpenProcess succeeded called every exited-but-unreaped child
+    alive). Two wrong answers were tried first. `tasklist` through
+    subprocess.run(text=True) hands back stdout=None on this machine: the
+    console codepage is not UTF-8, the decode raises inside subprocess's own
+    reader thread, and the exception is printed there while the attribute is
+    left unset - a failure that arrives looking like an empty result. And
+    `os.kill(pid, 0)`, which on Windows does not probe anything at all: it
+    calls TerminateProcess with 0 as the exit code and KILLS what it was
+    asked about.
+    """
+    return sessions.pid_alive(pid)
+
+
 def _tree(depth):
     """A real chain of real processes: [self, child, grandchild, ...].
 
@@ -4214,10 +4395,12 @@ def _tree(depth):
                          stdout=subprocess.PIPE, text=True)
     pids = [int(x) for x in p.stdout.readline().split()]
     _TREES.append(p)
+    _TREE_PIDS.extend(pids)
     return pids
 
 
 _TREES = []
+_TREE_PIDS = []
 _W, _WC, _S = _tree(2)      # the recorded window, its channel, a subagent's
 _X, _XC = _tree(1)          # a DIFFERENT window and its channel
 note("recorded window / its channel / a process inside it", (_W, _WC, _S))
@@ -4265,7 +4448,7 @@ _warn51 = [r for r in daemon.store.recent_events(300, project=CH)
                                                                   or "")]
 check("said once, not five times", len(_warn51), 1)
 check("and it names the contender, its parent and the seat's holder",
-      all(str(x) in (_warn51[0].get("text") or "")
+      all(str(x) in ((_warn51[0] if _warn51 else {}).get("text") or "")
           for x in (_S, _WC, _W)), True)
 
 print("   the seat itself is NOT moved by this change, and that is a")
@@ -4293,6 +4476,31 @@ try:
     with daemon._lock:
         (daemon.STATE.get("chan_refused") or {}).pop("%s|planner" % CHC,
                                                      None)
+    print("   and the refusal line says only what age SHOWS. It used to end")
+    print("   'so it is a leftover from a window that has been replaced',")
+    print("   which age cannot establish: measured 2026-08-31 on a live")
+    print("   pair, the refused contender's window was alive and its own")
+    print("   transcript 30 minutes old - a second REAL planner, not a")
+    print("   corpse, and the journal had said otherwise 902 times that day")
+    _lines51 = [r.get("text") or "" for r in
+                daemon.store.recent_events(300, project=CH)
+                if "Refused a channel registration" in (r.get("text") or "")]
+    check("refusals were journalled, or there is nothing to read",
+          bool(_lines51), True)
+    check("none of them asserts the contender is a leftover",
+          [t for t in _lines51 if "it is a leftover" in t], [])
+    check("and they do say the newer one keeps the seat",
+          all("keeps the seat" in t for t in _lines51), True)
+    print("   the same line also claimed 'its port is NOT being used'. That")
+    print("   was false too, and the planner reasoned from it: netstat showed")
+    print("   the contender LISTENING on that very port and a connection was")
+    print("   accepted. It says what the BRIDGE will do now, not what the")
+    print("   port is.")
+    check("no refusal claims the contender's port is dead",
+          [t for t in _lines51 if "NOT being used" in t], [])
+    check("they say what the bridge will do instead",
+          all("Nothing will be delivered" in t for t in _lines51), True)
+
     _before51 = len([r for r in daemon.store.recent_events(300, project=CH)
                      if "has been refused" in (r.get("text") or "")])
     for _i in range(6):
@@ -4305,15 +4513,1065 @@ try:
 finally:
     daemon.CHANNEL_REFUSE_TELL = _saved51
 
+_LEFT51 = _kill_chain(_TREE_PIDS)
 for _p in _TREES:
     try:
-        _p.kill()
+        _p.wait(5)
     except Exception:
         pass
+print("   and the fixture is cleaned up completely - every process in the")
+print("   chain, not just the one subprocess knows about")
+print("   FAILURE WOULD LOOK LIKE: p.kill() on the head alone, which is what")
+print("   this was: the children outlived the run until their own sleep ran")
+print("   out, and three runs' worth were found alive at once")
+print("   THE CONTROL (rule 19): the check below can only mean something if")
+print("   _alive can still SEE a live process at this point in the run. A")
+print("   probe that has quietly started answering False for everything")
+print("   would make an empty list look like a clean fixture. Spawned")
+print("   outside _TREE_PIDS on purpose, so this cleanup cannot touch it.")
+_ctl51 = subprocess.Popen([sys.executable, "-c",
+                           "import time; time.sleep(60)"])
+check("a process nobody has killed reads as alive", _alive(_ctl51.pid), True)
+check("terminate_and_wait says it is gone",
+      sessions.terminate_and_wait(_ctl51.pid, 30), True)
+check("and the probe agrees, with no sleep in between",
+      _alive(_ctl51.pid), False)
+# Never let the control CRASH the suite. When the sabotage above is real -
+# terminate_and_wait lying, which is exactly what this control exists to
+# catch - the process is still running, wait(5) raises TimeoutExpired, and
+# the run dies before it prints its FAIL summary. That is S5.9: a suite that
+# crashes instead of reporting is not a gate. It is also rule 9: the control
+# must not be the thing that leaks.
+try:
+    _ctl51.wait(5)
+except Exception:
+    try:
+        _ctl51.kill()
+        _ctl51.wait(5)
+    except Exception:
+        pass
+
+check("kill_chain reports nothing left behind", _LEFT51, [])
+check("no process of this fixture is left running",
+      [pid for pid in _TREE_PIDS if _alive(pid)], [])
 with daemon._lock:
     daemon.CFG["projects"] = json.loads(_cfg51)
     (daemon.STATE.get("chan_refused") or {}).pop("%s|planner" % CHC, None)
     daemon.save_state()
+
+print("\n52. the model chosen in the panel is the model the window starts on")
+print("    2026-08-30, the owner: he chose Opus for BOTH halves in the Launch")
+print("    window and an ordinary pair came up. The choice never reached the")
+print("    POST. launchRole() sends CHAINS[role][0], and the drop-down fed")
+print("    only the add button, which APPENDS - so a planner whose saved")
+print("    chain was [fable] started fable however Opus was picked, and")
+print("    STATE['pids'] kept model_req='fable' against it as the proof.")
+print("    Two halves, because the break was in one of them and the other")
+print("    had to be cleared by fact: the daemon end really does carry a")
+print("    named model all the way to argv, and the panel now has a gesture")
+print("    that puts one at the head of the chain and keeps it there.")
+
+MP52 = A
+_pre52 = len(launches())
+r = post("/session", {"action": "launch", "project": MP52,
+                      "role": "executor", "model": "sonnet"})
+check("the launch was accepted", r.get("ok"), True)
+check("a window came up", until(lambda: len(launches()) > _pre52, 30), True)
+_av52 = launches()[-1]["argv"]
+check("and it was started on the model that was asked for, not on a default",
+      ("--model" in _av52,
+       _av52[_av52.index("--model") + 1] if "--model" in _av52 else None),
+      (True, "sonnet"))
+post("/session", {"action": "stop", "project": MP52, "role": "executor"})
+
+print("    THE SABOTAGE (rule 19): a check that reads argv would pass on a")
+print("    constant just as happily, so the same path is driven again with a")
+print("    different choice, and once more with none at all. If the choice")
+print("    were being dropped anywhere between the POST and CreateProcess,")
+print("    these three could not disagree with each other.")
+_pre52b = len(launches())
+post("/session", {"action": "launch", "project": MP52, "role": "planner",
+                  "model": "haiku"})
+check("a different choice starts a different model",
+      until(lambda: len(launches()) > _pre52b, 30), True)
+_av52b = launches()[-1]["argv"]
+check("carried through the same path, unchanged",
+      _av52b[_av52b.index("--model") + 1] if "--model" in _av52b else None,
+      "haiku")
+post("/session", {"action": "stop", "project": MP52, "role": "planner"})
+
+_pre52c = len(launches())
+post("/session", {"action": "launch", "project": MP52, "role": "executor"})
+check("and with nothing chosen the client keeps its own default",
+      until(lambda: len(launches()) > _pre52c, 30), True)
+check("no --model is invented for it",
+      "--model" in launches()[-1]["argv"], False)
+post("/session", {"action": "stop", "project": MP52, "role": "executor"})
+
+check("an alias is passed through as an alias, so a new release needs no edit",
+      daemon.models.resolve("opus", {"opts": {"prefer_aliases": True}}),
+      "opus")
+check("and pinned to the concrete id when the owner asked for that instead",
+      daemon.models.resolve("opus", {"opts": {"prefer_aliases": False},
+                                     "map": {"opus": {"id": "claude-opus-5"}}}),
+      "claude-opus-5")
+
+_panel52 = open(os.path.join(os.path.dirname(daemon.__file__), "panel.html"),
+                encoding="utf-8").read()
+check("the panel launches on the head of the chain and nothing else",
+      "(CHAINS[role]||[])[0]" in _panel52, True)
+check("there is a gesture that puts a chosen model at that head",
+      'data-first="executor"' in _panel52 and 'data-first="planner"'
+      in _panel52, True)
+_seg52 = _panel52[_panel52.index('$$("[data-first]")'):]
+_seg52 = _seg52[:_seg52.index("renderLaunch()")]
+check("it moves the model rather than copying it, so the ladder keeps one "
+      "entry per model",
+      ("rest.unshift(sel.value)" in _seg52,
+       "filter(function(m){return m!==sel.value})" in _seg52), (True, True))
+check("and it latches, so the render 2.5s later cannot throw the choice "
+      "away (the class of 5.8)",
+      "window._launchTouched=true" in _seg52, True)
+check("the window says which chip is the one that starts",
+      "starts here" in _panel52, True)
+check("and the drop-down keeps what was picked across a render",
+      "if(was&&(D.models||[]).indexOf(was)>=0)sel.value=was" in _panel52, True)
+
+print("\n53. a live pid is not a live session - the stuck window of 18:27:46")
+print("    2026-08-30. rotate_executor opened a replacement at 18:27:46,")
+print("    pid 12472. No SessionStart came from it until 21:47:23 - three")
+print("    hours nineteen minutes on a startup dialog nobody could see,")
+print("    because the window is born minimised. check_sessions said so")
+print("    once, at 18:38:03, and set gave_up on the record. Nothing else")
+print("    read that field: already_up asked pid_alive, got True, and")
+print("    answered 'its window is still running', so clinch() passed its")
+print("    all(alive) test and reported a pair waiting on itself - fifteen")
+print("    times between 18:44 and 21:34, never once naming the real fact")
+print("   a real process, a real reg_pid, a real check tick. The pid has to")
+print("   be genuinely alive or pid_alive is not being asked anything")
+STUCK = os.path.join(TMP, "stuck-window")
+os.makedirs(STUCK, exist_ok=True)
+post("/config", {"projects": {A: {}, B: {}, C: {}, STUCK: {}}})
+_sleeper = subprocess.Popen([sys.executable, "-c",
+                             "import time; time.sleep(600)"])
+_k53 = "%s|executor" % canon(STUCK)
+try:
+    check("the stand-in window really is running",
+          daemon.sessions.pid_alive(_sleeper.pid), True)
+    daemon.reg_pid(STUCK, "executor", _sleeper.pid, model_req="opus")
+    check("and reg_pid wrote it unregistered, as every launch path does",
+          (daemon.STATE["pids"][_k53]).get("registered"), False)
+
+    print("   the pair as it stood at 18:38: planner answering, executor")
+    print("   retired by the rotation, and only the pid left to speak for it")
+    with daemon._lock:
+        daemon.STATE.setdefault("sessions", {})["planner:stuckpln"] = {
+            "role": "planner", "path": canon(STUCK),
+            "session_id": "stuckpln-0000", "model": "Opus 5",
+            "state": "idle", "last_seen": daemon.now(),
+            "seen_at": time.time()}
+        daemon.STATE["sessions"]["executor:stuckexe"] = {
+            "role": "executor", "path": canon(STUCK),
+            "session_id": "stuckexe-0000", "model": "Opus 5",
+            "state": "ended", "last_seen": daemon.now(),
+            "seen_at": time.time() - 12000}
+        daemon.STATE.setdefault("loops", {})[canon(STUCK)] = {
+            "active": True, "iteration": 406}
+        daemon.STATE.setdefault("stop_seen", {})[_k53] = time.time() - 4000
+        daemon.STATE["pids"][_k53]["at"] = time.time() - 700
+        daemon.save_state()
+
+    check("the executor is NOT called alive on a pid alone",
+          bool(daemon.already_up(STUCK, "executor")), False)
+    check("the planner still is, on its own record",
+          bool(daemon.already_up(STUCK, "planner")), True)
+
+    print("   the real tick, not a snapshot of what a tick would have seen")
+    _told53 = []
+    _realn53, daemon.notify = daemon.notify, \
+        lambda kind, text, **kw: _told53.append((kind, text))
+    _started53 = daemon.STATE.get("started_at")
+    try:
+        with daemon._lock:
+            daemon.STATE["started_at"] = time.time() - 9000
+            daemon.save_state()
+        daemon.check_sessions(0)
+        check("the watchdog named the stuck window",
+              any(k == "session_died" and "never started" in t
+                  for k, t in _told53), True)
+        check("and wrote down that it has told once",
+              (daemon.STATE["pids"][_k53]).get("told_n"), 1)
+
+        print("   THIS is the failure shape: with the pair read as two live")
+        print("   halves, tier 1 calls it a clinch and wakes the wrong thing")
+        _sit53 = daemon.situation(STUCK)
+        check("clinch says nothing about a half that never came up",
+              daemon.clinch(STUCK, _sit53), None)
+        print("   the control - flip the one bit back and the old report")
+        print("   returns, so the check could have failed")
+        with daemon._lock:
+            daemon.STATE["pids"][_k53]["registered"] = True
+            daemon.save_state()
+        _sitc = daemon.situation(STUCK)
+        _clc = daemon.clinch(STUCK, _sitc)
+        check("with registered=True it is a clinch again",
+              (_clc or {}).get("why"), "report_never_arrived")
+        check("and that is the line the owner read fifteen times",
+              "no report reached the planner" in (_clc or {}).get("said", ""),
+              True)
+        with daemon._lock:
+            daemon.STATE["pids"][_k53]["registered"] = False
+            daemon.save_state()
+
+        print("   and nothing opens a second window over the stuck one -")
+        print("   launch_guard refuses while that pid is alive, which it did")
+        print("   NOT do before: its refusal lapsed at startup_grace")
+        _lg = daemon.launch_guard(STUCK, "executor")
+        check("a second window is refused", bool(_lg), True)
+        check("and the refusal names why", "startup dialog" in (_lg or ""),
+              True)
+
+        print("   said again, further apart each time - it used to be said")
+        print("   once, ever, and the window sat there for three hours")
+        _told53[:] = []
+        daemon.check_sessions(0)
+        check("not repeated before the gap is up", _told53, [])
+        with daemon._lock:
+            daemon.STATE["pids"][_k53]["told_at"] = time.time() - 1300
+            daemon.save_state()
+        daemon.check_sessions(0)
+        check("repeated once the gap is up",
+              any(k == "session_died" for k, t in _told53), True)
+        check("and the count grew, so the next gap is wider",
+              (daemon.STATE["pids"][_k53]).get("told_n"), 2)
+    finally:
+        daemon.notify = _realn53
+        with daemon._lock:
+            daemon.STATE["started_at"] = _started53
+            daemon.save_state()
+
+    print("   and when a person finally answers the dialog, the record is")
+    print("   clean again - gave_up outlived its window in the live state")
+    print("   of 2026-08-30, on a session that had come up")
+    _r53 = post("/event", {"hook_event_name": "SessionStart", "cwd": STUCK,
+                           "role": "executor", "session_id": "stuck-new-1"})
+    check("the SessionStart went in", _r53.get("status"), 200)
+    check("the record is registered", (daemon.STATE["pids"][_k53]).get(
+        "registered"), True)
+    check("gave_up went with it", "gave_up" in daemon.STATE["pids"][_k53],
+          False)
+    check("and so did the cadence", "told_n" in daemon.STATE["pids"][_k53],
+          False)
+    check("the executor is alive again",
+          bool(daemon.already_up(STUCK, "executor")), True)
+finally:
+    # Rule 9: the stand-in process goes in the turn that made it.
+    _sleeper.kill()
+    _sleeper.wait(timeout=10)
+
+
+print("\n54. a reader of state.json does not crash the daemon")
+print("    2026-08-30 22:00:26. A plain /status POST went touch_session ->")
+print("    remember_session -> save_state and died on WinError 5 replacing")
+print("    state.json - a whole crash bundle out of a status line redraw,")
+print("    and that save lost. Nothing was wrong with the write: on Windows")
+print("    os.replace fails while ANY other process holds the destination")
+print("    open, and CPython's open() for reading does exactly that. The")
+print("    reader that afternoon was this bridge's own investigation")
+print("   two halves, because one is not enough. A retry wins against a")
+print("   reader that lets go; nothing wins against a handle held open, so")
+print("   the write is allowed to LOSE rather than come back up the stack")
+_sp54 = os.path.join(TMP, "atomic-probe.json")
+daemon.store._write_atomic(_sp54, {"n": 1})
+_held54 = None
+_real54 = daemon.store.STATE_PATH
+try:
+    print("   half one: a reader that lets go loses to the retry")
+    _slow = []
+
+    def _one_shot_reader(path):
+        fh = open(path, "r", encoding="utf-8")
+        _slow.append(fh)
+        threading.Timer(0.12, fh.close).start()
+
+    _one_shot_reader(_sp54)
+    daemon.store._write_atomic(_sp54, {"n": 2})
+    with open(_sp54, encoding="utf-8") as fh:
+        check("the write went through once the reader let go",
+              json.load(fh).get("n"), 2)
+
+    print("   half two: a handle held for the whole window. The save loses")
+    print("   - and losing must not reach the caller, because the caller is")
+    print("   a hook posting /status")
+    _held54 = open(_sp54, "r", encoding="utf-8")
+    daemon.store.STATE_PATH = _sp54
+    _n54 = daemon.store._state_write_fails[0]
+    try:
+        daemon.store.save_state({"n": 3})
+        check("save_state did not raise with the file held", True, True)
+    except OSError as exc:
+        check("save_state did not raise with the file held", repr(exc), True)
+    check("and it counted the loss instead of hiding it",
+          daemon.store._state_write_fails[0] > _n54, True)
+    print("   the complete data is on disk beside it, so nothing serialised")
+    print("   was lost even though the replace never happened")
+    with open(_sp54 + ".tmp", encoding="utf-8") as fh:
+        check("the .tmp holds what the save was carrying",
+              json.load(fh).get("n"), 3)
+    print("   and the next save carries it, which is why losing one is")
+    print("   survivable for STATE and would not be for config.json")
+    _held54.close()
+    daemon.store.save_state({"n": 4})
+    with open(_sp54, encoding="utf-8") as fh:
+        check("the next save landed", json.load(fh).get("n"), 4)
+    check("and the run of failures was reset by it",
+          daemon.store._state_write_fails[0], 0)
+finally:
+    daemon.store.STATE_PATH = _real54
+    try:
+        if _held54:
+            _held54.close()
+    except Exception:
+        pass
+    for _fh in _slow:
+        try:
+            _fh.close()
+        except Exception:
+            pass
+
+print("   the failure shape, said out loud: without the retry half one")
+print("   raises PermissionError; without save_state absorbing it, half two")
+print("   is the 22:00:26 crash bundle again. Both are Windows-only at")
+print("   runtime, so the wiring is asserted on every platform too")
+_src54 = inspect.getsource(daemon.store._write_atomic)
+check("_write_atomic goes through the retry", "_replace_with_retry" in _src54,
+      True)
+_ret54 = inspect.getsource(daemon.store._replace_with_retry)
+check("which retries the two Windows codes that mean 'somebody has it open'",
+      "(5, 32)" in _ret54, True)
+check("and raises on anything else rather than hiding it",
+      "raise" in _ret54, True)
+check("bounded, so a file that is genuinely locked is still reported",
+      2 <= daemon.store.REPLACE_TRIES <= 20, True)
+_ss54 = inspect.getsource(daemon.store.save_state)
+check("only state.json is allowed to lose a write",
+      "_write_atomic(STATE_PATH, state)" in _ss54, True)
+_sc54 = inspect.getsource(daemon.store.save_config)
+check("config.json still raises, because it is written rarely",
+      "except OSError" in _sc54, False)
+
+
+print("\n55. a prompt-too-long with no PreCompact is the cure starting")
+print("    2026-08-30 18:27:43. The API answered `prompt is too long:")
+print("    1000815 tokens > 1000000 maximum` and NO PreCompact ever came -")
+print("    not before, not after. compaction_pending is written by the")
+print("    PreCompact branch and by nothing else, so the only witness")
+print("    wait_for_compaction knew about could not exist; it returned")
+print("    False and handle_wall_hit ran in the same second, killing a")
+print("    session that had compacted at 998 851 the day before, 2-3")
+print("    seconds into its own recovery. Rule 30 in its least obvious")
+print("    form: not a forged witness, but one the event makes impossible")
+
+
+def _ovf_pair(tag, size=1000815):
+    """A fresh project with a live pair, a size on record and the loop on."""
+    d = os.path.join(TMP, tag)
+    os.makedirs(d, exist_ok=True)
+    post("/config", {"projects": {A: {}, B: {}, C: {}, d: {}}})
+    post_rc("/loop", {"action": "start", "project": d})
+    for role, sid in (("executor", tag + "-ex"), ("planner", tag + "-pl")):
+        post_rc("/event", {"hook_event_name": "SessionStart", "role": role,
+                           "session_id": sid, "project_dir": d, "cwd": d})
+        post_rc("/status", {"role": role, "payload": {
+            "session_id": sid,
+            "workspace": {"current_dir": d, "project_dir": d},
+            "model": {"display_name": "Opus 5", "id": "claude-opus-5"},
+            "context_window": {"context_window_size": 1000000,
+                               "used_percentage": 99.0,
+                               "current_usage": {
+                                   "input_tokens": 10,
+                                   "cache_creation_input_tokens": 90,
+                                   "cache_read_input_tokens": 999_000,
+                                   "output_tokens": 4000}}}})
+    return d, canon(d), "%s|executor" % canon(d)
+
+
+def _too_long(d, sid, size=1000815):
+    """The death exactly as the client sends it - the numbers live in
+    `error_details`, which is not one of ERROR_KEYS, so the journal line for
+    the real one said `invalid_request` and the diagnosis sat one field
+    away."""
+    return post("/event", {
+        "hook_event_name": "StopFailure", "cwd": d, "role": "executor",
+        "session_id": sid, "error": "invalid_request",
+        "error_details": ('400 {"type":"error","error":{"type":'
+                          '"invalid_request_error","message":"prompt is too '
+                          'long: %d tokens > 1000000 maximum"}}' % size)})
+
+
+print("   gate 1: the death goes in as a real POST, with no PreCompact")
+print("   FAILURE WOULD LOOK LIKE: a launch appears in the stub's log, or")
+print("   compact_wait stays empty - that is the 18:27:43 kill, unchanged")
+OVF, OVFC, OVFK = _ovf_pair("overflow-1")
+_before55 = len(launches())
+_r55 = _too_long(OVF, "overflow-1-ex")
+check("the bridge took the StopFailure", _r55.get("status"), 200)
+check("no PreCompact was ever recorded for this pair",
+      (daemon.STATE.get("compactions") or {}).get(OVFK), None)
+check("nothing was rotated", len(launches()), _before55)
+_w55 = (daemon.STATE.get("compact_wait") or {}).get(OVFK) or {}
+check("the wait was written down", bool(_w55), True)
+check("and it says which kind of wait it is", _w55.get("via"),
+      "prompt_too_long")
+check("at the size the API REFUSED, not the size drawn before the turn",
+      _w55.get("tokens"), 1000815)
+print("   and the real tick changes nothing while the wait is young")
+daemon.assess(OVF)
+check("still no rotation after a real assess() tick", len(launches()),
+      _before55)
+check("and the wait is still standing",
+      bool((daemon.STATE.get("compact_wait") or {}).get(OVFK)), True)
+
+print("   gate 2: the summary lands - a smaller reading arrives")
+print("   FAILURE WOULD LOOK LIKE: a launch in the log, or")
+print("   compaction_failed_at returning a number for a compaction that")
+print("   worked - which would then poison the ceiling for ever")
+post_rc("/status", {"role": "executor", "payload": {
+    "session_id": "overflow-1-ex",
+    "workspace": {"current_dir": OVF, "project_dir": OVF},
+    "model": {"display_name": "Opus 5", "id": "claude-opus-5"},
+    "context_window": {"context_window_size": 1000000,
+                       "used_percentage": 11.0,
+                       "current_usage": {"input_tokens": 10,
+                                         "cache_creation_input_tokens": 90,
+                                         "cache_read_input_tokens": 108_777,
+                                         "output_tokens": 4000}}}})
+daemon.assess(OVF)
+check("the wait was dropped", (daemon.STATE.get("compact_wait") or {}).get(
+    OVFK), None)
+check("nothing was replaced", len(launches()), _before55)
+check("and NOTHING was recorded as a failure",
+      daemon.compaction_failed_at(OVF, "executor"), None)
+
+print("   gate 3: the summary never lands. Only now is it a failure, and")
+print("   THIS is the half that teaches the ceiling (A2)")
+print("   FAILURE WOULD LOOK LIKE: no launch at all - the session left to")
+print("   die at the wall - or compaction_failed_at still None, which is")
+print("   today's live state: the bridge learned nothing from a real death")
+OVF2, OVF2C, OVF2K = _ovf_pair("overflow-2")
+_before3 = len(launches())
+_too_long(OVF2, "overflow-2-ex")
+check("the wait was written", bool((daemon.STATE.get("compact_wait") or {})
+                                   .get(OVF2K)), True)
+with daemon._lock:
+    daemon.STATE["compact_wait"][OVF2K]["at"] = \
+        time.time() - daemon.COMPACT_RECOVERY_SEC - 5
+    daemon.save_state()
+daemon.assess(OVF2)
+check("the failure is on record now",
+      daemon.compaction_failed_at(OVF2, "executor"), 1000815)
+print("   rotate_executor runs in a thread and sleeps two seconds before it")
+print("   launches, so the replacement is waited for rather than assumed")
+check("and the session was replaced",
+      until(lambda: len(launches()) > _before3, 20), True)
+_n3 = len(launches())
+daemon.assess(OVF2)
+check("a second tick does not replace it again",
+      until(lambda: len(launches()) > _n3, 4), False)
+check("because the wait is gone", (daemon.STATE.get("compact_wait") or {})
+      .get(OVF2K), None)
+
+print("   A2, proven on its own: the recorded failure is what closes the")
+print("   ceiling. These are the live numbers of 2026-08-30 - one")
+print("   successful compaction at 998 851 with a floor of 108 877, and")
+print("   the refusal at 1 000 815")
+with daemon._lock:
+    daemon.STATE.setdefault("compactions", {})[OVF2K] = [
+        {"at": "2026-08-29 17:01", "tokens": 998851, "after": 108877,
+         "session": "overflow-2-ex"}]
+    daemon.save_state()
+daemon.note_turn_cost(OVF2, "executor", 200274, "overflow-2-ex")
+_prov = daemon.compaction_survivable(OVF2, "executor")
+_fail = daemon.compaction_failed_at(OVF2, "executor")
+_top = daemon.compaction_too_big(OVF2, "executor", 1000000)
+check("the success below the failure still counts", _prov, 998851)
+_ordA, _wideA = (daemon.turn_ordinary(OVF2, "executor")[0],
+                 daemon.turn_widest(OVF2, "executor")[0])
+check("and the ceiling is the planner's arithmetic", _top,
+      min(_prov + _ordA, _fail - _wideA))
+check("which puts the compaction point ABOVE the ceiling - rule 1a's test",
+      998851 > _top, True)
+print("   the control for THAT: with the failure removed, the same numbers")
+print("   leave the point below the ceiling and rule 1a stays silent")
+with daemon._lock:
+    (daemon.STATE.get("compact_failed") or {}).pop(OVF2K, None)
+    daemon.save_state()
+check("no failure on record, no early rotation",
+      998851 > daemon.compaction_too_big(OVF2, "executor", 1000000), False)
+
+print("   gate 4: the control - a PreCompact DID arrive. This is the")
+print("   planner's 03:43 on 2026-08-30, which survived, and it must go on")
+print("   behaving exactly as it did")
+print("   FAILURE WOULD LOOK LIKE: via reading prompt_too_long, or the")
+print("   recorded size being the refused one instead of the carried one")
+OVF3, OVF3C, OVF3K = _ovf_pair("overflow-3")
+_before4 = len(launches())
+post_rc("/event", {"hook_event_name": "PreCompact", "role": "executor",
+                   "session_id": "overflow-3-ex", "project_dir": OVF3,
+                   "cwd": OVF3})
+_too_long(OVF3, "overflow-3-ex")
+_w4 = (daemon.STATE.get("compact_wait") or {}).get(OVF3K) or {}
+check("the announced path is the one that was taken", _w4.get("via"),
+      "precompact")
+check("and it carries the size the PreCompact recorded, not the refusal",
+      _w4.get("tokens"), 999100)
+check("nothing was rotated", len(launches()), _before4)
+print("   and it still lands the way it did on 2026-08-30 at 03:45:48")
+post_rc("/status", {"role": "executor", "payload": {
+    "session_id": "overflow-3-ex",
+    "workspace": {"current_dir": OVF3, "project_dir": OVF3},
+    "model": {"display_name": "Opus 5", "id": "claude-opus-5"},
+    "context_window": {"context_window_size": 1000000,
+                       "used_percentage": 7.0,
+                       "current_usage": {"input_tokens": 10,
+                                         "cache_creation_input_tokens": 90,
+                                         "cache_read_input_tokens": 66_409,
+                                         "output_tokens": 4000}}}})
+daemon.assess(OVF3)
+check("the wait was dropped", (daemon.STATE.get("compact_wait") or {}).get(
+    OVF3K), None)
+check("nothing was replaced", len(launches()), _before4)
+check("and no failure was invented", daemon.compaction_failed_at(
+    OVF3, "executor"), None)
+
+print("   and the doorway is still a doorway: an invalid_request that is")
+print("   NOT an overflow is handled at once, as it always was")
+print("   FAILURE WOULD LOOK LIKE: a wait record - a broken request left")
+print("   sitting for ten minutes before anyone looked at it")
+check("a malformed request names no overflow",
+      daemon.overflow_said({"error": "invalid_request",
+                            "error_details": "400 tool schema is wrong"}),
+      None)
+check("the client's own sentence does", daemon.overflow_said(
+    {"error_details": "prompt is too long: 1000815 tokens > 1000000 maximum"}),
+    (1000815, 1000000))
+check("and a rate limit was never in this branch at all",
+      "rate" in inspect.getsource(daemon.handle_event), True)
+
+
+print("\n56. how big a turn is, is MEASURED - per pair, and it is two numbers")
+print("    LARGEST_TURN_SEEN = 200274 was a literal dated 2026-08-20 and")
+print("    called 'the largest single turn this bridge has ever measured'.")
+print("    Measured 2026-08-31 over 826 turns in 57 sessions: one pair's")
+print("    max 432 609, another's 532 910, and 523 857 of those was")
+print("    measured on 2026-08-20 itself. It was never the largest turn")
+print("    seen - it was the turn that killed one session - and it was")
+print("    used with two opposite meanings in the same function")
+print("   the costs go in the way real ones do: statuses and Stop hooks")
+print("   through /event, so the recording is the code that records")
+
+
+def _turn_run(tag, costs, start=200000):
+    """A pair that really takes turns. Loop off, so the Stop hook records
+    the cost and then goes home instead of blocking on a review."""
+    d = os.path.join(TMP, tag)
+    os.makedirs(d, exist_ok=True)
+    post("/config", {"projects": {A: {}, B: {}, C: {}, d: {}}})
+    sid = tag + "-ex"
+    post_rc("/event", {"hook_event_name": "SessionStart", "role": "executor",
+                       "session_id": sid, "project_dir": d, "cwd": d})
+    size = start
+    for i, cost in enumerate([0] + list(costs)):
+        size += cost
+        post_rc("/status", {"role": "executor", "payload": {
+            "session_id": sid,
+            "workspace": {"current_dir": d, "project_dir": d},
+            "model": {"display_name": "Opus 5", "id": "claude-opus-5"},
+            "context_window": {"context_window_size": 1000000,
+                               "used_percentage": size / 10000.0,
+                               "current_usage": {
+                                   "input_tokens": 0,
+                                   "cache_creation_input_tokens": 0,
+                                   "cache_read_input_tokens": size,
+                                   "output_tokens": 100}}}})
+        post_rc("/event", {"hook_event_name": "Stop", "role": "executor",
+                           "session_id": sid, "project_dir": d, "cwd": d,
+                           "last_assistant_message": "%s turn %d" % (tag, i)})
+    return d, canon(d), "%s|executor" % canon(d), sid
+
+
+_COSTS = [10000, 20000, 30000, 40000, 50000, 60000, 70000, 80000, 90000,
+          400000]
+TW1, TW1C, TW1K, TW1S = _turn_run("turns-one", _COSTS)
+_rec56 = (daemon.STATE.get("turns") or {}).get(TW1K) or {}
+check("every turn was recorded, through the real hook",
+      _rec56.get("sample"), _COSTS)
+check("and the total counted", _rec56.get("n"), len(_COSTS))
+print("   attributed, not floating: the session that produced the biggest")
+print("   one is written down beside it. That is the whole of")
+print("   ANALYSIS-compaction-point.md - one session's size recorded as")
+print("   another's measurement - and it must not happen in a new place")
+check("the biggest is kept with the session that made it",
+      (_rec56.get("biggest"), _rec56.get("biggest_session")),
+      (400000, TW1S))
+
+print("   TWO figures off one sample, because the old constant answered two")
+print("   questions with one number: `proven + L` wants an ORDINARY turn,")
+print("   `fail - L` wants the WIDEST one. On one real pair's numbers")
+print("   `proven + max` is 1 531 761 - above the window, so that branch")
+print("   could never fire - and `fail - max` is 467 905, which calls a")
+print("   session carrying half its window doomed")
+check("widest is the widest", daemon.turn_widest(TW1, "executor"),
+      (400000, "measured"))
+check("ordinary is not - the freak turn is the top decile",
+      daemon.turn_ordinary(TW1, "executor"), (90000, "measured"))
+
+print("   THE SUBSTITUTION CHECK. A pair with no turns of its own borrows,")
+print("   and the borrowing is VISIBLE. Failure here looks like taking")
+print("   somebody else's maximum and calling it measured")
+TW2 = os.path.join(TMP, "turns-two")
+os.makedirs(TW2, exist_ok=True)
+post("/config", {"projects": {A: {}, B: {}, C: {}, TW1: {}, TW2: {}}})
+_w2, _s2 = daemon.turn_widest(TW2, "executor")
+check("a pair with nothing of its own gets a number", bool(_w2), True)
+check("and it is NOT called measured", _s2, "fallback")
+check("nor is the planner of a pair that only measures its executor",
+      daemon.turn_widest(TW1, "planner")[1], "fallback")
+print("   and the moment it has its own, it stops borrowing")
+TW3, TW3C, TW3K, TW3S = _turn_run("turns-three", [5000, 6000, 7000])
+check("its own numbers, said to be its own",
+      daemon.turn_widest(TW3, "executor"), (7000, "measured"))
+check("and they are its own and not the loud neighbour's",
+      daemon.turn_widest(TW3, "executor")[0] < 400000, True)
+
+print("   THE COLD START. STATE['turns'] fills from Stop hooks, so for a")
+print("   while after every restart it is empty for every pair - and empty")
+print("   means rule 1b grants no exception at all. The pair's own answer is")
+print("   on disk the whole time: its session record carries its last turn")
+print("   costs. Without this the daemon is stricter for its first minutes")
+print("   than it is an hour later, which is a difference nobody asked for")
+_keep56 = daemon.STATE["turns"].pop(TW1K)
+# by best_session, not by a hand-built key: a session record is keyed by
+# "<role>:<sid8>" and TW1S is longer than eight characters, so the hand-built
+# one silently found nothing and the check read as "no costs on the record"
+_costs56 = (daemon.best_session(TW1, "executor") or {}).get("turn_costs") or []
+check("the session record has the pair's turns on it", bool(_costs56), True)
+check("so an empty sample is not an empty answer",
+      daemon.turn_widest(TW1, "executor"), (max(_costs56), "measured"))
+check("and it is its own record, not the neighbour's history",
+      daemon.turn_widest(TW1, "executor")[0]
+      != daemon.turn_widest(TW2, "executor")[0], True)
+daemon.STATE["turns"][TW1K] = _keep56
+check("the recorded sample wins the moment there is one",
+      daemon.turn_widest(TW1, "executor"), (400000, "measured"))
+
+print("   in the inventory, on the day it was written - a container that is")
+print("   not in STATE_PATHS is invisible to a project move AND to")
+print("   /forget-project (cases 49 and 50)")
+check("the inventory names it, as a pair key",
+      daemon.STATE_PATHS.get("turns"), "pair")
+_fc56, _fr56 = post_rc("/forget-project", {"path": TW3})
+check("forgetting it is accepted - ok, not merely a 200: the refusal "
+      "for a live pair answers 200 as well",
+      (_fc56, _fr56.get("ok")), (200, True))
+check("and its turns went with it",
+      (daemon.STATE.get("turns") or {}).get(TW3K), None)
+check("while the other pair's are untouched",
+      bool((daemon.STATE.get("turns") or {}).get(TW1K)), True)
+
+print("   consumer 1 of 4 - compaction_point's sample filter. The claim is")
+print("   'these two cannot be overshoots of the same threshold', and it is")
+print("   a claim about turn sizes, so it is made with the pair's own")
+# Oldest first: the anchor is the NEWEST sample (that is compaction_point's
+# whole reasoning - the newest was written under the configuration in force)
+_far = [700100, 996305]
+check("a distant sample is dropped when a turn cannot span the gap",
+      daemon.compaction_point(_far, 100000), 996305)
+check("and kept when it can", daemon.compaction_point(_far, 400000), 700100)
+check("with nothing measured the claim is not made at all",
+      daemon.compaction_point(_far, None), 700100)
+
+print("   consumers 2 and 3 - the two branches of compaction_too_big, now")
+print("   with two different numbers in them")
+with daemon._lock:
+    daemon.STATE.setdefault("compactions", {})[TW1K] = [
+        {"at": "2026-08-29 17:01", "tokens": 600000, "after": 100000,
+         "session": TW1S}]
+    daemon.save_state()
+check("with no failure it is proven + ORDINARY",
+      daemon.compaction_too_big(TW1, "executor", 1000000), 600000 + 90000)
+daemon.note_compaction_failed(TW1, "executor", 900000)
+check("and with one it is capped by failure - WIDEST",
+      daemon.compaction_too_big(TW1, "executor", 1000000),
+      min(600000 + 90000, 900000 - 400000))
+print("   the difference is the point: one number for both would have to be")
+print("   90000 in one branch and 400000 in the other on this same pair")
+check("the two figures are not the same number",
+      daemon.turn_ordinary(TW1, "executor")[0]
+      != daemon.turn_widest(TW1, "executor")[0], True)
+_why56 = daemon.compaction_too_big_why(TW1, "executor", 1000000)
+check("and the provenance travels with the answer",
+      (_why56["turn_widest_source"], _why56["turn_ordinary_source"]),
+      ("measured", "measured"))
+
+print("   consumer 4 - rule 1b's 'an overshoot is at most one turn wide'.")
+print("   With the literal, a pair whose turns are 30k was granted 200k")
+_1b = inspect.getsource(daemon.plan_for)
+check("1b asks this pair, not a constant",
+      "turn_widest(path, sess.get(" in _1b, True)
+check("and grants no exception when nothing has been measured",
+      "bool(_wide) and compact < wall" in _1b, True)
+check("the literal is gone from the code",
+      hasattr(daemon, "LARGEST_TURN_SEEN"), False)
+
+
+print("\n57. the journal writes the diagnosis, not only the conclusion")
+print("    2026-08-30 18:27:43. The line a person reads said")
+print("    `invalid_request` - a category - while `prompt is too long:")
+print("    1000815 tokens > 1000000 maximum` sat in the SAME payload under")
+print("    error_details, which ERROR_KEYS does not list. §5.37 already")
+print("    carries the rule 'never let an edge path record only its")
+print("    conclusion'; the journal was on the wrong side of it, and an")
+print("    afternoon went on proving from a JSON file what one line could")
+print("    have said")
+JRN, JRNC, JRNK, JRNS = _turn_run("journal-diag", [1000])
+_before57 = len(store.recent_events(200, project=JRNC))
+post("/event", {
+    "hook_event_name": "StopFailure", "cwd": JRN, "role": "executor",
+    "session_id": JRNS, "error": "invalid_request",
+    "error_details": ('400 {"type":"error","error":{"type":'
+                      '"invalid_request_error","message":"prompt is too '
+                      'long: 1000815 tokens > 1000000 maximum"}}')})
+_lines57 = [e.get("text", "") for e in store.recent_events(200,
+                                                           project=JRNC)
+            if "stopped with an error" in e.get("text", "")]
+check("the death is in the journal", len(_lines57) >= 1, True)
+_l57 = _lines57[-1]
+check("and the line carries the numbers", "1000815 tokens > 1000000 maximum"
+      in _l57, True)
+check("the conclusion is still in front of it, so every existing reader",
+      _l57.split("stopped with an error: ")[1].startswith("invalid_request"),
+      True)
+print("   THE CHECK CAN FAIL: the old line was the conclusion and nothing")
+print("   else. If the diagnosis stops being appended, this goes red")
+check("the old form - conclusion alone - is no longer what is written",
+      _l57.strip().endswith("invalid_request [error]"), False)
+
+print("   and a reason that already says everything is not made to say it")
+print("   twice, so a fuller client does not get a doubled line")
+_dup57 = {"hook_event_name": "StopFailure",
+          "error": "prompt is too long: 1000815 tokens > 1000000 maximum"}
+_r57, _w57, _k57 = daemon.stopfail_reason(_dup57, JRN, "executor")
+_d57 = daemon._payload_detail(_dup57)
+check("the diagnosis is there to add", "1000815" in _d57, True)
+check("but it is already said, so the line does not say it twice",
+      _d57.lower() in _r57.lower(), True)
+print("   nor is a payload without a diagnosis given one")
+_r58, _w58, _ = daemon.stopfail_reason(
+    {"hook_event_name": "StopFailure", "error": "rate limit reached"},
+    JRN, "executor")
+check("the old shape is untouched where there is nothing to add",
+      (_r58, _w58), ("rate limit reached", "error"))
+
+print("   AND THE DIAGNOSIS DOES NOT GO IN THE STRING A DECISION READS.")
+print("   The first version of this fix appended it to `reason` - and")
+print("   `etype`, which chooses between the compaction doorway and the")
+print("   rate handling, is built from `reason`. So a rate limit whose")
+print("   detail merely mentioned a context window would have taken the")
+print("   compaction doorway. The ask was the JOURNAL LINE; widening what")
+print("   a decision reads was a side effect nobody ordered")
+print("   FAILURE WOULD LOOK LIKE: stopfail_reason returning the two")
+print("   joined, so `rate` stops being the first word etype sees")
+_mix57 = {"hook_event_name": "StopFailure", "error": "rate limit reached",
+          "error_details": ('500 {"error":{"message":"the context window '
+                            'service is unavailable"}}')}
+_rm57, _wm57, _ = daemon.stopfail_reason(_mix57, JRN, "executor")
+check("the conclusion comes back alone, which is what etype is built from",
+      (_rm57, _wm57), ("rate limit reached", "error"))
+_et57 = (_mix57.get("error_type") or _rm57 or "").lower()
+check("so the rate handling is still what this routes to",
+      ("invalid" in _et57 or "context" in _et57, "rate" in _et57),
+      (False, True))
+check("and the diagnosis was there all along, for the line",
+      "context window" in daemon._payload_detail(_mix57), True)
+# the CALL, with its bracket: the function names itself in a comment there,
+# saying where the diagnosis is added instead, and a comment is not a call
+check("structurally: stopfail_reason does not call it",
+      "_payload_detail(" in inspect.getsource(daemon.stopfail_reason), False)
+check("while the journal line does",
+      "_payload_detail(event)" in inspect.getsource(daemon.handle_event), True)
+check("and etype really is built from what it returns",
+      'or reason or ""' in inspect.getsource(daemon.handle_event), True)
+
+
+print("\n58. a commit that does not happen SAYS SO")
+print("    Measured 2026-08-31: 56 commits in this repository and not one")
+print("    from the loop; both pre-relayout reflogs in the 2026-08-19 backup")
+print("    hold a single entry, `bridge: baseline`. Two days of work sat in")
+print("    a working tree and nothing had said it was unsaved. The cause was")
+print("    the second gate of git_commit_iteration - `git rev-parse")
+print("    --git-dir` with cwd set to the PROJECT path, where the repository")
+print("    is a folder BELOW it: rc=128, returned quietly. A witness nobody")
+print("    asks (rule 30), turned on the thing keeping the record")
+
+
+def _git_lines(pathc):
+    return [e.get("text", "") for e in store.recent_events(300, project=pathc)
+            if e.get("kind") == "git" and "NOT COMMITTING" in e.get("text", "")]
+
+
+def _verdict_turn(proj, tag, feedback="Checked: seen.txt\nfine"):
+    """One real iteration: a blocking Stop hook, then a real verdict."""
+    with open(os.path.join(proj, "seen.txt"), "w", encoding="utf-8") as fh:
+        fh.write("read by the planner" + chr(10))
+    out = {}
+
+    def _turn():
+        out["r"] = stop_hook(proj, "executor", tag + "-ex", tag + " did work")
+
+    # The loop has to be ON, or the Stop hook writes no report and there is
+    # no verdict to reach the commit with. Started here rather than once at
+    # the top, because a `stop` verdict elsewhere in the suite would switch
+    # it back off between the gates below.
+    post("/loop", {"action": "start", "project": proj})
+    t = threading.Thread(target=_turn)
+    t.start()
+    check("the pair really is waiting for a verdict",
+          until(lambda: canon(proj) in daemon.PENDING), True)
+    post("/verdict", {"project": proj, "verdict": "continue",
+                      "feedback": feedback}, secret=True)
+    t.join(40)
+    return out.get("r")
+
+
+print("   gate 1: a project that is NOT a repository. Real Stop hook, real")
+print("   verdict, the order the daemon actually runs them in")
+print("   FAILURE WOULD LOOK LIKE: no line at all - today's behaviour, and")
+print("   exactly what let two days go unsaved")
+G1 = os.path.join(TMP, "git-none")
+os.makedirs(G1, exist_ok=True)
+G1C = canon(G1)
+post("/config", {"projects": {A: {}, B: {}, C: {}, G1: {}}})
+register(G1, "planner", "g1-pl")
+post_rc("/event", {"hook_event_name": "SessionStart", "role": "executor",
+                   "session_id": "g1-ex", "project_dir": G1, "cwd": G1})
+check("the setting is on for it - the default", store.project_config(
+      daemon.CFG, G1).get("commit_each_iteration"), True)
+check("and git agrees the folder is not a repository",
+      daemon._git(["rev-parse", "--git-dir"], G1, timeout=8)[0] != 0, True)
+_verdict_turn(G1, "g1")
+_l58 = _git_lines(G1C)
+check("the refusal to commit is in the journal", len(_l58), 1)
+# Indexed only after the guard: on the old behaviour _l58 is empty, and a
+# suite that raises there reports a traceback instead of a FAIL line (5.9).
+check("and it names the reason a person can act on",
+      "not a git repository" in (_l58[0] if _l58 else ""), True)
+check("at warn, not buried in the log level",
+      [e.get("level") for e in store.recent_events(300, project=G1C)
+       if e.get("kind") == "git"][:1], ["warn"])
+
+print("   gate 2: ONCE per project, not once per verdict. The reason does")
+print("   not change between iterations, and a line each time is a log")
+print("   where a report was wanted")
+_verdict_turn(G1, "g1b")
+check("a second iteration adds nothing", len(_git_lines(G1C)), 1)
+check("and the latch is keyed by project", bool(
+      (daemon.STATE.get("git_told") or {}).get(G1C)), True)
+
+print("   gate 3: a REAL repository with nothing to commit stays silent.")
+print("   A verdict on a report that changed no file is the ordinary case")
+print("   FAILURE WOULD LOOK LIKE: that ordinary case reported as a failure")
+print("   - the new line becoming the noise it exists to prevent")
+G2 = os.path.join(TMP, "git-real")
+os.makedirs(G2, exist_ok=True)
+G2C = canon(G2)
+daemon._git(["init"], G2, timeout=20)
+# No at-sign: check_public refuses ANY address in a shipped file, and
+# it is right not to keep a list of the fake-looking ones. git does
+# not validate the format, so an identity without one commits fine.
+daemon._git(["config", "user.email", "suite"], G2)
+daemon._git(["config", "user.name", "suite"], G2)
+# WITHOUT THIS THE SILENT CASE CANNOT BE REACHED: the bridge writes
+# bridge-logs/ into the project at every iteration, so a watched folder is
+# never clean and every verdict always has something to commit. Ignoring it
+# is what makes "the executor changed nothing" a real state here.
+with open(os.path.join(G2, ".gitignore"), "w", encoding="utf-8") as _fh:
+    _fh.write("bridge-logs/" + chr(10))
+with open(os.path.join(G2, "first.txt"), "w", encoding="utf-8") as _fh:
+    _fh.write("baseline" + chr(10))
+daemon._git(["add", "-A"], G2)
+daemon._git(["commit", "-m", "baseline"], G2)
+_base58 = daemon._git(["rev-list", "--count", "HEAD"], G2)[1]
+check("the fixture really is a repository with one commit", _base58, "1")
+post("/config", {"projects": {A: {}, B: {}, C: {}, G1: {}, G2: {}}})
+register(G2, "planner", "g2-pl")
+post_rc("/event", {"hook_event_name": "SessionStart", "role": "executor",
+                   "session_id": "g2-ex", "project_dir": G2, "cwd": G2})
+# seen.txt is written by _verdict_turn, so the tree is NOT clean; commit it
+# first, then take the silent-case reading on a genuinely clean tree.
+_verdict_turn(G2, "g2a")
+check("that iteration was committed", daemon._git(
+      ["log", "-1", "--format=%s"], G2)[1].startswith("bridge: iteration"),
+      True)
+_before58 = daemon._git(["rev-list", "--count", "HEAD"], G2)[1]
+_verdict_turn(G2, "g2b")
+check("a verdict with nothing to commit says nothing", _git_lines(G2C), [])
+check("and writes no empty commit", daemon._git(
+      ["rev-list", "--count", "HEAD"], G2)[1], _before58)
+
+print("   gate 4: and when there IS something, it really commits. Without")
+print("   this the whole case could pass on a function that only ever")
+print("   complains")
+with open(os.path.join(G2, "work.txt"), "w", encoding="utf-8") as _fh:
+    _fh.write("the executor changed a file" + chr(10))
+_verdict_turn(G2, "g2c")
+check("a new commit exists", int(daemon._git(
+      ["rev-list", "--count", "HEAD"], G2)[1]) > int(_before58), True)
+check("with the loop's own message", "bridge: iteration" in daemon._git(
+      ["log", "-1", "--format=%s"], G2)[1], True)
+check("and the file it was about is in it", "work.txt" in daemon._git(
+      ["show", "--name-only", "--format=", "HEAD"], G2)[1], True)
+check("still nothing in the journal about this project", _git_lines(G2C), [])
+
+print("   in the inventory, on the day it was written (cases 49 and 50)")
+check("the inventory names the latch", daemon.STATE_PATHS.get("git_told"),
+      "path")
+print("   and a live pair is refused by name first - the answer is 200 with")
+print("   ok:false in it, so a case that checks only the status code cannot")
+print("   fail. That was this check, until it was")
+_fc58, _fr58 = post_rc("/forget-project", {"path": G1})
+check("a live pair is refused, and says why",
+      (_fc58, _fr58.get("ok"), bool(_fr58.get("live"))), (200, False, True))
+check("and nothing was taken while it was refused",
+      (daemon.STATE.get("git_told") or {}).get(G1C), "not-a-repo")
+for _r58 in ("executor", "planner"):
+    post_rc("/event", {"hook_event_name": "SessionEnd", "role": _r58,
+                       "session_id": "g1-%s" % _r58[:2],
+                       "project_dir": G1, "cwd": G1})
+_fc58, _fr58 = post_rc("/forget-project", {"path": G1})
+check("with the windows gone it is accepted", (_fc58, _fr58.get("ok")),
+      (200, True))
+check("and the latch went with it",
+      (daemon.STATE.get("git_told") or {}).get(G1C), None)
+check("named in what the removal reports it took",
+      "git_told" in json.dumps(_fr58), True)
+
+
+print("\n59. where the repository is, is DECLARED - and only inside the project")
+print("    Case 58 showed the bridge saying it cannot commit. This is the")
+print("    other half: the project names the folder, in projects[path]")
+print("    ['repo'], relative to itself. Searching for a .git up or down the")
+print("    tree was refused - that is the bridge choosing a repository")
+print("    nobody named, and `git add -A` in somebody else's folder is not a")
+print("    mistake anyone notices the same day. Same shape as checks, modes")
+print("    and moved_from: stated, never inferred")
+
+R = os.path.join(TMP, "declared")
+RSUB = os.path.join(R, "sub")
+os.makedirs(RSUB, exist_ok=True)
+RC_ = canon(R)
+daemon._git(["init"], RSUB, timeout=20)
+daemon._git(["config", "user.email", "suite"], RSUB)
+daemon._git(["config", "user.name", "suite"], RSUB)
+with open(os.path.join(RSUB, ".gitignore"), "w", encoding="utf-8") as _fh:
+    _fh.write("bridge-logs/" + chr(10))
+with open(os.path.join(RSUB, "a.txt"), "w", encoding="utf-8") as _fh:
+    _fh.write("baseline" + chr(10))
+daemon._git(["add", "-A"], RSUB)
+daemon._git(["commit", "-m", "baseline"], RSUB)
+
+
+def _repo_set(val):
+    """Declare it through the real endpoint the panel writes settings with."""
+    post("/config", {"projects": {A: {}, B: {}, C: {},
+                                 R: ({"repo": val} if val is not None else {})}})
+
+
+def _commits():
+    return daemon._git(["rev-list", "--count", "HEAD"], RSUB)[1]
+
+
+def _git_lines59():
+    return [e.get("text", "") for e in store.recent_events(300, project=RC_)
+            if e.get("kind") == "git" and "NOT COMMITTING" in e.get("text", "")]
+
+
+_repo_set(None)
+register(R, "planner", "r-pl")
+post_rc("/event", {"hook_event_name": "SessionStart", "role": "executor",
+                   "session_id": "r-ex", "project_dir": R, "cwd": R})
+_n59 = _commits()
+check("the repository really is the subfolder, with one commit", _n59, "1")
+
+print("   with NO field: today's behaviour exactly - it does not commit and")
+print("   it says why. Nothing is guessed, the subfolder is not found")
+print("   FAILURE WOULD LOOK LIKE: a commit appearing in sub/ anyway, which")
+print("   is the bridge having gone looking")
+_verdict_turn(R, "r-none")
+check("no commit was made", _commits(), _n59)
+check("and the silence is broken, once", len(_git_lines59()), 1)
+check("naming the setting rather than leaving a person guessing",
+      any('"repo"' in l for l in _git_lines59()), True)
+
+print("   DECLARED: the same project, the same folder, one setting")
+print("   FAILURE WOULD LOOK LIKE: no new commit - the declaration read but")
+print("   not used - or a commit in the project root instead of sub/")
+_repo_set("sub")
+check("the declaration is what repo_dir returns",
+      daemon.repo_dir(R), (os.path.normpath(RSUB), None))
+with open(os.path.join(R, "in-root.txt"), "w", encoding="utf-8") as _fh:
+    _fh.write("this file is NOT in the repository" + chr(10))
+with open(os.path.join(RSUB, "work.txt"), "w", encoding="utf-8") as _fh:
+    _fh.write("this file is" + chr(10))
+_verdict_turn(R, "r-good")
+check("now it commits", int(_commits()) > int(_n59), True)
+check("with the loop's own message", "bridge: iteration" in daemon._git(
+      ["log", "-1", "--format=%s"], RSUB)[1], True)
+check("the file inside the repository is in it", "work.txt" in daemon._git(
+      ["show", "--name-only", "--format=", "HEAD"], RSUB)[1], True)
+check("and the one outside it is not - the commit happened in sub/, not R",
+      "in-root.txt" in daemon._git(
+          ["show", "--name-only", "--format=", "HEAD"], RSUB)[1], False)
+check("a working commit clears the latch", bool(
+      (daemon.STATE.get("git_told") or {}).get(RC_)), False)
+
+print("   A DECLARATION THAT POINTS NOWHERE IS A REFUSAL WITH A SENTENCE -")
+print("   not silence, and not an exception either")
+print("   FAILURE WOULD LOOK LIKE: nothing in the journal, or a traceback")
+print("   swallowed by the except that used to be a bare pass")
+_repo_set("no-such-folder")
+_n59b = _commits()
+_verdict_turn(R, "r-missing")
+check("it refuses", _commits(), _n59b)
+_l59 = _git_lines59()
+check("and says so", len(_l59), 2)
+# Searched, not indexed: recent_events hands back the newest FIRST, so
+# [-1] is the OLDEST line and this check was reading the wrong one.
+check("naming what was declared and where it looked",
+      any("no-such-folder" in l and "does not exist" in l for l in _l59),
+      True)
+
+print("   AND THE DECLARATION IS BOUNDED. `..` would put `git add -A` in the")
+print("   folder ABOVE the project - which for this bridge is the owner's own")
+print("   folder of unrelated work, the one CLAUDE.md says nothing may ever")
+print("   be written to")
+print("   FAILURE WOULD LOOK LIKE: repo_dir returning the parent - a field")
+print("   that hands out the filesystem instead of naming a subfolder")
+_repo_set("..")
+check("refused, and the reason is that it leaves the project",
+      (daemon.repo_dir(R)[0], "outside the project" in daemon.repo_dir(R)[1]),
+      (None, True))
+_verdict_turn(R, "r-escape")
+check("no commit", _commits(), _n59b)
+check("and a SECOND sentence, because a different mistake is a different "
+      "thing to tell somebody", len(_git_lines59()), 3)
+_repo_set(os.path.join(TMP, "somewhere-else"))
+check("naming an absolute path is refused as well",
+      (daemon.repo_dir(R)[0], "absolute" in daemon.repo_dir(R)[1]),
+      (None, True))
+print("   and nothing here ever searched: with no field it did not find sub/")
+print("   even though sub/ was there the whole time")
+
 
 check("and the shared server answered for the whole run - the day",
       get("/state").get("pairs") is not None, True)
@@ -4326,6 +5584,662 @@ print("   red here rather than hanging one by one for its own timeout")
 # thread anywhere - which is what an early shutdown() looked like for a
 # week. server_close() drops the listening socket, so the same mistake
 # reports itself as a refused connection instead.
+print("\n60. a verdict's WORDS reach the executor - for every verdict")
+print("    that carries a judgement, not only for `continue`")
+print("    The body used to be built inside the branch that catches")
+print("    'anything not stop/done/wait', and the only verdict left in it")
+print("    is `continue`. So a `done` verdict's text was built nowhere and")
+print("    sent nowhere. Measured on this project's own executor")
+print("    transcript, reports 46-70: all 8 `continue` verdicts arrived,")
+print("    all 17 `done` and `stop` ones did not - a perfect correlation")
+print("    with the verdict type and none at all with time.")
+print("    WHAT THE WITNESS IS. Not the journal: it records what the bridge")
+print("    did with the REPORT and never mentions the body, which is why")
+print("    nothing complained for weeks. The channel below is a real HTTP")
+print("    server and records what it was HANDED - one step past 'the")
+print("    daemon called deliver'. A suite cannot see inside a real")
+print("    session, and that limit is named rather than papered over: the")
+print("    live half of this is a verdict whose text shows up in an")
+print("    executor's transcript.")
+
+_vp = A
+_vkey = canon(_vp)
+
+
+def _bodies60():
+    return json.dumps(DELIVERED.get((_vkey, "executor"), []),
+                      ensure_ascii=False)
+
+
+def _verdict_reached60(marker, tries=40):
+    """Did THIS text reach the executor's channel? Waits, then answers."""
+    for _ in range(tries):
+        if marker in _bodies60():
+            return True
+        time.sleep(0.25)
+    return False
+
+
+with open(os.path.join(_vp, "seen.txt"), "w", encoding="utf-8") as _fh:
+    _fh.write("read by the planner" + chr(10))
+post("/loop", {"action": "start", "project": _vp, "reset": True})
+
+for _v60, _marker60, _want60, _why60 in (
+        ("continue", "WORDS-CONTINUE-60", True,
+         "the one that always worked"),
+        ("done", "WORDS-DONE-60 " + ("and here is the next piece. " * 40), True,
+         "THE DEFECT: since rule 34 this is where the next piece is written."
+         " The feedback is long on purpose - a `done` that asks for nothing"
+         " is held instead of delivered now, and that is case 61"),
+        ("stop", "WORDS-STOP-60", False,
+         "the run is over - nothing to act on, and nothing to move"),
+        ("wait", "WORDS-WAIT-60", False,
+         "nothing is being judged; the pair is parked, not working")):
+    del DELIVERED[(_vkey, "executor")][:]
+    _t60 = threading.Thread(
+        target=lambda: stop_hook(_vp, "executor", "ex-alpha",
+                                 "a piece of work, report body"),
+        daemon=True)
+    _t60.start()
+    check("a report is waiting for the %s verdict" % _v60,
+          until(lambda: daemon.PENDING.get(_vkey)), True)
+    post("/verdict", {"project": _vp, "verdict": _v60,
+                      "feedback": "Checked: seen.txt\n%s" % _marker60},
+         secret=True)
+    _t60.join(30)
+    _got60 = _verdict_reached60(_marker60, 40 if _want60 else 12)
+    check("%s: the words %s reach the executor - %s"
+          % (_v60, "DO" if _want60 else "do NOT", _why60),
+          _got60, _want60)
+    if _v60 in ("done", "stop"):
+        post("/loop", {"action": "start", "project": _vp, "reset": False})
+
+print("   and a task held from mid-turn rides in the SAME message, so a")
+print("   `done` costs one wake and not two racing 1.5 s timers")
+del DELIVERED[(_vkey, "executor")][:]
+daemon.note_task_sent(_vp, "HELD-WORK-60", mid_turn=True)
+_t60 = threading.Thread(
+    target=lambda: stop_hook(_vp, "executor", "ex-alpha", "another piece"),
+    daemon=True)
+_t60.start()
+check("the report is waiting", until(lambda: daemon.PENDING.get(_vkey)), True)
+post("/verdict", {"project": _vp, "verdict": "done",
+                  "feedback": "Checked: seen.txt\nWORDS-BOTH-60"},
+     secret=True)
+_t60.join(30)
+check("the held work came back", _verdict_reached60("HELD-WORK-60"), True)
+check("and the verdict's words came with it",
+      "WORDS-BOTH-60" in _bodies60(), True)
+_msgs60 = [d for d in DELIVERED.get((_vkey, "executor"), [])
+           if "WORDS-BOTH-60" in json.dumps(d, ensure_ascii=False)
+           or "HELD-WORK-60" in json.dumps(d, ensure_ascii=False)]
+check("in ONE message, not two", len(_msgs60), 1)
+post("/loop", {"action": "start", "project": _vp, "reset": False})
+
+print("   and the loop-start notice is narrowed the same way: the planner")
+print("   learns nothing from being told what it just pressed itself")
+_pk60 = (_vkey, "planner")
+post("/loop", {"action": "stop", "project": _vp})
+del DELIVERED[_pk60][:]
+post("/loop", {"action": "start", "project": _vp, "by": "planner"})
+time.sleep(0.5)
+check("its own start says nothing to it",
+      [d for d in DELIVERED[_pk60] if "The loop is on" in json.dumps(d)], [])
+print("   but a start it did NOT make is the only way it learns reports")
+print("   are coming, so no mark means TELL - the refusal opens outward")
+post("/loop", {"action": "stop", "project": _vp})
+del DELIVERED[_pk60][:]
+post("/loop", {"action": "start", "project": _vp})
+check("a start with no mark is told",
+      until(lambda: [d for d in DELIVERED[_pk60]
+                     if "The loop is on" in json.dumps(d)]) and True, True)
+post("/loop", {"action": "stop", "project": _vp})
+del DELIVERED[_pk60][:]
+post("/loop", {"action": "start", "project": _vp, "by": "panel"})
+check("and so is one from the panel",
+      until(lambda: [d for d in DELIVERED[_pk60]
+                     if "The loop is on" in json.dumps(d)]) and True, True)
+
+print("\n61. a `done` that asks for nothing is HELD, not spent on a wake")
+print("    - and held is not dropped, which is the whole difficulty")
+print("    Rule 34 on this project's numbers: an acknowledgement wakes the")
+print("    executor, the executor ends a turn, every turn end fires the")
+print("    Stop hook, every Stop hook is a report, and the report wakes the")
+print("    planner. A ROUND TRIP for the word 'accepted'. Of 433 `done`")
+print("    verdicts read from the planners' own transcripts, 239 (55%) have")
+print("    under 1000 characters of prose once the gate's own Checked block")
+print("    is taken out by prose_of, and 382 of 433 are too long for the")
+print("    idle damper to call the exchange trivial - nothing else caught")
+print("    them.")
+print("    WHY THE CASE IS SHAPED THIS WAY. The defect this pair spent four")
+print("    turns finding was content that went nowhere while every record")
+print("    said it had. So it is not enough to check that nothing was sent:")
+print("    every branch below also checks WHERE THE WORDS WENT INSTEAD, and")
+print("    the two release paths - riding with a wake, and going alone at")
+print("    the limit - are exercised separately, because a hold with only")
+print("    the first is a drop that waits.")
+
+_hp = A
+_hk = canon(_hp)
+
+
+def _held61():
+    return daemon.held_record(_hk)
+
+
+def _seen61():
+    return json.dumps(DELIVERED.get((_hk, "executor"), []), ensure_ascii=False)
+
+
+def _wait61(marker, want, tries=32):
+    """Positive: answer the moment it arrives. Negative: WAIT THE WHOLE TIME.
+
+    Written first as `if (marker in seen) == want`, which for a negative
+    returns on the very first look - before the 1.5 s delivery timer has
+    even fired - so it answered "it did not arrive" without waiting for
+    anything and could not fail. Caught by sabotage: with the hold ripped
+    out, "NOTHING reached the executor" stayed green while nine other
+    checks went red. A check that cannot show the difference is not a gate
+    (rule 19), and a negative one has to outlive what it is denying.
+    """
+    for _ in range(tries):
+        if want and marker in _seen61():
+            return True
+        time.sleep(0.25)
+    return marker in _seen61()
+
+
+def _done61(feedback):
+    """One full turn answered with `done`, the real way round."""
+    t = threading.Thread(
+        target=lambda: stop_hook(_hp, "executor", "ex-alpha", "a piece"),
+        daemon=True)
+    t.start()
+    if not until(lambda: daemon.PENDING.get(_hk)):
+        return False
+    post("/verdict", {"project": _hp, "verdict": "done",
+                      "feedback": feedback}, secret=True)
+    t.join(30)
+    post("/loop", {"action": "start", "project": _hp, "reset": False})
+    return True
+
+
+daemon.STATE.pop("held_verdict", None)
+post("/loop", {"action": "start", "project": _hp, "reset": True})
+
+print("   (a) it is held, and nothing is sent")
+del DELIVERED[(_hk, "executor")][:]
+check("a report was answered", _done61("Checked: seen.txt\nACK-61"), True)
+check("NOTHING reached the executor - no wake was spent",
+      _wait61("ACK-61", False, 24), False)
+check("and the words are being held, not dropped",
+      "ACK-61" in json.dumps(_held61(), ensure_ascii=False), True)
+check("the held text says it is late, in its own first line",
+      daemon.HELD_VERDICT_HEAD in (_held61().get("body") or ""), True)
+check("held, counted", int(_held61().get("n") or 0), 1)
+# Visible, not merely recorded. "Held" is only different from "dropped" if
+# somebody can see it without reading the journal, so the number the panel
+# draws from is checked here rather than assumed.
+check("and the panel's own row carries it",
+      int((daemon.pairs_view().get(_hk) or {}).get("held_chars") or 0) > 0,
+      True)
+
+print("   (b) it rides with the next thing the executor is woken for,")
+print("       in ONE message - the ride is free, a second message is not")
+del DELIVERED[(_hk, "executor")][:]
+daemon.deliver(_hp, "executor", "NEW-WORK-61", {"kind": "task"})
+check("the task arrived", _wait61("NEW-WORK-61", True), True)
+check("and the held words came with it", "ACK-61" in _seen61(), True)
+_msgs61 = [d for d in DELIVERED.get((_hk, "executor"), [])
+           if "ACK-61" in json.dumps(d, ensure_ascii=False)
+           or "NEW-WORK-61" in json.dumps(d, ensure_ascii=False)]
+check("in ONE message, not two", len(_msgs61), 1)
+check("the hold is empty now", (_held61().get("body") or ""), "")
+check("and the ride is counted", int(_held61().get("ridden") or 0), 1)
+
+print("   (c) a `continue` is NEVER held. The executor is blocked on it and")
+print("       waiting for those words by name; holding one would stop the")
+print("       work to save a wake, which is the trade rule 34 refuses")
+del DELIVERED[(_hk, "executor")][:]
+_t61 = threading.Thread(
+    target=lambda: stop_hook(_hp, "executor", "ex-alpha", "a piece"),
+    daemon=True)
+_t61.start()
+check("a report is waiting", until(lambda: daemon.PENDING.get(_hk)), True)
+post("/verdict", {"project": _hp, "verdict": "continue",
+                  "feedback": "Checked: seen.txt\nGO-ON-61"}, secret=True)
+_t61.join(30)
+check("a short `continue` is delivered at once", _wait61("GO-ON-61", True), True)
+check("and nothing of it is held", (_held61().get("body") or ""), "")
+
+print("   (d) a `done` that DOES carry work is delivered at once. The test")
+print("       is the prose, not the whole body: the Checked block is the")
+print("       planner's evidence, eats a median 192 characters, and moves")
+print("       57% of `done` over the line where 45% belong - which is why")
+print("       carries_work measures prose_of() and not len()")
+del DELIVERED[(_hk, "executor")][:]
+check("a report was answered",
+      _done61("Checked: seen.txt\nWORK-61 " + ("do the next thing. " * 70)),
+      True)
+check("a `done` carrying work goes straight through",
+      _wait61("WORK-61", True), True)
+check("and nothing of it is held", (_held61().get("body") or ""), "")
+
+print("   (e) THE LIMIT. Nothing was sent to the executor, so the words go")
+print("       on their own. Held with no limit is dropped with extra steps.")
+print("       3600 s: over 332 work-free done/stop verdicts, timed against")
+print("       the EXECUTOR'S OWN Stop hook, 298 (89.8%) were woken inside")
+print("       it and 34 were not - p50 392 s, p75 1160 s, p90 3629 s. And")
+print("       3600 is already this file's INFLIGHT_MAX_SEC: one idea of")
+print("       'too long to still be real', not two, and closer to the p90")
+print("       than any four-digit number deserves to be trusted to.")
+del DELIVERED[(_hk, "executor")][:]
+check("a report was answered", _done61("Checked: seen.txt\nLATE-61"), True)
+check("held again", "LATE-61" in json.dumps(_held61(), ensure_ascii=False),
+      True)
+check("nothing has been sent", _wait61("LATE-61", False, 24), False)
+# Guarded, and the guard is the point. In a flat script an unguarded
+# `STATE["held_verdict"][_hk]` three lines after a check that just said
+# "nothing is held" raises, and the raise takes every block below it with
+# it - silently, with no FAIL summary. Measured on a copy with the hold
+# removed: the case said FAIL, then died on the KeyError and (f) never
+# ran. One FAIL is recorded for the whole block instead.
+_rec61 = (daemon.STATE.get("held_verdict") or {}).get(_hk)
+if _rec61:
+    _rec61["since"] = time.time() - daemon.HELD_VERDICT_MAX_SEC - 1
+    daemon.release_stale_verdicts()
+else:
+    check("there is something held for the limit to release", False, True)
+check("past the limit it goes on its own", _wait61("LATE-61", True), True)
+check("the hold is empty", (_held61().get("body") or ""), "")
+check("and it is counted as having travelled alone",
+      int(_held61().get("alone") or 0), 1)
+
+print("   (f) a delivery that FAILS puts the words back. A ride that fell")
+print("       through must not be the way content disappears.")
+del DELIVERED[(_hk, "executor")][:]
+check("a report was answered", _done61("Checked: seen.txt\nKEEP-61"), True)
+check("held", "KEEP-61" in json.dumps(_held61(), ensure_ascii=False), True)
+_open61 = daemon.urllib.request.urlopen
+
+
+def _fail61(*a, **k):
+    raise IOError("the channel took the connection and dropped it")
+
+
+daemon.urllib.request.urlopen = _fail61
+try:
+    daemon.deliver(_hp, "executor", "LOST-61", {"kind": "task"})
+finally:
+    daemon.urllib.request.urlopen = _open61
+check("the delivery failed", "LOST-61" in _seen61(), False)
+check("and the held words are still held, not gone with it",
+      "KEEP-61" in json.dumps(_held61(), ensure_ascii=False), True)
+del DELIVERED[(_hk, "executor")][:]
+daemon.deliver(_hp, "executor", "AFTER-61", {"kind": "task"})
+check("they ride the next one instead", _wait61("KEEP-61", True), True)
+
+print("   (g) and the same predicate decides the NUDGE. A verdict that")
+print("       carried the work needs no task asked for - the work is in it.")
+print("       Measured on 371 firings of the 60 s form: 130 (35%) go. The")
+print("       case the branch lives for keeps its own - of 195 acceptances")
+print("       with no task after them, 82 carried the work themselves and")
+print("       113 carried nothing, and all 113 still fire.")
+print("       The old witness, last_task, was measured on a world where a")
+print("       `done` delivered no words at all, so work in a verdict could")
+print("       not physically arrive. Rule 33: that world ended the same")
+print("       afternoon, and the measurement under it expired with it.")
+
+_pk61 = (_hk, "planner")
+_NUDGE_WORDS = "waiting for its next piece of work"
+
+
+def _nudged61(want, tries=24):
+    """Positive: answer as soon as it lands. Negative: OUTLIVE THE TIMER.
+
+    24 x 0.25 s is twelve times the delay the branch is set to below, and
+    that delay is not assumed - the positive check runs first and proves
+    the nudge does fire at it. A negative that answers before the timer it
+    denies is the defect sabotage found in this very case.
+    """
+    for _ in range(tries):
+        if want and _NUDGE_WORDS in json.dumps(DELIVERED.get(_pk61, []),
+                                               ensure_ascii=False):
+            return True
+        time.sleep(0.25)
+    return _NUDGE_WORDS in json.dumps(DELIVERED.get(_pk61, []),
+                                      ensure_ascii=False)
+
+
+_nudge_was = daemon.NUDGE_AFTER_VERDICT_SEC
+daemon.NUDGE_AFTER_VERDICT_SEC = 0.5
+try:
+    del DELIVERED[_pk61][:]
+    check("a report was answered", _done61("Checked: seen.txt\nQUIET-61"),
+          True)
+    check("a `done` with nothing in it DOES ask for the next piece - this "
+          "is what the branch is for", _nudged61(True), True)
+    del DELIVERED[_pk61][:]
+    check("a report was answered",
+          _done61("Checked: seen.txt\nWORKY-61 " + ("the next piece. " * 80)),
+          True)
+    check("a `done` that carried the work is not asked for it",
+          _nudged61(False), False)
+finally:
+    daemon.NUDGE_AFTER_VERDICT_SEC = _nudge_was
+
+daemon.STATE.pop("held_verdict", None)
+post("/loop", {"action": "start", "project": _hp, "reset": False})
+
+print("\n62. a long turn is not a deadlock - and a deadlock still is one")
+print("    THE WITNESS THAT LIED. last_movement() counts a finished Stop")
+print("    and a task going out, and deliberately nothing else - right")
+print("    about status lines and heartbeats, wrong about a turn. The")
+print("    executor is writing and will not fire Stop until it finishes,")
+print("    so last_movement reports the START of the turn and every turn")
+print("    longer than clinch_grace reads as a deadlock. Measured on this")
+print("    project 2026-08-31: three announcements for one pair, and at")
+print("    each one the executor's transcript held a living entry 0s, 5s")
+print("    and 51s earlier - all inside stall_grace.")
+print("    BOTH SIDES ARE CHECKED, because a tier that stops lying by")
+print("    also stopping catching is worse than the one it replaced. And")
+print("    the witness fails CLOSED - no transcript is not evidence of")
+print("    work - which is why it is not executor_is_working(), whose")
+print("    fail-open is right where IT is used and wrong here.")
+print("    IN THE REAL ORDER (5.33): project A has been driven through the")
+print("    real endpoints for sixty blocks; one more real turn and a real")
+print("    verdict go through them here, then the real deciding tick. No")
+print("    hand-built snapshot of STATE - that shape was accepted twice")
+print("    and came back live both times.")
+
+_cp = A
+_ck = canon(_cp)
+_grace_was = dict(daemon.CFG.get("thresholds") or {})
+
+# Both halves announce themselves the way hook.py does, because the ladder
+# asks how long the executor has been silent and that is read from the
+# session record's seen_at - no record, no answer, and assess() stands down
+# above the branch this case is about.
+# A status line as well as a SessionStart: best_session takes only records
+# that carry telemetry, so a session the status line has never described is
+# invisible to the ladder however many hooks it has fired.
+for _r62, _s62 in (("executor", "ex-alpha"), ("planner", "pl-alpha")):
+    post_rc("/event", {"hook_event_name": "SessionStart", "role": _r62,
+                       "session_id": _s62, "project_dir": _cp, "cwd": _cp})
+    post_rc("/status", {"role": _r62, "payload": {
+        "session_id": _s62,
+        "workspace": {"current_dir": _cp, "project_dir": _cp},
+        "model": {"display_name": "Opus 5", "id": "claude-opus-5"},
+        "context_window": {"context_window_size": 1000000,
+                           "used_percentage": 12.0,
+                           "current_usage": {
+                               "input_tokens": 10,
+                               "cache_creation_input_tokens": 90,
+                               "cache_read_input_tokens": 120_000,
+                               "output_tokens": 400}}}})
+
+# One more real turn, through the endpoints: the Stop hook writes
+# stop_seen, and a `done` carrying work leaves no verdict in flight.
+post("/loop", {"action": "start", "project": _cp, "reset": False})
+_t62 = threading.Thread(
+    target=lambda: stop_hook(_cp, "executor", "ex-alpha", "a piece of work"),
+    daemon=True)
+_t62.start()
+check("a report is waiting", until(lambda: daemon.PENDING.get(_ck)), True)
+post("/verdict", {"project": _cp, "verdict": "done",
+                  "feedback": "Checked: seen.txt\nCLINCH-62 "
+                              + ("carry on with the next thing. " * 50)},
+     secret=True)
+_t62.join(30)
+post("/loop", {"action": "start", "project": _cp, "reset": False})
+
+# The only things moved are two clocks, and both go through /config - the
+# events themselves all really happened, which is the part 5.33 is about.
+# `silence_minutes` matters as much as the grace: assess() stands down on
+# "the executor answered recently" long before it reaches clinch(), and a
+# case that never reaches the branch it is about proves nothing.
+_projs62 = json.loads(json.dumps(daemon.CFG.get("projects") or {}))
+_pk62 = _cp if _cp in _projs62 else _ck
+_projs62.setdefault(_pk62, {})["silence_minutes"] = 0.03      # 1.8 s
+post("/config", {"projects": _projs62,
+                 "thresholds": dict(_grace_was, clinch_grace=1)})
+time.sleep(2.4)
+
+
+def _saw62(res):
+    return "waiting on each other" in json.dumps(res or {}, ensure_ascii=False)
+
+
+# Proof the case can REACH the branch it is about: assess() stands down
+# above clinch() on both of these, and a case that never gets there is
+# green for the wrong reason.
+_sit62 = daemon.situation(_cp)
+note("silence the ladder wants (s)",
+     float(store.project_config(daemon.CFG, _ck).get("silence_minutes", 8)) * 60)
+note("silence the executor has (s)",
+     (_sit62["roles"]["executor"] or {}).get("silent_for"))
+note("in flight / reviewing / verdict",
+     (_sit62["inflight"], _sit62["reviewing"], _sit62["verdict_in_flight"]))
+
+print("   side one: nothing is writing, so the pair really is stuck")
+_res62a = daemon.assess(_cp)
+note("what assess saw with no transcript", _res62a)
+check("tier 1 still names a genuine clinch", _saw62(_res62a), True)
+
+print("   side two: the same pair, the same instant, except that the")
+print("   executor's transcript is being written")
+_tdir62 = os.path.join(TMP, "clinch-transcripts")
+os.makedirs(_tdir62, exist_ok=True)
+_tp62 = os.path.join(_tdir62, "ex-alpha.jsonl")
+_real62 = sessions.transcript_of
+sessions.transcript_of = (lambda sid, path=None:
+                          _tp62 if sid == "ex-alpha" else _real62(sid, path))
+try:
+    with open(_tp62, "w", encoding="utf-8") as _fh:
+        _fh.write(json.dumps({
+            "type": "assistant",
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S",
+                                       time.gmtime(time.time() - 5))
+                         + ".000Z",
+            "message": {"content": "still working"}}) + chr(10))
+    daemon.STATE.pop("assessed", None)
+    _res62b = daemon.assess(_cp)
+    note("what assess saw with a live transcript", _res62b)
+    check("a working executor is NOT called a deadlock", _saw62(_res62b),
+          False)
+    print("   and the witness is positive evidence, not the absence of it:")
+    print("   an entry older than stall_grace proves nothing, so the clinch")
+    print("   comes back - which is what stops this being a quieter tier")
+    with open(_tp62, "w", encoding="utf-8") as _fh:
+        _fh.write(json.dumps({
+            "type": "assistant",
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S",
+                                       time.gmtime(time.time() - 4000))
+                         + ".000Z",
+            "message": {"content": "long ago"}}) + chr(10))
+    daemon.STATE.pop("assessed", None)
+    check("an old entry is not evidence of work", _saw62(daemon.assess(_cp)),
+          True)
+    print("   and the death's own record is not evidence either - the api")
+    print("   error is exactly what a dying turn writes (5.38)")
+    with open(_tp62, "w", encoding="utf-8") as _fh:
+        _fh.write(json.dumps({
+            "type": "assistant", "isApiErrorMessage": True,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S",
+                                       time.gmtime(time.time() - 5))
+                         + ".000Z",
+            "message": {"content": "API Error"}}) + chr(10))
+    daemon.STATE.pop("assessed", None)
+    check("a dying turn's own record does not stand the watchdog down",
+          _saw62(daemon.assess(_cp)), True)
+finally:
+    sessions.transcript_of = _real62
+    _back62 = json.loads(json.dumps(daemon.CFG.get("projects") or {}))
+    (_back62.get(_pk62) or {}).pop("silence_minutes", None)
+    post("/config", {"projects": _back62, "thresholds": _grace_was})
+
+print("\n63. a dead session's channel may not vouch for its replacement")
+print("    THE SECOND CONSUMER OF A CLOSED CLASS. On 2026-08-28")
+print("    mark_registered stopped taking a channel registration as proof")
+print("    that a replacement had come up: a handover STOPS the old window,")
+print("    its channel process answers for up to 45 s, so the corpse of the")
+print("    window that failed to be replaced was clearing the streak that")
+print("    counts the failure. Only that consumer was hardened. The other")
+print("    one - already_up() -> ensure_record(), which writes the record")
+print("    the panel and the planning read - was left on the old witness")
+print("    and told the same lie three days later.")
+print("    LIVE INSTANCE, 2026-08-31, this project: handover decided")
+print("    19:43:09, window opened 19:43:12, and at 19:43:32 the journal")
+print("    says 'Noticed a live executor window (its channel is answering)")
+print("    - adding it to the panel'. That window did not reach SessionStart")
+print("    until 20:22:51 - 39 minutes - and its transcript file did not")
+print("    exist before then, which is what proves the channel was not its.")
+print("    BOTH SIDES ARE CHECKED, because a guard that stops lying by also")
+print("    refusing every honest adoption is worse than the bug.")
+
+_p63 = B
+_k63 = canon(_p63)
+
+# The pair starts with no executor record at all, and that is ASSERTED
+# rather than assumed: ensure_record() returns early when a live record
+# already exists, so without this the case would pass with the guard
+# deleted - green for the wrong reason (rule 19).
+with daemon._lock:
+    for _key in [k for k, v in (daemon.STATE.get("sessions") or {}).items()
+                 if canon(v.get("path") or "") == _k63
+                 and v.get("role") == "executor"]:
+        daemon.STATE["sessions"].pop(_key, None)
+daemon.STATE["handover"] = {}
+
+
+def _rec63():
+    """Every live executor record this pair has, by key."""
+    return sorted(k for k, v in (daemon.STATE.get("sessions") or {}).items()
+                  if canon(v.get("path") or "") == _k63
+                  and v.get("role") == "executor"
+                  and v.get("state") not in ("ended", "died"))
+
+
+check("the pair starts with no executor record to hide behind", _rec63(), [])
+
+# The corpse: a real channel server, registered through the real endpoint,
+# exactly as the OLD session's channel.py did. Nothing removes it at a
+# handover and there is no reaper (-> DECISIONS.md 5.3), so it is still
+# answering when the replacement is launched.
+register(_p63, "executor", "ex-beta-old")
+check("the old session's channel answers",
+      daemon.channel_alive(_p63, "executor") is not None, True)
+
+_before63 = len(launches())
+_r63 = post("/handover", {"project": _p63, "role": "executor",
+                          "reason": "the case that closes the second consumer"})
+check("the handover was accepted for the executor", _r63.get("roles"),
+      ["executor"])
+check("a replacement window was opened",
+      until(lambda: len(launches()) > _before63, 30), True)
+
+# THE CONTROL. The false witness has to be genuinely present, or "no record
+# was written" proves nothing: it would also be the answer if the channel
+# had quietly stopped answering and there were no lie left to tell.
+check("and the false witness IS present - already_up still says so",
+      daemon.already_up(_p63, "executor"), daemon.WITNESS_CHANNEL)
+check("while the handover is still waiting for exactly this role",
+      daemon.handover_awaits(_p63, "executor"), True)
+check("and not for the other half, which is untouched",
+      daemon.handover_awaits(_p63, "planner"), False)
+
+# The replacement never comes up: no SessionStart, no registration - which
+# is the whole incident. reconcile() is the real caller, run in the real
+# order after the real endpoint, not a hand-built snapshot (5.33).
+daemon.reconcile()
+check("NO record is written from the dead session's channel", _rec63(), [])
+check("so the panel does not show an executor that is not there",
+      [r for r in (get("/state")["state"].get("pairs") or [])
+       if canon(r.get("path") or "") == _k63
+       and r.get("role") == "executor" and r.get("live")], [])
+
+print("   side two: the same pair, the same channel, once the handover is")
+print("   no longer waiting for it - the guard must RELEASE, and it is")
+print("   expire_handover that does it, not the case reaching into STATE")
+with daemon._lock:
+    daemon.STATE["handover"][_k63]["at"] = (
+        time.time()
+        - float(daemon.CFG["thresholds"].get("handover_grace", 600)) - 5)
+daemon.reconcile()
+check("the stale handover expired", (daemon.STATE.get("handover") or
+                                     {}).get(_k63), None)
+check("and now the very same witness DOES adopt the window",
+      len(_rec63()), 1)
+check("recorded as noticed by the channel, which is what it was",
+      [(daemon.STATE["sessions"][k].get("seen_by")) for k in _rec63()],
+      [daemon.WITNESS_CHANNEL])
+
+post("/session", {"action": "stop", "project": _p63, "role": "executor"})
+daemon.STATE["handover"] = {}
+
+print("\n64. the record and the receiver must agree about the nudge")
+print("    A RECORD THAT WAS WRONG IN THE FLATTERING DIRECTION. The branch")
+print("    that stayed quiet journalled a line; the branch that woke the")
+print("    planner journalled nothing. So the record could only ever show")
+print("    this nudge quieter than it was, and nobody goes looking behind")
+print("    good news. Measured 2026-08-31: the planner RECEIVED five nudges")
+print("    after 15:10:50 - iterations 70, 71, 74, 76 and 77 - and the")
+print("    journal held not one line about any of them. The only witness")
+print("    was the receiving side, because none existed on this side.")
+print("    Report 78 read the record and wrote 'the nudge has been silent")
+print("    since 16:25' into a shift handoff, which is exactly the belief a")
+print("    handoff exists to stop carrying into tomorrow.")
+print("    So this case asserts the two sides AGREE - what the planner got,")
+print("    and what the bridge wrote down about giving it - and it is the")
+print("    RECORD half that is new. Case 61 already proved the delivery.")
+
+_k64 = _hk
+daemon.STATE.pop("nudge_tally", None)
+daemon.STATE.pop("held_verdict", None)
+post("/loop", {"action": "start", "project": _hp, "reset": False})
+
+
+def _tally64():
+    return dict((daemon.STATE.get("nudge_tally") or {}).get(_k64)
+                or {"sent": 0, "held": 0, "failed": 0, "last": ""})
+
+
+check("the tally starts at nothing, so a rise cannot be left over",
+      (_tally64().get("sent"), _tally64().get("held")), (0, 0))
+
+_nudge_was64 = daemon.NUDGE_AFTER_VERDICT_SEC
+try:
+    print("   side one: it fires - and the record has to say it fired")
+    daemon.NUDGE_AFTER_VERDICT_SEC = 0.5
+    del DELIVERED[_pk61][:]
+    check("a report was answered with nothing in it",
+          _done61("Checked: seen.txt\nRECORD-64A"), True)
+    check("the planner really was woken - the RECEIVER side, as in case 61",
+          _nudged61(True), True)
+    check("and the record agrees: one firing, not none",
+          until(lambda: _tally64().get("sent") == 1, 20), True)
+    check("written down as sent, which is what happened",
+          _tally64().get("last"), "sent")
+    check("and nothing was miscounted as held", _tally64().get("held"), 0)
+
+    print("   side two: it holds - the record must not call that a firing,")
+    print("   or the tally tomorrow's measurement reads is worthless")
+    daemon.NUDGE_AFTER_VERDICT_SEC = 4.0
+    del DELIVERED[_pk61][:]
+    check("a second report was answered",
+          _done61("Checked: seen.txt\nRECORD-64B"), True)
+    # The planner sends the work itself, INSIDE the nudge's delay - which is
+    # the only way this branch is reached, and the real order it happens in.
+    post("/task", {"project": _hp,
+                   "instructions": "the planner sent it without being asked"},
+         secret=True)
+    check("the nudge held, because the task was already on its way",
+          until(lambda: _tally64().get("held") == 1, 30), True)
+    check("the planner was NOT woken a second time", _nudged61(False), False)
+    check("and the firing count did not move", _tally64().get("sent"), 1)
+finally:
+    daemon.NUDGE_AFTER_VERDICT_SEC = _nudge_was64
+
 SRV.shutdown()
 SRV.server_close()
 

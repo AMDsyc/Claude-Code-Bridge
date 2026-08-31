@@ -262,10 +262,25 @@ def carries_work(kind, content):
     add 62 % to what the canon costs (4 705 verdicts against 7 595 tasks and
     reports), almost all of it on one-line acceptances - and a rule that
     taxes good work is a rule somebody switches off.
+
+    THE THRESHOLD IS UNCHANGED; WHAT IS MEASURED AGAINST IT IS NOT. It used
+    to be the whole body, which counts the `Checked:` / `Residence:` block
+    the gate itself demands. That block is the planner's evidence that it
+    looked - it is about the planner, not work for the executor - and it
+    runs to a MEDIAN 192 characters, measured over 433 `done` verdicts taken
+    from the planners' own transcripts and stripped by the prose_of below -
+    not by a looser rule written for the occasion, which read 491 and was
+    over-stripping. Counting the block called 245 of those 433 (57 %) work;
+    counting only prose calls 194 (45 %). So the gate was taxing the canon
+    for proof that the gate was obeyed. prose_of() is that same definition, and it is shared with the
+    hold in hold_verdict() on purpose - one idea of "this carries work",
+    not two that drift.
     """
     if kind in RULES_KINDS:
         return True
-    return kind == "verdict" and len(content or "") >= VERDICT_WORK_CHARS
+    # prose_of lives beside the gate markers it strips, further down this
+    # file; it is resolved when this runs, not when it is defined.
+    return kind == "verdict" and len(prose_of(content)) >= VERDICT_WORK_CHARS
 
 
 def with_rules(content, meta, sid=None):
@@ -364,7 +379,20 @@ STATE_PATHS = {
     "idle_spin": "path", "noart": "path", "frames": "path", "debt": "path",
     "unanswered": "path", "checks": "path", "handover_failed": "path",
     "carried_found": "path",
+    # Turn costs per pair, keyed "<path>|<role>". In the inventory the day it
+    # was written, not after a project move found it missing: a container
+    # that is not named here is invisible to move_state_keys AND to
+    # drop_project_state, and this one decides when sessions are replaced.
+    "turns": "pair",
+    # Why a commit did not happen, latched once per project (git_told).
+    "git_told": "path",
     # the twelve the two old lists missed, path half
+    # 2b: the words of a `done` that asked for nothing, waiting for a wake
+    # this pair was getting anyway. One container holds the body and all
+    # three counters, so it is one row here and cannot half-migrate.
+    "held_verdict": "path",
+    # what nudge_for_task decided, both ways - see note_nudge
+    "nudge_tally": "path",
     "assessed": "path", "last_task": "path", "quiet_pairs": "path",
     "strangers": "path", "tasks_open": "path",
     # keyed by the project AND the role
@@ -441,6 +469,141 @@ def migrate_keys():
         if moved:
             save_state()
     return moved
+
+
+# The hint lists live OUTSIDE this file, and the reason is that this one is
+# published. They are ordinary words in the owner's other language, and
+# check_public refuses those in a published file whether they are written as
+# characters or as \uXXXX escapes - correctly, because escaping is disguising
+# and not removing. So the words sit in a file that is packaged and never
+# published, the home QUIET.md and HONESTY_CASES.md already have. A public
+# checkout has no such file: both dicts are then empty and migrate_hint_lists
+# does nothing at all, which is the right behaviour and not a degraded one.
+HINTS_FILE = os.path.join(ROOT, "hints.local.json")
+# Empty means the lists were read, or are honestly absent. Anything else is
+# a sentence for a person. THE TWO CASES USED TO LOOK IDENTICAL: a missing
+# file and a file that would not parse both produced two empty dicts and no
+# word anywhere, so "the words stopped working" and "the words are not meant
+# to be here" were the same silence. The first is a fault and the second is
+# the published build.
+HINTS_PROBLEM = ""
+_HINTS_TOLD = False
+
+
+def _load_hint_lists():
+    """(what RESTART.md prescribed, what replaced it) - or two empty pairs.
+
+    Sets HINTS_PROBLEM when the file is THERE and did not yield words. An
+    absent file sets nothing: that is the public checkout, by design.
+    """
+    global HINTS_PROBLEM
+    empty = ({"question_hints": [], "idle_hints": []},
+             {"question_hints": [], "idle_hints": []})
+    if not os.path.exists(HINTS_FILE):
+        HINTS_PROBLEM = ""
+        return empty
+    try:
+        with open(HINTS_FILE, encoding="utf-8") as fh:
+            got = json.load(fh)
+    except Exception as exc:
+        HINTS_PROBLEM = ("%s is there but would not read (%s: %s)"
+                         % (HINTS_FILE, type(exc).__name__, exc))
+        return empty
+    out = []
+    for half in ("prescribed", "measured"):
+        d = got.get(half) or {}
+        out.append({k: list(d.get(k) or [])
+                    for k in ("question_hints", "idle_hints")})
+    if not any(out[0].values()) or not any(out[1].values()):
+        HINTS_PROBLEM = ("%s read, but one half of it is empty - the keys are "
+                         "\"prescribed\" and \"measured\", each with "
+                         "\"question_hints\" and \"idle_hints\""
+                         % HINTS_FILE)
+    else:
+        HINTS_PROBLEM = ""
+    return out[0], out[1]
+
+
+HINTS_AS_PRESCRIBED, HINTS_MEASURED = _load_hint_lists()
+
+
+def migrate_hint_lists():
+    """Bring the hint lists with the matcher, in the same restart.
+
+    THE TWO HALVES CANNOT SHIP APART, and that is the whole reason this
+    exists. hint_hit went from word-start to whole-word on 2026-08-31, which
+    is what stops a stem reaching a past tense; but the same change stops a
+    stem reaching its own imperative, so the list has to name the forms it
+    means. Measured, and REPRODUCIBLE - the corpus is test_cases.py case 6,
+    which runs all three configurations and prints these three rows:
+
+        word-start  + prescribed list    4 false fires, 0 missed
+        whole-word  + prescribed list    1 false fire,  3 MISSED
+        whole-word  + measured list      0 false fires, 0 missed
+
+    These rows used to read 8 / 1 / 0, and the 8 belonged to a DIFFERENT
+    corpus - the shift survey of 2026-08-31, which walked six words against
+    eight example lines drawn from real reports, two of the six being the
+    English built-ins rather than the list. Both counts are true of their
+    own text; quoting them as one table was not. The number here is the one
+    anybody can reproduce by running the suite.
+
+    The middle row is the danger. A missed ask is worse than a false one -
+    nobody is told when the executor really is waiting on an answer - so
+    shipping the matcher and leaving the list behind would have made things
+    worse, not better. The lists live in config.json, which /config cannot
+    write (they are not in CONFIG_KEYS) and which a running daemon
+    serialises over, so a hand-edit between restarts is lost. A migration is
+    the only way the two arrive together.
+
+    Both lists are read from HINTS_FILE, packaged and never published; with
+    no such file this does nothing.
+
+    What changed, and not one word was thrown away:
+      * the confirm-stem reached the PAST TENSE as readily as the
+        imperative, so a report of work done read as a request. Replaced by
+        the two imperative forms it was meant to cover.
+      * the choose-stem becomes its two forms for the same reason - no
+        misfire measured, but a stem reaches less far now, and an entry that
+        is a whole word can be read and judged by whoever keeps the list.
+      * the idle adverb on its own is ordinary mid-report prose. It is now
+        the phrase it was always meant to catch.
+      * the two interrogative pronouns are UNCHANGED: whole-word matching on
+        its own stops them reaching the hyphenated indefinite forms.
+
+    EXACT match only, the same discipline as migrate_executor_mode: this
+    replaces the list RESTART.md prescribed and nothing else, so anything
+    edited since is left alone.
+    """
+    global _HINTS_TOLD
+    changed = []
+    if HINTS_PROBLEM and not _HINTS_TOLD:
+        _HINTS_TOLD = True
+        # Once, and at warn: the heuristics will run on whatever config.json
+        # already holds, and this migration cannot carry anything onto it.
+        store.journal("bridge", "Hint lists: " + HINTS_PROBLEM + ". The two "
+                      "text heuristics keep whatever config.json holds, and "
+                      "nothing can be carried onto it.", level="warn")
+    if not any(HINTS_AS_PRESCRIBED.values()):
+        # No hints.local.json - a public checkout, or somebody removed it.
+        # There is nothing to recognise and nothing to put in its place; an
+        # empty list must not be "carried" onto an empty list either.
+        return changed
+    with _lock:
+        for key in ("question_hints", "idle_hints"):
+            if list(CFG.get(key) or []) == HINTS_AS_PRESCRIBED[key]:
+                CFG[key] = list(HINTS_MEASURED[key])
+                changed.append(key)
+        if changed:
+            store.save_config(CFG)
+    if changed:
+        store.journal("bridge",
+                      "Hint lists brought up to date with whole-word "
+                      "matching (" + ", ".join(changed) + "). The prescribed "
+                      "list measured 8 false readings; with the matcher alone "
+                      "it would have missed 3 real questions, so the two "
+                      "arrive together.", level="log")
+    return changed
 
 
 def migrate_executor_mode():
@@ -799,10 +962,11 @@ def touch_session(event, **fields):
         sess.update({k: v for k, v in fields.items() if v is not None})
         # A size smaller than what was carried into the last compaction is
         # the summary landing: the record has caught up and can be decided
-        # from again.
+        # from again. The test itself lives in summary_landed, because
+        # check_compaction asks the same question about the same event and
+        # two spellings of one idea is how they drift apart.
         pend = sess.get("compaction_pending") or {}
-        cur = sess.get("context_tokens") or 0
-        if pend.get("tokens") and cur and cur < int(pend["tokens"]) * 0.9:
+        if summary_landed(sess.get("context_tokens"), pend.get("tokens")):
             sess.pop("compaction_pending", None)
         store.save_state(STATE)
     if sess.get("session_id"):
@@ -811,6 +975,21 @@ def touch_session(event, **fields):
     if sess.get("window"):
         remember_telemetry(sess.get("path"), sess.get("role"), sess)
     return sess
+
+
+def summary_landed(now_tokens, carried):
+    """Has a session that was compacting come back smaller?
+
+    One tenth is the whole margin, and it is deliberately crude: a summary
+    replaces the conversation, so a landed compaction reads at a fraction of
+    what went in - 999 870 -> 66 509 and 998 851 -> 108 877 are the two on
+    file here - while a session that has not compacted keeps reading what it
+    read. Nothing in between has ever been observed, so a tighter test would
+    only be a tighter guess.
+    """
+    carried = int(carried or 0)
+    now_tokens = int(now_tokens or 0)
+    return bool(carried and now_tokens and now_tokens < carried * 0.9)
 
 
 def presence_quiet():
@@ -1630,7 +1809,14 @@ def migrate_compaction_points():
         samples = entry.get("compact_samples") or []
         if not samples:
             continue
-        point = compaction_point(samples)
+        # The calibration key is "<model>|<path>" and carries no role. Turn
+        # costs are recorded for the executor and for nothing else (the Stop
+        # branch is gated on it), so that is the pair whose turns describe
+        # this project; with none of its own, _turn_figure falls back to
+        # every pair's, and says which it used.
+        _cal_path = key.split("|", 1)[1] if "|" in key else ""
+        point = compaction_point(samples,
+                                 turn_widest(_cal_path, "executor")[0])
         if point and point != entry.get("compact_at_tokens"):
             fixed.append((key, entry.get("compact_at_tokens"), point))
             entry["compact_at_tokens"] = point
@@ -2327,7 +2513,16 @@ def deliver_ex(path, role, content, meta):
     # clean text, which is what the residence gate reads.
     # Which SESSION this is going to, so the full canon is spent once per
     # window and a handover earns it again.
+    # A held acknowledgement rides on the next wake this pair was going to
+    # get anyway. THIS is the one place every delivery passes through, so no
+    # caller can forget it and no new machinery appears on the path - the
+    # planner's condition, and the right one. Taken AFTER with_rules on
+    # purpose: a stale "accepted" must not push a short verdict over
+    # VERDICT_WORK_CHARS and charge the canon for something nobody wrote.
+    riding = take_held_verdict(path) if role == "executor" else ""
     content = with_rules(content, meta, last_session_id(path, role))
+    if riding:
+        content = content + "\n\n" + riding
     try:
         req = urllib.request.Request(
             "http://127.0.0.1:%d/" % port,
@@ -2355,8 +2550,13 @@ def deliver_ex(path, role, content, meta):
         cur = CHANNELS.get((norm(path), role))
         if cur and int(cur.get("port") or 0) == port:
             cur["ts"] = time.time()
+        if riding:
+            note_held_ridden(path, "ridden", (meta or {}).get("kind") or "message")
         return True, "ok"
     except Exception as exc:
+        # Nothing may be lost by a delivery that failed. The words go back
+        # where they were and wait for the next ride or for the limit.
+        put_held_verdict_back(path, riding)
         store.journal("channel", "The %s channel is listening on port %d but "
                       "would not take the message: %s. The window is up; it "
                       "is the channel inside it that did not answer."
@@ -2517,14 +2717,153 @@ def calib_clean(model, path):
     store.calib_update(model, path, **fields)
 
 
-# The largest single turn this bridge has ever measured: 200 274 tokens, the
-# one that killed a session on 2026-08-20 (DECISIONS.md §5.16, where the
-# arithmetic that lowered autocompact_pct to 70 is worked through). It is
-# used below as the widest an overshoot can honestly be.
-LARGEST_TURN_SEEN = 200274
+# How big a turn is - measured, per pair, and it is TWO numbers.
+#
+# It used to be one literal, LARGEST_TURN_SEEN = 200274, "the largest single
+# turn this bridge has ever measured", dated 2026-08-20. Both halves of that
+# sentence were wrong on the day it was written. Measured 2026-08-31 from
+# 826 turns across 57 sessions (2026-07-26 .. 2026-08-30, the transcripts in
+# ~/.claude/projects plus the archived copies in bridge-logs, one copy per
+# session id):
+#
+#     this project   n=317  max=432 609  p99=344 680  p95= 44 080  p90=30 119
+#     the other pair n=509  max=532 910  p99=261 410  p95=111 657  p90=77 027
+#     both           n=826  max=532 910  p99=276 189  p95= 93 251  p90=58 639
+#
+# and 523 857 of those was measured on 2026-08-20 itself. The literal was
+# never the largest turn seen; it was the turn that killed one session.
+#
+# TWO numbers, because the constant was used with opposite meanings:
+#
+#   WIDEST   - "an overshoot is at most one turn wide". A bound on what a
+#              single turn COULD have been, used where the question is
+#              whether two sizes can describe the same threshold
+#              (compaction_point), how far under a known failure the real
+#              boundary might sit (compaction_too_big), and whether a
+#              session sitting past its point is still within one turn of it
+#              (plan_for rule 1b).
+#   ORDINARY - "a session ordinarily ends a turn above its own last
+#              compaction size without being in any trouble at all" (case 22:
+#              compacted at 150k, sitting at 168k). A typical turn, not a
+#              freak one, used only in compaction_too_big's `proven + L`.
+#
+# One number cannot be both, and the numbers say so. On the busier pair,
+# whose proven compaction is 998 851 and whose real failure is 1 000 815:
+# `proven + max` is 1 531 761 - above the window, so that branch can never
+# fire again - while `fail - max` is 467 905, which would call a session
+# carrying half its window "past the wall". The literal's 200 274 sat
+# between the two by accident.
+#
+# A BOUNDED SAMPLE, NOT A RUNNING MAXIMUM. A max that only ever rises is the
+# same ratchet compaction_point had to stop being (it was min(previous,
+# this) and could never be outvoted). One freak turn would own the number
+# for ever, and rule 33 says evidence expires: that pair's 532 910 is from
+# 2026-07-28, five weeks old, while its last three days peak at 375 663. So
+# the pair keeps its last TURN_SAMPLE_KEEP costs and both figures are read
+# off that window.
+TURN_SAMPLE_KEEP = 200
 
 
-def compaction_point(samples):
+def note_turn_cost(path, role, cost, session_id=""):
+    """Remember what one turn cost this pair. Attributed, always.
+
+    The session id is written down beside it because a size recorded against
+    the wrong session is not a small error - it is the whole of
+    ANALYSIS-compaction-point.md, where one window's size was written as
+    another's measurement and a pair was handed over on it. Here the cost is
+    computed from one session's own two readings, so it cannot be another's;
+    the id is what makes that checkable afterwards rather than assumed.
+    """
+    cost = int(cost or 0)
+    if cost <= 0:
+        return
+    key = "%s|%s" % (norm(path), role)
+    with _lock:
+        rec = STATE.setdefault("turns", {}).setdefault(
+            key, {"sample": [], "n": 0})
+        rec["sample"].append(cost)
+        del rec["sample"][:-TURN_SAMPLE_KEEP]
+        rec["n"] = int(rec.get("n") or 0) + 1
+        if cost >= int(rec.get("biggest") or 0):
+            rec["biggest"] = cost
+            rec["biggest_at"] = time.strftime("%Y-%m-%d %H:%M")
+            rec["biggest_session"] = session_id or ""
+        save_state()
+
+
+def turn_sample(path=None, role=None):
+    """This pair's recent turn costs, or every pair's when asked for none."""
+    turns = STATE.get("turns") or {}
+    if path is None:
+        out = []
+        for rec in turns.values():
+            out.extend((rec or {}).get("sample") or [])
+        return out
+    return list(((turns.get("%s|%s" % (norm(path), role)) or {})
+                 .get("sample")) or [])
+
+
+def _pct_of(values, p):
+    vals = sorted(int(v) for v in values if v)
+    if not vals:
+        return None
+    return vals[min(len(vals) - 1, int(round(p * (len(vals) - 1))))]
+
+
+def _turn_figure(path, role, p):
+    """(value, where it came from). Never a literal, never a guess.
+
+    Three sources and they are named, the way wall_view names the window's:
+    `measured` - this pair's own turns, from its recorded sample or, while
+    that is still empty, from the last costs on its own session record;
+    `fallback` - every pair's, when this one has neither; `assumed` -
+    nothing has been measured anywhere, and
+    then the value is None and the caller must not make the claim that
+    needed it. There is deliberately no floor: the number that used to be
+    one is the number this whole change exists to remove, and freezing it
+    under a new name would move the error rather than fix it.
+    """
+    own = turn_sample(path, role)
+    if not own:
+        # THE COLD START. STATE["turns"] fills from Stop hooks, so for a
+        # little while after a restart it is empty for every pair - and
+        # `assumed` means rule 1b grants no exception at all, which is the
+        # strict direction. The pair's own answer is already on disk: a
+        # session record carries its last turn costs and always has. Those
+        # are this pair's measurement, simply the short version of it, and
+        # reaching past them to another project's turns while the real
+        # answer sat in the record would be the borrowing this whole change
+        # exists to stop.
+        own = [c for c in ((best_session(path, role) or {}).get("turn_costs")
+                           or []) if isinstance(c, int) and c > 0]
+    if own:
+        return _pct_of(own, p), "measured"
+    everyone = turn_sample()
+    if everyone:
+        return _pct_of(everyone, p), "fallback"
+    return None, "assumed"
+
+
+def turn_widest(path, role):
+    """The widest a single turn of this pair has been lately."""
+    return _turn_figure(path, role, 1.0)
+
+
+def turn_ordinary(path, role):
+    """How big a turn is when it is not a freak one.
+
+    p90 and not the maximum: this one answers "how far above its own point
+    does a session ordinarily sit", and the top decile is exactly the part
+    that is not ordinary. Erring high here is the dangerous direction - it
+    lifts compaction_too_big's ceiling until rule 1a can never fire and the
+    wall is reached - so the cautious choice is the lower one. With a sample
+    too small to have a tenth, p90 IS the maximum, which is the behaviour
+    this replaces and a safe place to start from.
+    """
+    return _turn_figure(path, role, 0.9)
+
+
+def compaction_point(samples, widest=None):
     """Where compaction fires, from the sizes it was seen firing at.
 
     Every sample is an OVERSHOOT: compaction is checked at the turn boundary
@@ -2547,10 +2886,23 @@ def compaction_point(samples):
     and let two sessions run into the wall on 2026-08-21.
 
     So: automatic samples of one threshold all lie in [T, T + one turn], and
-    the largest turn ever seen here is LARGEST_TURN_SEEN. A sample further
-    than that below the largest one cannot be an overshoot of the same
-    threshold, and is dropped. With one sample, or with samples that agree,
-    this is exactly the old minimum.
+    one turn is `widest` - measured for this pair, passed in by the caller.
+    A sample further than that below the anchor cannot be an overshoot of the
+    same threshold, and is dropped. With one sample, or with samples that
+    agree, this is exactly the old minimum.
+
+    `widest` used to be the module literal LARGEST_TURN_SEEN, so every pair
+    on the bridge was filtered by one project's freak turn. It stays an
+    argument rather than a lookup because this function is pure and is
+    called from migrate_compaction_points over calibration keys that name a
+    model and a project but no role.
+
+    WITH NO WIDEST THE FILTER IS NOT APPLIED. "These two sizes cannot be
+    overshoots of the same threshold" is a claim about turn sizes, and
+    nothing has measured one - so it is not made, and the honest answer is
+    the plain minimum. That is only reachable on a bridge that has never
+    recorded a turn, which is also a bridge with no compaction samples to
+    filter.
     """
     good = [int(s) for s in (samples or []) if s]
     if not good:
@@ -2573,7 +2925,9 @@ def compaction_point(samples):
     # works: a manual /compact 220k below the recent cluster is as far from
     # the newest sample as it was from the largest, and is still dropped.
     anchor = good[-1]
-    kept = [s for s in good if abs(anchor - s) <= LARGEST_TURN_SEEN]
+    if not widest:
+        return min(good)
+    kept = [s for s in good if abs(anchor - s) <= widest]
     return min(kept)
 
 
@@ -2663,6 +3017,14 @@ def wall_view(sess, path):
     costs = [c for c in (sess.get("turn_costs") or []) if c > 0]
     per_turn = int(sum(costs) / len(costs)) if costs else 0
     worst_turn = max(costs) if costs else 0
+    # The two measured turn figures and WHERE EACH CAME FROM. Carried here
+    # because this dict is what log_handover_decision writes down and what
+    # the panel reads, and a number substituted from another pair must not
+    # be indistinguishable from one measured for this one - that confusion,
+    # in the neighbouring quantity, is the whole of
+    # ANALYSIS-compaction-point.md.
+    turn_wide, turn_wide_src = turn_widest(path, sess.get("role"))
+    turn_ord, turn_ord_src = turn_ordinary(path, sess.get("role"))
 
     limit = compact if compact else wall
     kind = "compaction" if compact else "wall"
@@ -2689,6 +3051,8 @@ def wall_view(sess, path):
            "reserved": RESERVED_TOKENS,
            "gap": max(0, wall - compact) if compact else None,
            "per_turn": per_turn, "worst_turn": worst_turn,
+           "turn_widest": turn_wide, "turn_widest_source": turn_wide_src,
+           "turn_ordinary": turn_ord, "turn_ordinary_source": turn_ord_src,
            "limit": limit, "kind": kind,
            "left": int(max(0, limit - used)),
            "pct_of_limit": round(used * 100.0 / limit, 1) if limit else 0,
@@ -2857,6 +3221,33 @@ def refresh_from_disk(path, role, sess=None):
     return fresh
 
 
+# The witness already_up() returns when the only evidence is a channel that
+# answers. Named once, here, because a guard has to be able to tell it from
+# the other two and a literal repeated in two places is how they come to
+# disagree (rule 28).
+WITNESS_CHANNEL = "its channel is answering"
+
+
+def handover_awaits(path, role):
+    """Is a handover under way that is still waiting for THIS role?
+
+    The question a witness has to survive before it may create a record.
+
+    NOTE THE DIRECTION, because it is the OPPOSITE of mark_registered's on
+    the same field, deliberately. There, a record with no `waiting` list
+    clears the failure streak for any role, because what it was waiting for
+    cannot be established and a pair that can never be handed over is the
+    worse fault. Here the answer to "cannot be established" is True - refuse
+    the record - because this witness fails CLOSED: a missing panel row costs
+    one 45 s reconcile pass, and a false one costs what 2026-08-31 cost.
+    Same lesson as executor_wrote_recently against executor_is_working.
+    """
+    hv = (STATE.get("handover") or {}).get(norm(path))
+    if not hv:
+        return False
+    return role in (hv.get("waiting") or [role])
+
+
 def ensure_record(path, role, why):
     """Make sure a session proved alive has a record to be seen through.
 
@@ -2868,6 +3259,38 @@ def ensure_record(path, role, why):
     planning all read, so anything that proves life has to write one.
     """
     path = norm(path)
+    # THE EVENT MUST NOT BE ABLE TO PRODUCE ITS OWN WITNESS (rule 30), and
+    # this is the SECOND consumer of the one closed on 2026-08-28. That day
+    # mark_registered stopped accepting a channel registration as proof that
+    # a replacement had come up - a handover STOPS the old window, its
+    # channel process lives on and answers for up to 45 s, so the corpse of
+    # the window that failed to be replaced was vouching for it. Only the
+    # streak counter was hardened; this path, which writes the record the
+    # panel and the planning read, was left on the old witness and produced
+    # the same lie three days later.
+    #
+    # Measured 2026-08-31, one pair, this project: handover decided 19:43:09,
+    # window opened 19:43:12, and at 19:43:32 - twenty seconds later - the
+    # journal says "Noticed a live executor window (its channel is
+    # answering) - adding it to the panel". The window it was vouching for
+    # did not reach SessionStart until 20:22:51, thirty-nine minutes later;
+    # its transcript file did not exist before then, which is what proves
+    # the channel could not have been its. Two statements about one window,
+    # ten minutes apart, incompatible: "its channel is answering" and
+    # "waited 10 min for its SessionStart and its channel to register, and
+    # got neither".
+    #
+    # channel_alive() has said since 2026-08-19 that the process listening
+    # "may just as easily be the PREVIOUS session's child" and that what
+    # keeps it honest is channel_supersedes at REGISTRATION. That guard
+    # stops a leftover taking the seat back; it does nothing about the
+    # record already in STATE["channels"], which no handover removes and no
+    # reaper collects (-> DECISIONS.md 5.3). So during a handover the
+    # channel is not evidence about the role being replaced, and only the
+    # role being replaced is excluded - the other half of the pair is
+    # untouched and still adopts normally.
+    if why == WITNESS_CHANNEL and handover_awaits(path, role):
+        return False
     with _lock:
         for v in (STATE.get("sessions") or {}).values():
             if norm(v.get("path")) == path and v.get("role") == role \
@@ -3248,7 +3671,12 @@ def assess(path):
                 notify("needs_you", "%s: a handover is due but cannot run - "
                        "%s" % (name, blocked), path=path)
             return done("a handover due but blocked", "told you")
-        threading.Thread(target=handover,
+        # NAMED, and the name is load-bearing rather than decorative: a
+        # suite that has just called assess() cannot honestly say "no
+        # handover was fired" until anything assess() started has finished,
+        # and the only exact way to wait for a thread is to join it. See
+        # test_wall_handover.settled().
+        threading.Thread(target=handover, name="handover:executor",
                          args=(path, plan["why"], ("executor",)),
                          daemon=True).start()
         return done("the executor at the end of its runway",
@@ -3271,7 +3699,7 @@ def assess(path):
                 notify("needs_you", "%s: the planner is at the end of its "
                        "runway but cannot be replaced - %s" % (name, blocked), path=path)
             return done("a planner handover due but blocked", "told you")
-        threading.Thread(target=handover,
+        threading.Thread(target=handover, name="handover:planner",
                          args=(path, pl["plan"]["why"], ("planner",)),
                          daemon=True).start()
         return done("the planner at the end of its runway",
@@ -3511,26 +3939,48 @@ def compaction_too_big(path, role, window):
     """
     proven = compaction_survivable(path, role)
     fail = compaction_failed_at(path, role)
-    if proven:
+    # TWO DIFFERENT QUESTIONS, TWO DIFFERENT NUMBERS. The literal that used
+    # to be here answered both and could not: on this project `proven + max`
+    # lands at 1 531 761, above the window, so the first branch could never
+    # fire again, while `fail - max` lands at 467 905 and would call a
+    # session carrying half its window doomed. See the note above
+    # TURN_SAMPLE_KEEP for the measurements.
+    ordinary, ord_src = turn_ordinary(path, role)
+    widest, wide_src = turn_widest(path, role)
+    if proven and ordinary:
         # One turn above the best proven size, because a sample IS an
         # overshoot: the threshold sits below it and a session ordinarily
         # ends a turn above its own last compaction size without being in
         # any trouble at all. Case 22 is that shape - compacted at 150k,
         # sitting at 168k, entirely routine - and without this allowance
         # the branches would call it doomed.
-        top = proven + LARGEST_TURN_SEEN
+        top = proven + ordinary
     else:
+        # No proven compaction, or no measured turn to size the allowance
+        # with - either way there is nothing to build a measured ceiling
+        # from, and the old reserve arithmetic is what is left.
         top = max(0, int(window or 0) - RESERVED_TOKENS) or None
-    if fail:
+    if fail and widest:
         # Below the failure, by a turn: the failure is itself an overshoot -
         # the session ended a turn there and only then tried to summarise -
         # so the size that cannot be summarised starts somewhere under it.
         # This is what makes rule 1a fire EARLY and calmly, before the zone
         # where compaction has actually been seen to fail, which is the whole
         # of what the owner asked for: do not lose the work.
-        under = max(0, int(fail) - LARGEST_TURN_SEEN)
+        under = max(0, int(fail) - widest)
         top = under if top is None else min(top, under)
     return top or None
+
+
+def compaction_too_big_why(path, role, window):
+    """The same answer with its provenance, for anything that reports it."""
+    ordinary, ord_src = turn_ordinary(path, role)
+    widest, wide_src = turn_widest(path, role)
+    return {"ceiling": compaction_too_big(path, role, window),
+            "proven": compaction_survivable(path, role),
+            "failed_at": compaction_failed_at(path, role),
+            "turn_ordinary": ordinary, "turn_ordinary_source": ord_src,
+            "turn_widest": widest, "turn_widest_source": wide_src}
 
 
 def compaction_sizes(path, role):
@@ -3942,7 +4392,15 @@ def plan_for(sess, path):
     wall = compaction_too_big(path, sess.get("role") or "executor",
                               wv.get("window"))
     if compact and wall and used >= wall and wv.get("compact_measured"):
-        coming = compact < wall and used - compact <= LARGEST_TURN_SEEN
+        # `widest`, measured for this pair: "an overshoot is at most one
+        # turn wide" is a claim about THIS pair's turns, and with the old
+        # literal a pair whose turns are 30k was granted a 200k allowance.
+        # With nothing measured anywhere the claim is not made at all - the
+        # exception is what §5.22 showed can keep a session standing still
+        # while it runs into the wall, so silence there means "no exception".
+        _wide, _wide_src = turn_widest(path, sess.get("role") or "executor")
+        coming = bool(_wide) and compact < wall \
+            and used - compact <= _wide
         if not coming:
             why = ("%dk past a compaction point of %dk that never fired - "
                    "further than any one turn, so none is coming"
@@ -4021,21 +4479,159 @@ def mechanical_handoff(path, lp, extra_note=""):
     return text
 
 
+def repo_dir(path):
+    """Where to run git for this project. Returns (dir, why-not).
+
+    DECLARED, NEVER GUESSED. `projects[path]["repo"]` is a path relative to
+    the project, empty for "the project folder is the repository" - which is
+    what the bridge assumed for everyone until 2026-08-31, and what was
+    silently wrong here, where the repository is `source/` one level down.
+    Searching for a .git upward or downward was considered and refused: it
+    would be the bridge picking a repository nobody named, and `git add -A`
+    in a folder somebody else's work lives in is not a mistake anyone
+    notices the same day.
+
+    The declaration is bounded on purpose. A field is a statement about
+    THIS project, so a value that leaves the project - absolute, rooted, or
+    climbing out with `..` - is refused rather than honoured; declaring is
+    not the same as being handed the filesystem. `why-not` is a sentence
+    for a person, because the alternative to a sentence here is the silence
+    this whole repair exists against.
+    """
+    rel = (store.project_config(CFG, path).get("repo") or "").strip()
+    if not rel:
+        return path, None
+    rel = rel.replace("/", os.sep).replace("\\", os.sep)
+    if os.path.isabs(rel) or (len(rel) > 1 and rel[1] == ":"):
+        return None, ('the declared repo "%s" is an absolute path; the field '
+                      "is relative to the project" % rel)
+    cand = os.path.normpath(os.path.join(path, rel))
+    inside = norm(cand) == norm(path) or norm(cand).startswith(
+        norm(path).rstrip(os.sep) + os.sep)
+    if not inside:
+        return None, ('the declared repo "%s" leads outside the project '
+                      "(%s)" % (rel, cand))
+    if not os.path.isdir(cand):
+        return None, ('the declared repo "%s" does not exist (%s)'
+                      % (rel, cand))
+    return cand, None
+
+
+def git_told(path, why):
+    """Say a commit did not happen - once per project per reason.
+
+    ONCE, because the reasons here do not change between iterations: a folder
+    that is not a repository is not one at the next verdict either, and a line
+    per verdict for the rest of the run is a log where a report was wanted.
+    The latch is keyed by project and by the reason, so a DIFFERENT failure
+    still speaks. `git_told` is in STATE_PATHS (cases 49 and 50): a container
+    holding a path that the inventory does not name is invisible to a project
+    move and to /forget-project.
+    """
+    key = norm(path)
+    with _lock:
+        seen = STATE.setdefault("git_told", {})
+        if seen.get(key) == why:
+            return False
+        seen[key] = why
+        save_state()
+    return True
+
+
+def _git(args, path, timeout=30):
+    """Run one git command in `path`. Returns (returncode, stdout+stderr)."""
+    r = subprocess.run(["git"] + args, cwd=path, capture_output=True,
+                       timeout=timeout)
+    out = (r.stdout or b"") + (r.stderr or b"")
+    return r.returncode, out.decode("utf-8", "replace").strip()
+
+
 def git_commit_iteration(path, n, verdict):
+    """Commit this iteration, and SAY SO WHEN IT DOES NOT HAPPEN.
+
+    The defect this exists against is not a missing commit, it is a silent
+    one. Every exit below used to be a bare `return` or a swallowed
+    exception, and the result was measured on 2026-08-31: 56 commits in this
+    repository and not one from here, both pre-relayout reflogs holding a
+    single "bridge: baseline", and two days of work sitting in a working
+    tree that nobody had been told was unsaved.
+
+    The cause was the second gate. `cwd=path` is the PROJECT path, and this
+    project's path is the folder ABOVE its repository - `git rev-parse
+    --git-dir` answers rc=128 there, and rc=128 returned quietly. That is
+    exactly what a witness nobody asks is for (rule 30), turned on the tool
+    that was supposed to be keeping the record.
+
+    Being switched off is the one exit that stays quiet: it is a setting,
+    somebody chose it, and a setting that complains is a setting people turn
+    off twice.
+    """
     pconf = store.project_config(CFG, path)
     if not pconf.get("commit_each_iteration"):
         return
     try:
-        if subprocess.run(["git", "rev-parse", "--git-dir"], cwd=path,
-                          capture_output=True, timeout=8).returncode != 0:
+        where, why = repo_dir(path)
+        if where is None:
+            # A declaration that cannot be honoured is refused OUT LOUD. It
+            # is the one failure a person can fix in one edit, so saying
+            # nothing about it would be the worst of the four.
+            # Latched on the SENTENCE, not on a category: "points nowhere"
+            # and "leads outside the project" are two different mistakes and
+            # a person fixing the first must still be told about the second.
+            if git_told(path, "repo:" + why):
+                store.journal("git", "NOT COMMITTING in %s: %s"
+                              % (path, why), project_name(path), "", "warn",
+                              project_dir=path)
             return
-        subprocess.run(["git", "add", "-A"], cwd=path, capture_output=True,
-                       timeout=30)
-        subprocess.run(["git", "commit", "-m",
-                        "bridge: iteration %d (%s)" % (n, verdict)],
-                       cwd=path, capture_output=True, timeout=30)
-    except Exception:
-        pass
+        rc, out = _git(["rev-parse", "--git-dir"], where, timeout=8)
+        if rc != 0:
+            # Named separately from every other failure because it is the one
+            # with an answer a person can act on, and because it is the one
+            # that actually happened here.
+            if git_told(path, "not-a-repo"):
+                store.journal(
+                    "git", "NOT COMMITTING: %s is not a git repository, so "
+                    "no iteration here has ever been committed (git said: "
+                    "%s). If the repository is a folder below it, name that "
+                    'folder in the project\'s "repo" setting - the bridge '
+                    "declares it, it does not go looking."
+                    % (where, out.splitlines()[0] if out else "rc=%d" % rc),
+                    project_name(path), "", "warn", project_dir=path)
+            return
+        rc, out = _git(["add", "-A"], where)
+        if rc != 0:
+            if git_told(path, "add-failed"):
+                store.journal("git", "NOT COMMITTING: git add failed in %s "
+                              "(%s)" % (where, out[:300]),
+                              project_name(path), "", "warn", project_dir=path)
+            return
+        rc, out = _git(["commit", "-m",
+                        "bridge: iteration %d (%s)" % (n, verdict)], where)
+        if rc != 0:
+            # NOTHING TO COMMIT IS NOT A FAILURE. A verdict on a report that
+            # changed no files is the ordinary case - reconnaissance, a
+            # question answered, a measurement - and git answers it with a
+            # non-zero code and that sentence. Calling it a failure would
+            # make the new journal line the very noise it exists to avoid.
+            if "nothing to commit" in out or "no changes added" in out:
+                return
+            if git_told(path, "commit-failed"):
+                store.journal("git", "NOT COMMITTING: git commit failed in "
+                              "%s (%s)" % (where, out[:300]),
+                              project_name(path), "", "warn", project_dir=path)
+            return
+        # A commit that worked clears the latch, so the NEXT failure - of any
+        # kind, including one of the same kind after a repair - speaks again.
+        with _lock:
+            if (STATE.get("git_told") or {}).pop(norm(path), None) is not None:
+                save_state()
+    except Exception as exc:
+        # This line used to be `pass`, and it is the reason a swallowed
+        # failure could not be found from the bridge's own records.
+        if git_told(path, "exception"):
+            store.journal("git", "NOT COMMITTING: %s while committing in %s"
+                          % (exc, path), project_name(path), "", "warn",
+                          project_dir=path)
 
 
 RC_URL = re.compile(r"https://claude\.ai/code/session_[A-Za-z0-9_-]+")
@@ -4531,6 +5127,15 @@ def mark_registered(path, role, via="session"):
         entry = (STATE.get("pids") or {}).get(key)
         if isinstance(entry, dict) and not entry.get("registered"):
             entry["registered"] = True
+            # And everything the giving-up wrote goes with it. `gave_up`
+            # outlived the window it was about - the live record of
+            # 2026-08-30 still carried gave_up=true on a window that had
+            # come up - and now that already_up and launch_guard both read
+            # these fields, a stale one would answer questions about a
+            # session that is working.
+            entry.pop("gave_up", None)
+            entry.pop("told_n", None)
+            entry.pop("told_at", None)
         (STATE.get("autostart_tried") or {}).pop(key, None)
         (STATE.get("autostart_told") or {}).pop(key, None)
         # A window came up, so whatever was swallowing the previous ones is
@@ -4595,9 +5200,29 @@ def already_up(path, role):
     # connected channel is present tense - it cannot be outvoted by an
     # older record saying something ended.
     if channel_alive(path, role):
-        return "its channel is answering"
+        return WITNESS_CHANNEL
+    # AND registered. A pid answers "a window exists", which is not the
+    # question - rule 30, turned on a record instead of on an event. A
+    # window that opened and stopped on a startup dialog is a live process
+    # that never became a session, and check_sessions knows it: that is the
+    # code which sets `registered`, and which sets `gave_up` on this very
+    # record when the wait runs out. Two readers of one record, disagreeing.
+    #
+    # Measured, 2026-08-30. rotate_executor opened a replacement at 18:27:46
+    # (pid 12472); no SessionStart came from it until 21:47:23, three hours
+    # and nineteen minutes later. All that time pid_alive said "its window
+    # is still running", so the executor read as alive to everything
+    # downstream: clinch() passed its all(alive) test and diagnosed a pair
+    # waiting on itself, fifteen times between 18:44 and 21:34, and not one
+    # of those messages named the real fact. The one true line was
+    # check_sessions', at 18:38:03, said once.
+    #
+    # Nothing opens a second window over the stuck one because of this:
+    # launch_guard reads the same two fields and refuses while that pid
+    # lives.
     entry = (STATE.get("pids") or {}).get("%s|%s" % (norm(path), role)) or {}
-    if isinstance(entry, dict) and sessions.pid_alive(entry.get("pid")):
+    if isinstance(entry, dict) and entry.get("registered") \
+            and sessions.pid_alive(entry.get("pid")):
         return "its window is still running"
     # seen_at, not last_seen. Both lines below used to read the clock stamp:
     # the freshest record was picked by comparing "%H:%M:%S" as STRINGS, and
@@ -4649,6 +5274,20 @@ def launch_guard(path, role):
     if isinstance(entry, dict) and entry.get("pid") \
             and not entry.get("registered"):
         waited = time.time() - entry.get("at", 0)
+        # WHILE IT LIVES, not for the grace. The grace used to be the whole
+        # of it, so after ten minutes the refusal lapsed and the bridge was
+        # free to open a second window over a first one still sitting on a
+        # dialog - the "six in a row" this function exists to stop, arriving
+        # ten minutes late. The process being alive is the fact; the grace
+        # only decides how the refusal is worded. A pid that is NOT alive is
+        # a launch that died, and past the grace that is a retry worth
+        # allowing.
+        if sessions.pid_alive(entry.get("pid")):
+            return ("a %s window opened %d min ago and has still not come "
+                    "up - it is sitting on a startup dialog. Answer it in "
+                    "that window, or close it; opening another would only "
+                    "get stuck the same way."
+                    % (role, int(waited // 60)))
         if waited < float(CFG.get("thresholds", {}).get("startup_grace",
                                                         600)):
             return ("a %s window opened %d s ago and has not come up yet - "
@@ -4887,6 +5526,12 @@ def situation(path):
            # Reports that got no verdict, in a row. Silence used to read as
            # consent; it is a number on the panel now.
            "unanswered": (STATE.get("unanswered") or {}).get(path, 0),
+           # 2b: acknowledgement waiting for a ride, and how the ones before
+           # it left. Held is only different from dropped if it is visible.
+           "held_chars": len(held_record(path).get("body") or ""),
+           "held_total": int(held_record(path).get("n") or 0),
+           "held_ridden": int(held_record(path).get("ridden") or 0),
+           "held_alone": int(held_record(path).get("alone") or 0),
            # Declared temporary solutions still open. This never blocks -
            # blocking would only teach the pair to stop saying the word -
            # but it is always in front of a human, which is the mechanism.
@@ -4930,6 +5575,74 @@ def situation(path):
     return out
 
 
+def _wordish(ch):
+    """Is this character part of a word, for the purpose of a hint?
+
+    A hyphen is, which is the whole reason this is a function rather than
+    str.isalnum inline: the hyphenated indefinite pronouns are the misfire
+    that word-start matching could not reach.
+    """
+    return bool(ch) and (ch.isalnum() or ch in "_-")
+
+
+def hint_hit(text, needles):
+    """Does any of these appear in text AT THE START OF A WORD?
+
+    Plain `in` was what both heuristics below used, and on the English
+    built-ins it mostly got away with it. It stopped getting away with it
+    when the other language's hints were filled in on 2026-08-31, because
+    those words are longer and take prefixes: three of the six fired inside
+    an unrelated longer word, and one of those longer words is that
+    language's ordinary negation - so a flat statement that two things do
+    NOT differ was read as the executor asking a question, and so was a
+    sentence about resolving a conflict, because the verb for "resolve" ends
+    with the verb for "decide". That is the lever of S5.35, where a false
+    "this is a question" rang a person 45 times in one day. The literals are
+    in the private suite; they are not written here, because this file is
+    published and the public repository carries no Russian.
+
+    A WHOLE word, both ends, and a hyphen counts as part of the word. Word
+    START alone was the first attempt and it was not enough: it cured three
+    misfires and left five, because a hint is at a word start in every one
+    of the forms that were still wrong. Measured on a fixed corpus, the
+    start-only rule scored 8 false fires; whole-word scores 0, with missed
+    asks at 0 both times - which is the pair of numbers that matters, since
+    narrowing is only an improvement while nothing real stops being caught.
+
+    Three kinds of misfire die here, and they are worth naming because they
+    are the same shape in any language:
+
+      * an interrogative pronoun turned indefinite by a hyphenated particle
+        ("which" -> "whichever"-like forms), which a word START cannot see
+        because the hint is still at the start of the word;
+      * a verb stem that reaches the PAST TENSE as happily as the
+        imperative, so a report of work done read as a request; and
+      * an English word inside its own longer form - "confirm" in
+        "confirmed", which is a report, not a request.
+
+    The cost, and it is a real one: a stem no longer covers a verb's
+    endings, so a list must name the forms it means. That is the trade taken
+    deliberately - an entry that is a whole word can be read and judged by
+    the person maintaining the list, where a stem's reach can only be found
+    out by experiment.
+
+    A hyphen is part of the word on purpose. Without that the hyphenated
+    indefinite forms stay, because the hint is a whole word right up to the
+    hyphen.
+    """
+    for w in needles:
+        if not w:
+            continue
+        i = text.find(w)
+        while i != -1:
+            before = text[i - 1] if i else ""
+            after = text[i + len(w)] if i + len(w) < len(text) else ""
+            if not _wordish(before) and not _wordish(after):
+                return True
+            i = text.find(w, i + 1)
+    return False
+
+
 def looks_like_a_question(tail):
     """Did the session end its turn by asking something?"""
     for row in reversed(tail or []):
@@ -4939,10 +5652,14 @@ def looks_like_a_question(tail):
         if not text:
             continue
         last = text[-400:]
-        return ("?" in last) or any(
-            w in last.lower() for w in
-            ("should i", "shall i", "which ", "confirm",
-             "let me know"
+        return ("?" in last) or hint_hit(
+            last.lower(),
+            # "which " was here until 2026-08-31 and is deliberately gone:
+            # as a whole word it fires on every relative clause, and a real
+            # "which ...?" carries the question mark that is tested above.
+            # It caught nothing that was not already caught. "confirm" now
+            # means the word, not the prefix of "confirmed"/"confirms".
+            ("should i", "shall i", "confirm", "let me know"
              ) + tuple(CFG.get("question_hints") or ()))
     return False
 
@@ -4978,7 +5695,7 @@ def waiting_for_direction(tail):
         low = (row.get("text") or "").lower()
         if not low.strip():
             continue
-        return any(p in low for p in (
+        return hint_hit(low, (
             "nothing in flight", "no work to carry on", "nothing to carry on",
             "handover is already complete", "clean seam", "i'd rather stop",
             "ready to pick up", "queue for the fresh session",
@@ -5007,6 +5724,12 @@ def stall_watch():
         time.sleep(max(5.0, min(45.0, grace / 3.0)))
         try:
             check_stalls()
+        except Exception:
+            pass
+        # The LIMIT on a held acknowledgement. Its own try, so a failure in
+        # either one cannot take the other's turn with it.
+        try:
+            release_stale_verdicts()
         except Exception:
             pass
 
@@ -5146,8 +5869,18 @@ def check_sessions(grace):
             if wait < float(CFG.get("thresholds", {}).get("startup_grace",
                                                           600)):
                 continue
-            if not meta.get("gave_up"):
+            # Said again, further apart each time, for as long as the
+            # window sits there. `gave_up` still means "this one has been
+            # given up on" and is what already_up and launch_guard read;
+            # told_n/told_at are only the cadence.
+            told_n = int(meta.get("told_n") or 0)
+            told_at = float(meta.get("told_at") or 0)
+            gap = float(CFG.get("thresholds", {}).get("startup_grace", 600))
+            gap = min(gap * (2 ** max(0, told_n - 1)), STUCK_WINDOW_TELL_MAX)
+            if not told_n or now_ts - told_at >= gap:
                 meta["gave_up"] = True
+                meta["told_n"] = told_n + 1
+                meta["told_at"] = now_ts
                 save_state()
                 # "never came up" on its own sent everybody looking at the
                 # window, which was alive and working. Say what was waited
@@ -5472,6 +6205,10 @@ def log_handover_decision(path, role, sess, plan, wv=None, lv=None):
         "floor_rise": lv.get("rise"),
         "cycle": lv.get("cycle"), "cycle_turns": lv.get("cycle_turns"),
         "per_turn": wv.get("per_turn"), "worst_turn": wv.get("worst_turn"),
+        "turn_widest": wv.get("turn_widest"),
+        "turn_widest_source": wv.get("turn_widest_source"),
+        "turn_ordinary": wv.get("turn_ordinary"),
+        "turn_ordinary_source": wv.get("turn_ordinary_source"),
         "rest_of_cycle": lv.get("rest_of_cycle"),
         "left_to_wall": lv.get("left"), "turns_left": lv.get("turns_left"),
         "sizeable": lv.get("sizeable"), "estimated": lv.get("estimated"),
@@ -6132,6 +6869,53 @@ def note_debt(path, project, msg, iteration=None):
 
 RESIDENCE_MARKS = ("residence:",)
 
+# Every line the GATE asks for, so prose_of strips exactly what the gate
+# demands and nothing it does not. Built from the marks themselves, so a
+# mark added to the gate is stripped by the same edit that adds it.
+_GATE_LINE = re.compile(
+    r"^\s*[*_#>\-\s]*(?:%s)\s*:"
+    % "|".join(m.rstrip(":").replace(" ", r"\s+")
+               for m in CHECKED_MARKS + RESIDENCE_MARKS
+               + ("debt closed", "debt")), re.I)
+# A line that is only a path or a bullet under one of those markers is part
+# of the evidence too. Deliberately narrow: anything else counts as prose,
+# because over-stripping would UNDERCHARGE the canon, and the whole point of
+# rule 24 is that a gate which lets work through unarmed is worse than one
+# that charges a little too often.
+_GATE_ITEM = re.compile(r"^\s*([*+\-]|\d+[.)]|[A-Za-z]:\\|/)")
+
+
+def prose_of(text):
+    """What a verdict says to the EXECUTOR, with the gate's evidence out.
+
+    Two consumers and one definition (the planner's condition, and the
+    right one): carries_work decides whether the canon rides in front, and
+    hold_verdict decides whether a `done` is worth a wake at all. Two
+    similar-looking rules side by side is how they come to disagree.
+
+    THE BLOCK IS NOT ALWAYS AT THE END, and that is the whole reason this
+    walks the lines instead of cutting at the first marker. Over 433 `done`
+    verdicts it keeps 253 437 characters of prose before the first gate line
+    and 218 159 after it - 46 %, very nearly half - so a cut that keeps only
+    the head throws away almost as much as it saves. Read that way the
+    figure came out at 16 % of verdicts carrying work; read both sides, and
+    with this function rather than an estimate, it is 45 %.
+    """
+    lines = (text or "").splitlines()
+    out, in_block = [], False
+    for ln in lines:
+        if _GATE_LINE.match(ln):
+            in_block = True
+            continue
+        if in_block:
+            # The block ends at the first line that is neither an item of
+            # it nor blank. A blank line inside one is ordinary formatting.
+            if not ln.strip() or _GATE_ITEM.match(ln):
+                continue
+            in_block = False
+        out.append(ln)
+    return "\n".join(out).strip()
+
 _CODE_EXT = (".py", ".html", ".js", ".jsx", ".ts", ".tsx", ".css", ".gd",
              ".bat", ".sh", ".ps1", ".c", ".cpp", ".h", ".hpp", ".java",
              ".go", ".rs", ".rb", ".php", ".sql", ".json", ".yml", ".yaml",
@@ -6235,7 +7019,10 @@ def verdict_gate(path, verdict, feedback):
             "This report changed code, and accepting a code change takes one "
             "more line than Checked: - where the fix LIVES. Write "
             "Residence: <file:function> or the name of the test that now "
-            "holds it.\n\nThis is not paperwork. A fix nobody can point at "
+            "holds it, ON THE SAME LINE as the marker: only what "
+            "follows it up to the newline is read, so a residence laid "
+            "out as a block below is not seen at all - the same trap as "
+            "Debt:.\n\nThis is not paperwork. A fix nobody can point at "
             "is a patch: it works today, the next full run does not produce "
             "it, and the next person finds the symptom back with no record "
             "of what was done. Forty-five such steps piled up on another "
@@ -6471,6 +7258,46 @@ def keep_stopfail_payload(event, path, role):
         return None
 
 
+# Where a client puts the sentence rather than the word. Deliberately not
+# added to ERROR_KEYS: _payload_reason returns the FIRST key it finds, so
+# putting these there would change `where` for every event that has one, and
+# what is wanted is not a different conclusion but the conclusion WITH its
+# diagnosis.
+DETAIL_KEYS = ("error_details", "error_detail", "details", "detail",
+               "body", "response", "raw")
+_DETAIL_MSG = re.compile(r'"message"\s*:\s*"((?:[^"\\]|\\.){3,400})"')
+
+
+def _payload_detail(event):
+    """The diagnosis inside the payload, in a form fit for one journal line.
+
+    NEVER LET AN EDGE PATH RECORD ONLY ITS CONCLUSION is already a rule
+    (§5.37) and the journal was on the wrong side of it. On 2026-08-30 at
+    18:27:43 the line said `invalid_request` - a category - while
+    `prompt is too long: 1000815 tokens > 1000000 maximum` sat in the same
+    payload under `error_details`, a key ERROR_KEYS does not list. The file
+    beside it held the diagnosis and the line that a person reads did not,
+    so the afternoon was spent proving from a JSON file what one line could
+    have said.
+
+    Order: the overflow sentence first, because it is the one whose exact
+    numbers decide something; then any message quoted inside a detail field;
+    then the detail itself, trimmed. Nothing here raises and nothing here is
+    required - a payload with no detail simply has none.
+    """
+    over = overflow_said(event)
+    if over:
+        return "prompt is too long: %d tokens > %d maximum" % over
+    for key in DETAIL_KEYS:
+        v = event.get(key)
+        if not isinstance(v, str) or not v.strip():
+            continue
+        m = _DETAIL_MSG.search(v)
+        text = m.group(1) if m else v
+        return " ".join(text.split())[:200]
+    return ""
+
+
 def stopfail_reason(event, path, role):
     """(what to show, where it came from, where the raw payload was kept)."""
     kept = keep_stopfail_payload(event, path, role)
@@ -6481,7 +7308,92 @@ def stopfail_reason(event, path, role):
         reason = ("the client reported no reason"
                   + (" - the raw payload is in %s" % kept if kept else ""))
         where = "nothing"
+    # THE DIAGNOSIS IS NOT ADDED HERE, and that is deliberate. The first
+    # version of this fix appended it to `reason` - and `reason` is what
+    # `etype` is built from three hundred lines below
+    # (`event.get("error_type") or reason`), so a rate limit whose detail
+    # happened to say "context" would have taken the compaction doorway
+    # instead of the rate handling. The ask was for the diagnosis in the
+    # JOURNAL LINE; widening the string a decision reads was a side effect
+    # nobody asked for. `_payload_detail` is called where the line is built.
     return reason, where, kept
+
+
+# The client's own sentence for "this conversation no longer fits", with the
+# two numbers in it. Measured from the payloads this bridge kept - one from
+# 2026-08-30 18:27:43, under <project>/bridge-logs/<date>/stopfailure/:
+#
+#     "error": "invalid_request",
+#     "error_details": "400 {...\"message\":\"prompt is too long: 1000815 "
+#                      "tokens > 1000000 maximum\"...}"
+#
+# Note WHERE the numbers are: `error_details`, which is not one of
+# ERROR_KEYS, so the journal line for that death said `invalid_request` - a
+# category - while the diagnosis sat one field away. That is why this reads
+# the whole payload rather than a named field.
+OVERFLOW_RE = re.compile(
+    r"prompt is too long:\s*([\d,\s]+?)\s*tokens?\s*>\s*([\d,\s]+?)\s*maximum",
+    re.I)
+
+
+def _strings_in(obj, depth=0):
+    """Every string anywhere in a payload. Bounded, because it is a hook."""
+    if depth > 6:
+        return
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            for out in _strings_in(v, depth + 1):
+                yield out
+    elif isinstance(obj, (list, tuple)):
+        for v in obj[:50]:
+            for out in _strings_in(v, depth + 1):
+                yield out
+
+
+def overflow_said(event):
+    """(size, window) if the client SAID the prompt is too long, else None.
+
+    THE TEXT IS THE KEY, NOT THE CATEGORY. `invalid_request` covers a bad
+    tool schema and a malformed request as readily as an overflow, and
+    treating all of them as "a compaction is starting" would leave a session
+    that is genuinely broken sitting for ten minutes before anyone looked at
+    it. What identifies an overflow is the client naming both numbers, and
+    that sentence also hands over the exact size to record - which the
+    session's own status line cannot, because the reading that matters is
+    the one the API refused, not the one drawn before the turn.
+    """
+    for text in _strings_in(event):
+        m = OVERFLOW_RE.search(text)
+        if not m:
+            continue
+        try:
+            size = int(re.sub(r"[^\d]", "", m.group(1)))
+            window = int(re.sub(r"[^\d]", "", m.group(2)))
+        except (TypeError, ValueError):
+            continue
+        if size and window:
+            return size, window
+    return None
+
+
+def overflow_by_size(sess, path, role):
+    """No sentence, but the session was already too big to summarise.
+
+    The fallback, and deliberately the classic wall rather than a new
+    number: window minus the reserve a compaction needs is the size at which
+    the conversation plus the summariser's prompt plus room for the summary
+    stops fitting. A refusal at or above that is an overflow whatever the
+    client called it. Below it, it is not - and is handled as it always was.
+    """
+    size = int((sess or {}).get("context_tokens") or 0)
+    window = int((sess or {}).get("window") or 0)
+    if not size or not window or (sess or {}).get("window_observed") is False:
+        return None
+    if size >= max(0, window - RESERVED_TOKENS):
+        return size, window
+    return None
 
 
 def note_stopfail(path, role, reason, kept):
@@ -6581,6 +7493,122 @@ def note_task_sent(path, text="", mid_turn=False):
         save_state()
 
 
+# How long to wait before telling a planner it owes the executor work.
+# MEASURED over the whole journal, 960 firings of that branch: the task
+# followed the verdict after a median of 21 s and a p75 of 40 s. At 60 s,
+# 787 of the 960 (82%) had already gone out and the message would have been
+# pure cost; 90 s buys two more points and 120 s the same two, so the curve
+# has flattened by here and what is left past it is the real case the branch
+# exists for. Chosen at the knee, not at a round number: later would delay a
+# genuinely silent planner for nothing.
+NUDGE_AFTER_VERDICT_SEC = 60
+
+
+def note_nudge(path, n, outcome, detail):
+    """Record what the nudge DID - fired, held or failed - symmetrically.
+
+    THE ASYMMETRY THIS CLOSES. The branch that chose to stay quiet
+    journalled a line; the branch that woke the planner journalled nothing.
+    So the record showed this nudge quieter than it was - wrong in the
+    FLATTERING direction, which is the worse way for a record to be wrong,
+    because nobody goes looking behind good news.
+
+    Measured 2026-08-31: the planner received five nudges after 15:10:50 -
+    iterations 70, 71, 74, 76 and 77 - and the journal held not one line
+    about any of them. The only witness was the RECEIVING side, because no
+    witness existed on this one. Report 78 read the record and concluded
+    "the nudge has been silent since 16:25", which is precisely the belief
+    a handoff exists to stop being carried into tomorrow. The key that
+    reading came from, `acted:nudge:<path>`, belongs to a DIFFERENT
+    mechanism - assess()'s nudge to an idle EXECUTOR - and says nothing
+    about this one at all.
+
+    THIS IS NOT A LINE PER DELIVERY. That was considered and rejected
+    earlier, and stays rejected. It is one line per decision of one branch
+    that fires at most once per iteration, and only when the verdict
+    carried no work - so it is bounded by the review loop itself.
+
+    The tally is what tomorrow's measurement reads. Counting firings out of
+    journal prose would make the number depend on wording; a counter that
+    both branches update cannot drift apart from what happened, and it
+    records `failed` separately because a delivery that did not go is not a
+    nudge the planner was spared.
+    """
+    key = norm(path)
+    with _lock:
+        tally = (STATE.setdefault("nudge_tally", {})
+                 .setdefault(key, {"sent": 0, "held": 0, "failed": 0,
+                                   "last": "", "at": 0.0}))
+        tally[outcome] = int(tally.get(outcome) or 0) + 1
+        tally["last"] = outcome
+        tally["at"] = time.time()
+        save_state()
+    store.journal("loop", detail, project_name(path), "planner", "log",
+                  project_dir=path if os.path.isdir(path) else None)
+
+
+def nudge_for_task(path, n, since):
+    """Tell the planner it owes work - but only if it still does.
+
+    5.17: a decision taken at one moment and acted on at another must be
+    re-asked at the moment of asserting. This branch used to fire 1.5 s
+    after the verdict, which is before any human-paced planner could
+    possibly have answered, so it told the planner what the planner was
+    already doing. Every one of those cost a full planner window - the
+    price is the size of the window a message lands in, not the size of
+    the message.
+
+    The one real case is untouched: a planner that accepted and then went
+    quiet still has no task recorded after `since`, and still gets told.
+    Since 2026-08-31 it is not even scheduled when the verdict CARRIED the
+    work - carries_work says so at the moment of the verdict, so a planner
+    that wrote the next piece into its own feedback is never asked for it.
+    BOTH outcomes are in the record, and that took two goes. Silence was
+    journalled from the start - a message we chose not to send is a
+    decision, and §5.26's rule that the chat is a telephone and the journal
+    is the record cuts both ways. Firing was not, until 2026-08-31, so the
+    record could only ever show this branch quieter than it was. Every exit
+    goes through note_nudge() now; read its docstring before adding a
+    sixth.
+    """
+    try:
+        sent = float((STATE.get("last_task") or {}).get(norm(path)) or 0)
+        if sent > since:
+            note_nudge(path, n, "held",
+                       "Iteration %d accepted; the planner had already sent "
+                       "the next task, so it was not told to do what it had "
+                       "done. Waited %ds."
+                       % (n, NUDGE_AFTER_VERDICT_SEC))
+            return
+        # What is recorded is what DELIVER answered, not what this branch
+        # intended. A nudge that did not go is not a planner wake saved -
+        # writing "sent" for it would be the same family of lie in a
+        # smaller size.
+        went = deliver(path, "planner",
+                       "You accepted iteration %d. The loop is still on, so "
+                       "the executor is waiting for its next piece of work. "
+                       "Give it one with the task tool. If there is genuinely "
+                       "nothing left to do, answer the next report with the "
+                       "'stop' verdict instead and the loop will be switched "
+                       "off." % n,
+                       {"kind": "info"})
+        note_nudge(path, n, "sent" if went else "failed",
+                   "Iteration %d accepted with no task after it, so the "
+                   "planner was asked for one - and the asking cost a "
+                   "planner wake. %s Waited %ds."
+                   % (n,
+                      "Delivered." if went
+                      else "IT DID NOT GO - the planner was not asked after "
+                           "all, and still owes the work.",
+                      NUDGE_AFTER_VERDICT_SEC))
+    except Exception as exc:
+        # A timer thread that raises takes its message with it and says
+        # nothing. Nothing on this path may be the reason a pair stops.
+        store.journal("loop", "Could not decide whether to ask the planner "
+                      "for work after iteration %d: %s" % (n, exc),
+                      project_name(path), "planner", "warn")
+
+
 def task_arrived_mid_turn(path):
     """Was the executor in the middle of something when this arrived?"""
     try:
@@ -6627,6 +7655,38 @@ def last_movement(path):
     return when
 
 
+def executor_wrote_recently(path, quiet):
+    """POSITIVE evidence that this executor has been writing. Not "not frozen".
+
+    Returns the epoch of the newest entry only a living turn writes, or 0.
+
+    WHY NOT executor_is_working(). That one answers True when it cannot
+    tell - no session id, no transcript, an unreadable file - and that is
+    right where it is used: wrongly saying "working" costs check_stalls one
+    skipped look and tier 3 is still behind it. Here the cost runs the
+    other way. clinch() is tier 1, and a tier 1 that stands down whenever a
+    transcript cannot be found has stopped lying by also stopping
+    catching, which is worse than the version it replaced. So this fails
+    CLOSED: no evidence is not evidence of work, and the clinch may fire.
+
+    What it asks is the question 5.38 and 5.40 arrived at the hard way:
+    not whether the file grew - the death grows it too - but whether an
+    `assistant`/`user` entry that is not the api error was written inside
+    `quiet`.
+    """
+    try:
+        sess = best_session(path, "executor") or {}
+        sid = last_session_id(path, "executor") or sess.get("session_id")
+        if not sid:
+            return 0
+        tp = sessions.transcript_of(sid)
+        if not tp or not os.path.isfile(tp):
+            return 0
+        return transcript_moved_after(tp, time.time() - float(quiet))
+    except Exception:
+        return 0
+
+
 def clinch(path, sit, grace=None):
     """Tier 1: both halves waiting for each other, and nothing in flight.
 
@@ -6663,6 +7723,37 @@ def clinch(path, sit, grace=None):
         return None                      # a missing window is another guard
     if any(looks_busy((roles.get(r) or {}).get("tail") or [])
            for r in MANAGED_ROLES):
+        return None
+    # A LONG TURN IS MOVEMENT WITH NEITHER OF THE EVENTS last_movement
+    # COUNTS. It counts a finished Stop and a task going out and nothing
+    # else - right about status lines and heartbeats, which tick while
+    # nothing happens, and wrong about a turn: the executor is writing and
+    # will not fire Stop until it finishes, so last_movement reports the
+    # START of the turn and every turn longer than clinch_grace (900s)
+    # reads as a deadlock. On this project that is the ordinary shape of a
+    # working turn, not an exception. Measured 2026-08-31: three
+    # announcements for one pair (11:03:37, 17:20:54, 18:16:12), and at
+    # each one the executor's transcript held a living entry 0s, 5s and
+    # 51s earlier - all inside stall_grace.
+    #
+    # looks_busy is not that witness and cannot be: it asks whether the
+    # LAST entry is a tool that has not returned, so between two tool calls
+    # it answers "not busy" of a session working without pause.
+    #
+    # THIS IS NOT A QUIETER TIER, which is the whole condition it was
+    # allowed under. A real clinch has both halves idle at their prompts,
+    # so neither transcript is moving and this does not fire on it; and the
+    # witness fails CLOSED, so absence of evidence still lets the clinch
+    # through. The same substitution 5.25 made in check_stalls, which never
+    # reached here.
+    #
+    # It opens no window on the inflight side either: the guard above
+    # already returns on sit["inflight"], which IS inflight_live - the same
+    # record, four lines earlier. A leaked record silencing tiers 1 and 2
+    # for up to INFLIGHT_MAX_SEC is today's behaviour and unchanged by
+    # this; what covers it is check_processes, whose floor is 311s.
+    if executor_wrote_recently(path, float(
+            CFG.get("thresholds", {}).get("stall_grace", 180))):
         return None
     moved = last_movement(path)
     if not moved or time.time() - moved < grace:
@@ -7354,6 +8445,21 @@ EARLY_ROTATE_TURNS = 2
 
 HANDOVER_FAILS_BEFORE_HOLD = 2
 
+# The longest gap between two tellings about a window that opened and never
+# became a session. The tellings start one startup_grace apart and double,
+# so a window stuck for an evening is named at roughly 10, 20, 40 and 80
+# minutes and hourly after that.
+#
+# It used to be said ONCE, ever, and 2026-08-30 is what that cost: an
+# executor window opened at 18:27:46 and did not start until 21:47:23. The
+# accurate line went out at 18:38:03 and never again, while the third tier
+# sent fifteen messages in those three hours about a clinch that was not
+# happening. Repeating is not noise here - the pair does nothing at all
+# until a person walks to that window - and the message carries the minutes,
+# so notify_seen_recently sees a different fact each time and does not fold
+# them.
+STUCK_WINDOW_TELL_MAX = 3600
+
 LOST_TURN_TRIES = 3
 LOST_TURN_BACKOFF = 2.0
 
@@ -7489,7 +8595,7 @@ def handle_wall_hit(path, role, ref):
                "Replacing it now with the handoff; the new window needs its "
                "development-channels dialog answered once." % project,
                path=path)
-        threading.Thread(target=rotate_executor,
+        threading.Thread(target=rotate_executor, name="rotate:executor",
                          args=(path, "hit the wall"), daemon=True).start()
     else:
         notify("crash", "%s: the session hit the context wall - too long to "
@@ -7497,42 +8603,75 @@ def handle_wall_hit(path, role, ref):
                "in the panel, or send /rotate here." % project, path=path)
 
 
-def wait_for_compaction(path, role, sess):
+def wait_for_compaction(path, role, sess, overflow=None):
     """Is this prompt-too-long the client's own compaction talking?
 
     True means "stand aside, it is being dealt with"; the caller does not
-    touch the session. False means there is no compaction to wait for and
-    the wall handling runs at once, exactly as it always did.
+    touch the session. False means there is nothing to wait for and the wall
+    handling runs at once, exactly as it always did.
 
-    The witness is `compaction_pending`, written by the PreCompact branch and
-    cleared the moment a smaller size is read back - so it says "a compaction
-    started here and has not landed yet" and nothing else. It is not a guess
-    about what the client is doing: PreCompact is the client telling us.
+    TWO WAYS IN, AND THE SECOND IS WHY THIS WAS REWRITTEN.
 
-    A record older than COMPACT_RECOVERY_SEC is not a compaction in progress,
-    it is one that already failed and was never cleared, so it grants nothing.
+    `compaction_pending`, written by the PreCompact branch, is the client
+    announcing a compaction before the refusal - the planner's 03:43 on
+    2026-08-30, PreCompact 03:43:05 -> StopFailure 03:43:07 -> landed
+    03:45:48, 709k down to 66k, nothing replaced. That path is untouched.
+
+    The other way is the one the executor took at 18:27:43 the same day, and
+    it had no way in at all: the API answered `prompt is too long: 1000815
+    tokens > 1000000 maximum` and NO PreCompact ever arrived - not before,
+    not after. The only witness this function knew about could not exist,
+    because on a reactive compaction the refusal is what comes first. So it
+    returned False, handle_wall_hit ran in the same second, and a session
+    that had compacted at 998 851 the previous day was killed 2-3 seconds
+    into its own recovery. Rule 30, in its least obvious form: not a witness
+    that the event forged, but a witness the event makes impossible.
+
+    Hence `overflow` - the size the API refused, read out of the client's own
+    sentence by overflow_said. A refusal that names both numbers IS the
+    compaction starting on this client, and needs no announcement.
+
+    A pending record older than COMPACT_RECOVERY_SEC is not a compaction in
+    progress, it is one that already failed and was never cleared, so it
+    grants nothing.
     """
     pend = (sess or {}).get("compaction_pending") or {}
     at = float(pend.get("at") or 0)
-    if not at or time.time() - at > COMPACT_RECOVERY_SEC:
+    announced = bool(at) and time.time() - at <= COMPACT_RECOVERY_SEC
+    if not announced and not overflow:
         return False
     key = "%s|%s" % (norm(path), role)
+    if announced:
+        rec = {"at": at, "role": role, "via": "precompact",
+               "tokens": int(pend.get("tokens") or 0),
+               "session": pend.get("session") or ""}
+        said = ("the API refused the turn as too long while a compaction was "
+                "already under way (started %s, carrying %dk)"
+                % (time.strftime("%H:%M:%S", time.localtime(at)),
+                   int(pend.get("tokens") or 0) // 1000))
+    else:
+        # The size that was REFUSED, not the size drawn before the turn: the
+        # status line describes where the turn started and the refusal
+        # describes where it ended, and it is the second one a compaction has
+        # to deal with. It is also what note_compaction_failed will record if
+        # this never lands, so taking the smaller number here would teach the
+        # ceiling a size that nothing actually failed at.
+        rec = {"at": time.time(), "role": role, "via": "prompt_too_long",
+               "tokens": int(overflow[0]),
+               "session": (sess or {}).get("session_id") or ""}
+        said = ("the API refused the turn as too long - %d tokens against a "
+                "%d maximum - and on this client that refusal is what STARTS "
+                "the compaction, not what ends the session"
+                % (overflow[0], overflow[1]))
     with _lock:
         watch = STATE.setdefault("compact_wait", {})
         if key not in watch:
-            watch[key] = {"at": at, "role": role,
-                          "tokens": int(pend.get("tokens") or 0),
-                          "session": pend.get("session") or ""}
+            watch[key] = rec
             save_state()
     store.journal("loop",
-                  "%s / %s: the API refused the turn as too long while a "
-                  "compaction was already under way (started %s, carrying "
-                  "%dk). That is what a compaction looks like from here on "
-                  "this client, so the session is left alone to finish it - "
+                  "%s / %s: %s. The session is left alone to finish it - "
                   "checked again in %d min."
-                  % (project_name(path), role,
-                     time.strftime("%H:%M:%S", time.localtime(at)),
-                     int(pend.get("tokens") or 0) // 1000,
+                  % (project_name(path), role, said,
                      int(COMPACT_RECOVERY_SEC // 60)),
                   project_name(path), role, "log",
                   project_dir=path if os.path.isdir(path) else None)
@@ -7589,7 +8728,15 @@ def check_compaction(path):
             continue
         role = rec.get("role") or key.rsplit("|", 1)[-1]
         sess = compacting_session(path, role, rec.get("session"))
-        landed = not (sess.get("compaction_pending") or {})
+        if rec.get("via") == "prompt_too_long":
+            # No announcement was ever made, so there is no announcement to
+            # go missing: what says the summary landed is the session reading
+            # smaller than the size that was refused. Same test as the one
+            # that clears compaction_pending, and the same function.
+            landed = summary_landed(sess.get("context_tokens"),
+                                    rec.get("tokens"))
+        else:
+            landed = not (sess.get("compaction_pending") or {})
         if landed:
             with _lock:
                 (STATE.get("compact_wait") or {}).pop(key, None)
@@ -7777,7 +8924,7 @@ def check_lost_turn(path):
 #     fail the check for a reason that has nothing to do with the work.
 
 CHECK_SUITES = ("handover", "archive", "search", "wall_handover",
-                "multipair", "cases")
+                "multipair", "cases", "wake_sim")
 CHECK_TIMEOUT = 1200
 CHECK_RUNNING = {}
 _check_lock = threading.Lock()
@@ -8075,6 +9222,234 @@ def clear_silence(path, project=""):
     return run
 
 
+# How long a held acknowledgement may wait for a wake that is coming anyway.
+#
+# MEASURED, and the number has two independent routes to it. Route one: over
+# 332 work-free `done`/`stop` verdicts - work-free by prose_of above, so the
+# population is the one this constant applies to - read from the planners'
+# own transcripts and timed against the EXECUTOR's own Stop hook, a witness
+# that belongs to the role it is asked about (5.30) and one the verdict
+# cannot have produced: p50 392 s, p75 1 160 s, p90 3 629 s. A turn ENDS
+# after the wake that started it, so the real wake is sooner still and this
+# is conservative in the direction that matters. Route two: 3 600 s is
+# already this file's idea of "too long to still be real" (INFLIGHT_MAX_SEC),
+# and one such idea is worth more than fitting a percentile to four digits -
+# the p90 is 3 629 and the difference is noise.
+#
+# Counted at 3 600 s: 298 of the 332 ride free (89.8 %), 34 travel alone
+# (10.2 %). So nine holds in ten ride free and one in ten travels alone -
+# and
+# travelling alone is the entire point of having a limit, because held with
+# no limit is dropped with extra steps, which is the defect this pair spent
+# four turns finding.
+HELD_VERDICT_MAX_SEC = 3600
+
+# What a delayed acknowledgement says about itself when it finally arrives.
+# It names its own report, so age cannot make it ambiguous, and it says why
+# it is late - a reader who is not told will read it as a new instruction.
+HELD_VERDICT_HEAD = ("Earlier, and held back until now because it asked for "
+                     "nothing to be done - it needs no answer of its own:")
+
+
+def held_record(path):
+    """The held body and its counters. One container, so one STATE_PATHS row."""
+    return dict((STATE.get("held_verdict") or {}).get(norm(path)) or {})
+
+
+def hold_verdict(path, n, body):
+    """Keep a `done` whose words the executor would not act on.
+
+    Rule 34's arithmetic on this project's own numbers. A verdict that only
+    says "accepted" wakes the executor; the executor ends a turn; every turn
+    end fires the Stop hook; every Stop hook is a report; the report wakes
+    the planner. That is a ROUND TRIP spent on an acknowledgement. The idle
+    damper cannot catch it either: IDLE_TURN_CHARS is 120 and 382 of 433
+    `done` bodies measured here are longer, so trivial_report() never calls
+    the exchange empty.
+
+    HELD IS NOT DROPPED, and the difference has to be visible or it is a
+    distinction without one. So it is journalled going in, journalled going
+    out, counted where the panel can see it, released by the next wake this
+    pair was getting anyway, and released ON ITS OWN at the limit above
+    whether or not that wake ever comes.
+
+    A second one arriving while the first still waits is APPENDED, never
+    replaced: two acknowledgements are two things the planner said, and
+    keeping the newer by discarding the older would be exactly the silent
+    loss this exists to avoid.
+    """
+    path = norm(path)
+    # It arrives late, so it has to say so in its own first line. A reader
+    # who is not told reads a stale "accepted" as a fresh instruction, and
+    # the whole of rule 34 is about what the receiver does differently.
+    body = HELD_VERDICT_HEAD + "\n\n" + body
+    with _lock:
+        rec = (STATE.setdefault("held_verdict", {})
+               .setdefault(path, {"body": "", "since": 0.0,
+                                  "n": 0, "ridden": 0, "alone": 0}))
+        if rec.get("body"):
+            rec["body"] = rec["body"] + "\n\n" + body
+        else:
+            rec["body"] = body
+            rec["since"] = time.time()
+        rec["n"] = int(rec.get("n") or 0) + 1
+        held_now = len(rec["body"])
+        save_state()
+    store.journal("verdict",
+                  "Iteration %d accepted with nothing in it for the executor, "
+                  "so its words are held rather than spent on a wake of their "
+                  "own - rule 34. They ride with the next thing sent to the "
+                  "executor, or go on their own after %d min. %d character%s "
+                  "waiting."
+                  % (n, HELD_VERDICT_MAX_SEC // 60, held_now,
+                     "" if held_now == 1 else "s"),
+                  project_name(path), "executor", "log",
+                  project_dir=path if os.path.isdir(path) else None)
+
+
+def take_held_verdict(path):
+    """Lift the held text out to ride with something. A pure move."""
+    path = norm(path)
+    with _lock:
+        rec = (STATE.get("held_verdict") or {}).get(path) or {}
+        body = rec.get("body") or ""
+        if body:
+            rec["body"] = ""
+            rec["since"] = 0.0
+            save_state()
+    return body
+
+
+def put_held_verdict_back(path, body):
+    """The ride fell through. Nothing may be lost by a failed delivery."""
+    if not body:
+        return
+    path = norm(path)
+    with _lock:
+        rec = (STATE.setdefault("held_verdict", {})
+               .setdefault(path, {"body": "", "since": 0.0,
+                                  "n": 0, "ridden": 0, "alone": 0}))
+        rec["body"] = (body + "\n\n" + rec["body"]) if rec.get("body") else body
+        rec["since"] = rec.get("since") or time.time()
+        save_state()
+
+
+def note_held_ridden(path, how, kind):
+    """It went. Say so, because a hold nobody can see is a drop."""
+    path = norm(path)
+    with _lock:
+        rec = (STATE.get("held_verdict") or {}).get(path)
+        if rec is not None:
+            rec[how] = int(rec.get(how) or 0) + 1
+            save_state()
+    store.journal("verdict",
+                  "Held verdict words went to the executor %s."
+                  % ("with the %s that woke it anyway" % kind
+                     if how == "ridden" else
+                     "on their own - nothing was sent to it within %d min"
+                     % (HELD_VERDICT_MAX_SEC // 60)),
+                  project_name(path), "executor", "log",
+                  project_dir=path if os.path.isdir(path) else None)
+
+
+def release_stale_verdicts():
+    """The LIMIT. Held is not dropped, and this is the half that proves it.
+
+    Deliberately not a nudge and not a decision: it moves words the planner
+    already wrote, to the half they were already addressed to. Nothing here
+    writes a verdict or a report, which is the boundary revive_lost_turn
+    keeps too.
+    """
+    with _lock:
+        paths = [p for p, r in (STATE.get("held_verdict") or {}).items()
+                 if (r or {}).get("body")]
+    for path in paths:
+        rec = held_record(path)
+        since = float(rec.get("since") or 0)
+        if not since or time.time() - since < HELD_VERDICT_MAX_SEC:
+            continue
+        body = take_held_verdict(path)
+        if not body:
+            continue
+        if deliver(path, "executor", body, {"kind": "verdict"}):
+            note_held_ridden(path, "alone", "")
+        else:
+            put_held_verdict_back(path, body)
+
+
+def hand_back_verdict(path, n, feedback, extra="", track=True,
+                      may_hold=False):
+    """Put the planner's own words in front of the executor. Returns
+    hook_output for the case where there is no channel to put them in.
+
+    WHY THIS IS A FUNCTION AND NOT A BRANCH. It used to live inside the
+    branch that catches "anything not stop/done/wait" - which is `continue`
+    and nothing else - so a `done` verdict's text was built nowhere and sent
+    nowhere. Measured on this project's own executor transcript, reports
+    46-70: all 8 `continue` verdicts arrived, all 17 `done` and `stop` ones
+    did not. The planner had been writing decisions into `done` feedback and
+    watching them vanish, and the journal said "delivered" every time -
+    because the journal records what the bridge did with the REPORT, not
+    what reached the window.
+
+    `extra` rides in the SAME message. On a `done` with a task that landed
+    mid-turn there were two 1.5 s timers - one for the task, one for the
+    body - racing into one channel; folding them costs one wake instead of
+    two and takes the race with it (rule 34).
+    """
+    body = ("The planner reviewed report %d. Its findings (facts about "
+            "the work, act on them):\n%s" % (n, feedback[:9000]))
+    if extra:
+        body += "\n\n" + extra
+    # Two ways to hand the verdict back, and the choice matters for an
+    # all-night run: keeping the turn alive from this hook is capped at
+    # eight consecutive continuations, after which the session simply
+    # stops and waits for a human. Channel injection has no such cap and
+    # wakes an idle session just as well, so it is the primary path -
+    # delivered a moment after this hook returns, once the turn has
+    # actually ended. additionalContext stays as the fallback for when
+    # the executor has no channel.
+    if channel_for(path, "executor"):
+        # 2b, and only here. `may_hold` is passed by the `done` path alone:
+        # a `continue` is a verdict the executor is BLOCKED on and waiting
+        # for by name, so holding one would stop the work to save a wake,
+        # which is the trade rule 34 exists to refuse in the other
+        # direction. `extra` means a task is riding along, so there is real
+        # work in the message whatever the verdict says. And with no
+        # channel there is nothing to save: the body goes back on the Stop
+        # hook that is already blocked, which costs no wake at all.
+        if may_hold and not extra and not carries_work("verdict", feedback):
+            hold_verdict(path, n, body)
+            return None
+        threading.Timer(1.5, deliver,
+                        args=(path, "executor", body,
+                              {"kind": "verdict"})).start()
+        # `track` writes STATE["awaiting"], which is what makes
+        # check_stalls re-send a verdict the executor never picked up.
+        # It is deliberately NOT set for `done`, and the reason is a
+        # coupling this change uncovered rather than created: assess()
+        # returns early on `verdict_in_flight` for the WHOLE pair, so a
+        # verdict travelling to the executor also stands the PLANNER
+        # down - an executor's fact used as the planner's alibi, the
+        # shape of 5.30. It was harmless only because `done` never
+        # delivered anything, and the first thing to notice was
+        # test_wall_handover's "assess replaces the planner alone".
+        # Un-coupling it means reordering the tiers of assess(), which
+        # is not a change to make on the way past - the planner has
+        # been told. Until it is decided, a `done` verdict is delivered
+        # once and not re-sent: strictly more than the nothing it used
+        # to be, and the three tiers still cover a pair that stops.
+        if track:
+            with _lock:
+                STATE.setdefault("awaiting", {})[path] = {
+                    "since": time.time(), "iteration": n,
+                    "body": body, "nudges": 0}
+                save_state()
+        return None
+    return {"hookSpecificOutput": {"hookEventName": "Stop",
+                                   "additionalContext": body}}
+
+
 def run_review(event, path, lp, msg, project, role):
     """Deliver the report, wait for the verdict. Returns hook_output or None."""
     hook_output = None
@@ -8340,24 +9715,42 @@ def run_review(event, path, lp, msg, project, role):
             notify("verdict_changes", "%s: iteration %d accepted; a task "
                    "that arrived mid-turn is being handed over again."
                    % (project, n), level="silent")
-            threading.Timer(1.5, deliver, args=(
-                path, "executor",
-                "This was delivered while your last turn was still running, "
-                "so it was never picked up. It is still the work in hand:"
-                "\n\n%s" % held.get("text", ""),
-                {"kind": "task"})).start()
+        elif carries_work("verdict", feedback):
+            # THE WORK IS IN THE VERDICT, so there is nothing to ask for.
+            # Since rule 34 that is where the next piece belongs, and this
+            # branch was measured on a world where a `done` delivered no
+            # words at all - work in a verdict could not physically arrive,
+            # so `last_task` was the only witness there was. That world
+            # ended when the body started being delivered; rule 33, on a
+            # measurement three hours old. Counted on 371 firings of the
+            # 60 s form: 130 of them (35 %) go, and the case the branch
+            # lives for keeps its own - of 195 acceptances with no task
+            # after them, 82 carried the work themselves and 113 carried
+            # nothing, and all 113 still fire.
+            #
+            # Known at the moment of the verdict, exactly like the hold,
+            # and by the SAME predicate - so there is no delay to tune and
+            # nothing new on the path.
+            notify("verdict_changes", "%s: iteration %d accepted; the next "
+                   "piece was written into the verdict, so nothing is being "
+                   "asked for." % (project, n), level="silent")
         else:
             notify("verdict_changes", "%s: iteration %d accepted. The loop "
                    "stays on; the planner is being asked for the next piece."
                    % (project, n), level="silent")
-            threading.Timer(1.5, deliver, args=(
-                path, "planner",
-                "You accepted iteration %d. The loop is still on, so the "
-                "executor is waiting for its next piece of work. Give it one "
-                "with the task tool. If there is genuinely nothing left to "
-                "do, answer the next report with the 'stop' verdict instead "
-                "and the loop will be switched off." % n,
-                {"kind": "info"})).start()
+            threading.Timer(NUDGE_AFTER_VERDICT_SEC, nudge_for_task,
+                            args=(path, n, time.time())).start()
+        # THE PLANNER'S WORDS GO WITH IT. `done` means "accepted, here is
+        # the next piece", and since rule 34 the next piece is usually
+        # written in the feedback itself - so dropping it lost the work,
+        # silently. A held task rides in the same message rather than in
+        # a second timer racing this one into the same channel.
+        hook_output = hand_back_verdict(
+            path, n, feedback,
+            ("This was delivered while your last turn was still "
+             "running, so it was never picked up. It is still the work "
+             "in hand:\n\n%s" % held.get("text", "")) if held else "",
+            track=False, may_hold=True)
     elif verdict == "wait":
         touch_session(event, state="waiting on a process")
         # "wait" answers two different situations and they need opposite
@@ -8401,29 +9794,7 @@ def run_review(event, path, lp, msg, project, role):
     else:
         notify("verdict_changes", "%s iteration %d: %s"
                % (project, n, feedback[:200]))
-        body = ("The planner reviewed report %d. Its findings (facts about "
-                "the work, act on them):\n%s" % (n, feedback[:9000]))
-        # Two ways to hand the verdict back, and the choice matters for an
-        # all-night run: keeping the turn alive from this hook is capped at
-        # eight consecutive continuations, after which the session simply
-        # stops and waits for a human. Channel injection has no such cap and
-        # wakes an idle session just as well, so it is the primary path -
-        # delivered a moment after this hook returns, once the turn has
-        # actually ended. additionalContext stays as the fallback for when
-        # the executor has no channel.
-        if channel_for(path, "executor"):
-            threading.Timer(1.5, deliver,
-                            args=(path, "executor", body,
-                                  {"kind": "verdict"})).start()
-            with _lock:
-                STATE.setdefault("awaiting", {})[path] = {
-                    "since": time.time(), "iteration": n,
-                    "body": body, "nudges": 0}
-                save_state()
-        else:
-            hook_output = {"hookSpecificOutput": {
-                "hookEventName": "Stop",
-                "additionalContext": body}}
+        hook_output = hand_back_verdict(path, n, feedback)
     return hook_output
 
 
@@ -8502,8 +9873,24 @@ def handle_event(event):
                     hist = sess.setdefault("turn_costs", [])
                     hist.append(cur - last)
                     del hist[:-5]
+                    # ...and into the pair's own history, which outlives the
+                    # session. The five above are what the panel shows and
+                    # what wall_view averages; they are not a history, and
+                    # "how big has a turn been here" cannot be asked of
+                    # them. note_turn_cost keeps the last TURN_SAMPLE_KEEP
+                    # per pair, with the session that produced the biggest
+                    # one written down beside it.
+                    _turn_cost = cur - last
+                else:
+                    _turn_cost = 0
                 sess["last_stop_tokens"] = cur
                 save_state()
+            if _turn_cost:
+                # Outside the lock it took above: note_turn_cost takes it
+                # itself, and taking it twice around a save_state is how a
+                # tick ends up waiting on somebody else's disk.
+                note_turn_cost(path, role, _turn_cost,
+                               sess.get("session_id") or "")
 
         _, lp = loop_state(path)
         if role == "executor" and not lp.get("active") and msg:
@@ -8591,7 +9978,7 @@ def handle_event(event):
                     hook_output = {"continue": False,
                                    "stopReason": "Bridge: context ceiling - "
                                                  "rotating this session."}
-                    threading.Thread(target=rotate_executor,
+                    threading.Thread(target=rotate_executor, name="rotate:executor",
                                      args=(path, "headroom spent at %d%%"
                                            % pct), daemon=True).start()
                 else:
@@ -8654,8 +10041,17 @@ def handle_event(event):
         # mean what it says.
         note_stopfail(path, role, reason, kept)
         ref = sess if sess.get("model") else best_session(path, role)
-        text = ("%s / %s stopped with an error: %s%s"
+        # Conclusion, then diagnosis, then where it was read from. §5.37
+        # says never let an edge path record only its conclusion; the kept
+        # payload was already the other half of that, but the line a person
+        # reads was not, and on 2026-08-30 that cost an afternoon. Skipped
+        # when the reason already says it, so a client that words its error
+        # fully is not made to say everything twice.
+        _diag = _payload_detail(event)
+        text = ("%s / %s stopped with an error: %s%s%s"
                 % (project, role, reason,
+                   "" if not _diag or _diag.lower() in reason.lower()
+                   else " - %s" % _diag,
                    "" if where in ("nothing", None) else " [%s]" % where))
         model = (ref.get("model") or "?").lower()
         if "invalid" in etype or "context" in etype:
@@ -8665,7 +10061,19 @@ def handle_event(event):
             # holds the wall handling back while the client summarises;
             # check_compaction runs it later if the summary never lands.
             # The measurement is in COMPACT_RECOVERY_SEC.
-            if not wait_for_compaction(path, role, sess):
+            #
+            # WHAT DECIDES IS THE TEXT AND THE SIZE, NOT THE CATEGORY. The
+            # branch is still entered on the category, because that is how
+            # this payload is sorted from a rate limit - but the category is
+            # only the doorway. `invalid_request` is also what a malformed
+            # request answers, and standing aside for ten minutes over one of
+            # those would be a fault of its own. So: the client's own
+            # sentence with both numbers in it (overflow_said), and failing
+            # that, a session already at or past the size where a compaction
+            # stops fitting (overflow_by_size). Neither - then it is not an
+            # overflow, and the wall handling runs at once as it always did.
+            over = overflow_said(event) or overflow_by_size(sess, path, role)
+            if not wait_for_compaction(path, role, sess, over):
                 handle_wall_hit(path, role, ref)
         elif "rate" in etype:
             pconf = store.project_config(CFG, path)
@@ -8675,7 +10083,7 @@ def handle_event(event):
             if role == "executor" and nxt:
                 notify("model_dropped", "%s: rate limit on %s - dropping the "
                        "executor to %s." % (project, sess.get("model"), nxt))
-                threading.Thread(target=rotate_executor,
+                threading.Thread(target=rotate_executor, name="rotate:executor",
                                  args=(path, "rate limit", nxt),
                                  daemon=True).start()
             else:
@@ -8695,9 +10103,47 @@ def handle_event(event):
         store.snapshot_transcript(path, event.get("session_id"),
                                   event.get("transcript_path"))
         remap_archive(path, "a pre-compaction snapshot was taken")
-        calib_miss(model, path, ref.get("context_pct"),
+        # THE NUMBERS COME FROM THE SESSION THAT COMPACTED. Only the model
+        # may fall back to a neighbour, because that is a label for the
+        # calibration key and both windows of a role carry the same one.
+        #
+        # `ref` exists for a real case - PreCompact can arrive from a
+        # session the status line has not described yet - but it answers
+        # "the freshest record of this role on this project", and that is
+        # a different session whenever two windows of one role are live.
+        # This project had exactly that all day on 2026-08-30 (640 refused
+        # channel registrations, two planner windows, 5.43), and it cost:
+        #
+        #   03:43:05  PreCompact from session 77520958, which was carrying
+        #             999,870 and compacted down to 65,517 - an ordinary
+        #             compaction at the ordinary place.
+        #   recorded  709,646, which was session 179bb1bd's size at 03:37.
+        #             Exactly, to the token.
+        #
+        # So that pair's calibration key - there is one per model and per
+        # project path, and this was the 1M-context entry for the project
+        # the two windows belonged to - was left
+        # with compact_samples [709646] and a point of 709,646 that no
+        # session ever compacted at. At 11:48 the OTHER session - the one
+        # the number had been taken from, which had never compacted at all
+        # - was carrying 963k, read as 253k past a point that "never
+        # fired", and was handed over. plan_for was right on the input it
+        # was given; the input was a measurement of somebody else.
+        #
+        # A sample the bridge cannot attribute is not written. No number is
+        # better than another session's number: compaction_point anchors on
+        # the newest sample, so one wrong entry decides everything until a
+        # real one displaces it.
+        at = sess.get("context_tokens")
+        pct_now = sess.get("context_pct")
+        if not at:
+            store.journal("loop", "Compaction fired but this session has no "
+                          "size on record yet - no sample written, because a "
+                          "neighbouring session's size is not a measurement "
+                          "of this one", project, role, "log",
+                          project_dir=path)
+        calib_miss(model, path, pct_now,
                    "PreCompact fired - estimate was high")
-        at = ref.get("context_tokens")
         with _lock:
             key = "%s|%s" % (norm(path), role)
             hist = STATE.setdefault("compactions", {}).setdefault(key, [])
@@ -8734,12 +10180,16 @@ def handle_event(event):
             # what compaction_point is for - it is given the samples and
             # drops the ones that cannot be overshoots of the same threshold.
             # See its docstring for what the ratchet cost on 2026-08-21.
-            cal_now = store.calib_get(model, path, ref.get("window") or 1)
+            # This session's own window first, for the same reason as
+            # the size above; a neighbour's is only a last resort, and for
+            # two windows of one role it is the same number anyway.
+            win_now = sess.get("window") or ref.get("window")
+            cal_now = store.calib_get(model, path, win_now or 1)
             samples = (cal_now.get("compact_samples") or [])[-9:] + [int(at)]
-            point = compaction_point(samples)
+            point = compaction_point(samples, turn_widest(path, role)[0])
             store.calib_update(model, path,
                                compact_at_tokens=point,
-                               compact_at_window=ref.get("window"),
+                               compact_at_window=win_now,
                                compact_samples=samples)
             store.journal("loop", "Compaction fired on %s after a turn that "
                           "ended at %dk. The threshold is at or below that - "
@@ -8800,7 +10250,7 @@ def handle_event(event):
                 hook_output = {"decision": "block",
                                "reason": "bridge rotates instead of "
                                          "compacting"}
-                threading.Thread(target=rotate_executor,
+                threading.Thread(target=rotate_executor, name="rotate:executor",
                                  args=(path, "PreCompact caught"),
                                  daemon=True).start()
 
@@ -8853,6 +10303,20 @@ def handle_event(event):
         # It cost that pair its entire watchdog for five hours - see
         # INFLIGHT_MAX_SEC. The first line is the command; everything after
         # the first newline is data being fed to it.
+        #
+        # This DOES over-match: the pattern is a substring of the whole
+        # first line, so for a project whose own directory path contains
+        # one of these words - a game project under a folder named after
+        # its engine is the ordinary way to get one - every command that
+        # names its own path is counted as a build. Measured on such a
+        # project: 87 of 87 commands on the night of 2026-08-30, and the
+        # longest of the ones that would be dropped ran 116 s against a
+        # 311 s floor. That over-matching is deliberately
+        # LEFT ALONE. What it produces is a PROCTRACK entry, and PROCTRACK
+        # is what the stuck-process watch reads; narrowing it would trade a
+        # cheap false entry for a missed hang, which is the one thing this
+        # system exists to prevent. The waste it used to cause was the
+        # delivery below, and that is what was removed instead.
         head = cmd.splitlines()[0] if cmd else ""
         if event.get("tool_name") == "Bash" and (
                 bg or any(p in head for p in patterns)):
@@ -8882,9 +10346,35 @@ def handle_event(event):
             DURATIONS.setdefault((path, sig), []).append(dur)
             del DURATIONS[(path, sig)][:-30]
             touch_session(event, state="idle")
-            deliver(path, "planner",
-                    "Process finished: %s (%.0f s)." % (tracked["cmd"], dur),
-                    {"kind": "info"})
+            # NOTHING IS DELIVERED HERE, and the journal line below is the
+            # whole of what this event now does.
+            #
+            # It used to wake the planner. Measured on the night of
+            # 2026-08-30 (source/ANALYSIS-token-burn.md): 80 of the 113
+            # wake-ups that planner took were these, averaging 230
+            # characters, at 721,770 tokens each because a delivery costs
+            # whatever the window is already carrying - 57.9M tokens, 21%
+            # of the night, to say nothing the planner could act on.
+            #
+            # Two things were checked before removing it, because "nobody
+            # needs this" is exactly the belief that strands a pair:
+            #
+            #  1. It never meant "your background job finished". PostToolUse
+            #     fires when the TOOL CALL returns, and a run_in_background
+            #     Bash returns at once - all nine background commands that
+            #     night were journalled at 0-2s while the runs themselves
+            #     took minutes.
+            #  2. It can never be the only thing that moves a pair. All 87
+            #     notices were followed by the executor ending a turn within
+            #     0-43s (median 4s), and that Stop is what produces the
+            #     report the planner is waiting for. Not one was orphaned.
+            #
+            # The stuck-process watch is untouched and must stay so: the
+            # PROCTRACK entry this branch pops is written at PreToolUse and
+            # read by check_processes(), which is how a process that hangs
+            # instead of finishing is still caught. Removing a wake-up is
+            # not the same as removing a detector, and only the first was
+            # done here.
             store.journal("process", "Finished in %.0fs: %s"
                           % (dur, tracked["cmd"]), project, role, "log",
                           project_dir=path)
@@ -9641,6 +11131,14 @@ def pairs_view():
             "no_artifacts": (STATE.get("noart") or {}).get(path, 0),
             "debt_open": len(open_debt(path)),
             "unanswered": (STATE.get("unanswered") or {}).get(path, 0),
+            # A third of the same kind, and it earns its place the same way:
+            # the words of an accepted `done` are being kept back to save a
+            # round trip, and a person must be able to see that without
+            # reading the journal. Held that nobody can see is dropped under
+            # a better name, which is the whole difficulty of 2b.
+            "held_chars": len((held_record(path).get("body") or "")),
+            "held_ridden": int(held_record(path).get("ridden") or 0),
+            "held_alone": int(held_record(path).get("alone") or 0),
             "roles": roles,
         }
     return out
@@ -10058,7 +11556,7 @@ def run_telegram_command(text, reply_to=None):
                                                    r.get("error") or "?")
             return ("%s %s: noted, and it goes to the planner with the next "
                     "report." % (mark, name_of(path)))
-        threading.Thread(target=rotate_executor,
+        threading.Thread(target=rotate_executor, name="rotate:executor",
                          args=(path, "asked for over telegram"),
                          daemon=True).start()
         return "%s %s: rotating the executor." % (mark, name_of(path))
@@ -10593,11 +12091,30 @@ class Handler(BaseHTTPRequestHandler):
                                                           % (path, role))
                 if not channel_supersedes(_prev, body.get("pid"),
                                           body.get("ppid"), path, role):
+                    # SAY WHAT IS ESTABLISHED, NOT WHAT IS LIKELY. This
+                    # line used to end "so it is a leftover from a window
+                    # that has been replaced", and age does not show that.
+                    # Measured 2026-08-31 on a live pair: the refused
+                    # contender's window was alive and its own transcript
+                    # had been written 30 minutes earlier - a second REAL
+                    # planner opened in the Claude app, not a corpse. The
+                    # journal had asserted the opposite 902 times that day,
+                    # once every 45 seconds. The refusal itself is right;
+                    # only the reason given for it was more than the
+                    # evidence. S5.43 is the open question behind it.
                     store.journal("channel", "Refused a channel registration "
                                   "for %s: pid %s started before the pid %s "
-                                  "already on record, so it is a leftover "
-                                  "from a window that has been replaced. Its "
-                                  "port %s is NOT being used."
+                                  "already on record, so the newer one keeps "
+                                  "the seat. Usually that means a leftover "
+                                  "from a replaced window; it can also mean "
+                                  "a second live window for this role, which "
+                                  "this cannot tell apart. Nothing will be "
+                                  "delivered to its port %s - which is not "
+                                  "the same as that port being dead, and the "
+                                  "line used to say it was. Measured on the "
+                                  "same live pair: netstat showed the "
+                                  "contender LISTENING on it and a connection "
+                                  "was accepted."
                                   % (role, body.get("pid"),
                                      (_prev or {}).get("pid"),
                                      body.get("port")),
@@ -10922,7 +12439,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True, "roles": roles})
             if p.startswith("/rotate"):
                 path = norm(body.get("project"))
-                threading.Thread(target=rotate_executor,
+                threading.Thread(target=rotate_executor, name="rotate:executor",
                                  args=(path, "manual"), daemon=True).start()
                 return self._send(200, {"ok": True})
             if p.startswith("/resume"):
@@ -11210,8 +12727,19 @@ def handle_loop(body):
         store.journal("loop", "Loop started at iteration %d"
                       % lp.get("iteration", 0), name, level="log",
                       project_dir=path)
-        deliver(path, "planner", "The loop is on. The executor's next "
-                "finished turn arrives here as a report.", {"kind": "info"})
+        # Silent ONLY when the planner started the loop itself: it cannot
+        # learn anything from being told what it just did, and a planner
+        # wake is about 720k tokens whatever the message says (rule 34).
+        # Anything else - the panel, a chat command, an older channel that
+        # sends no `by` at all - is told, because then the planner has no
+        # other way of knowing that reports are about to arrive. The
+        # refusal is deliberately in the OPEN direction: a message nobody
+        # needed costs one wake, a pair that never learns its loop is on
+        # costs the run.
+        if str(body.get("by") or "") != "planner":
+            deliver(path, "planner", "The loop is on. The executor's next "
+                    "finished turn arrives here as a report.",
+                    {"kind": "info"})
         # Not a chat message. Switching the loop on is something you did,
         # and telling you that it worked is not news you would get up for -
         # it is on the panel, in the journal, and in the reply to whatever
@@ -11596,6 +13124,7 @@ def main():
                                               for r in _back[:6])),
                       level="warn")
     migrate_executor_mode()
+    migrate_hint_lists()
     migrate_notify_levels()
     migrate_compaction_points()
     reseed_proctrack()

@@ -20,7 +20,7 @@
 Running the suites from an unpacked copy proves the copy WORKS. It does not
 prove the copy is the code that was reviewed: a file could be stale, a build
 could have picked up a different tree, a zip entry could have been written
-twice. This compares sha256 of every one of the 29 files across all three
+twice. This compares sha256 of every one of the 30 files across all three
 places - repository, archive entry, unpacked file - and a package that does
 not match on all three is not delivered, it is a failed build.
 
@@ -47,10 +47,15 @@ FILES = ["bridge.bat", "add-project.bat",
          # question from the PUBLIC repository, where it must never go: it
          # quotes private messages and names closed projects.
          "source/HONESTY_CASES.md",
-    "source/QUIET.md", "source/verify_package.py",
+    "source/QUIET.md",
+         # The hint lists daemon.py reads at import. Packaged for the
+         # same reason QUIET.md is - the private suite reads it - and
+         # kept out of the public repository for the same reason too.
+         "source/hints.local.json", "source/verify_package.py",
          "source/test_cases.py", "source/test_handover.py",
          "source/test_archive.py", "source/test_search.py",
          "source/test_wall_handover.py", "source/test_multipair.py",
+         "source/test_wake_sim.py",
          "source/bridgecore/__init__.py", "source/bridgecore/archive.py",
          "source/bridgecore/channel.py", "source/bridgecore/daemon.py",
          "source/bridgecore/discover.py", "source/bridgecore/hook.py",

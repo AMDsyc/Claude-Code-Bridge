@@ -569,14 +569,135 @@ def process_alive(pid):
     return str(pid) in (r.stdout or "")
 
 
+# What a child process runs to close somebody else's console window.
+#
+# It lives here as source rather than as a function because AttachConsole is
+# per-PROCESS and there is no safe way back: a process that has swapped its
+# console cannot reliably return to the one it started with, and `--now` is
+# watched by a person, so every line printed after that would go nowhere.
+# A child created with CREATE_NO_WINDOW has no console of its own to lose.
+#
+# argv[1] is the pid whose console to close; argv[2] is the caller's own
+# console window, or 0. The guard is not theoretical - a helper that closed
+# the window it was reporting into would take the report with it.
+#
+# FreeConsole FIRST, and it is load-bearing: CREATE_NO_WINDOW gives a child
+# a console with no window, NOT no console, and AttachConsole answers
+# ERROR_ACCESS_DENIED (5) to a process that already has one. Dropping that
+# one line made every close fail while stop_daemon still returned True -
+# case 103 caught it, which is the entire reason the case asks the stub
+# whether its handler ran instead of asking the caller how it went.
+_CLOSE_CONSOLE_SRC = """
+import ctypes, sys
+pid = int(sys.argv[1])
+mine = int(sys.argv[2])
+k = ctypes.WinDLL('kernel32', use_last_error=True)
+u = ctypes.WinDLL('user32', use_last_error=True)
+k.GetConsoleWindow.restype = ctypes.c_void_p
+u.PostMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint,
+                           ctypes.c_void_p, ctypes.c_void_p]
+k.FreeConsole()
+if not k.AttachConsole(pid):
+    print('pid %d has no console to attach to (error %d)'
+          % (pid, ctypes.get_last_error()))
+    raise SystemExit(2)
+h = k.GetConsoleWindow()
+if not h:
+    print('attached to the console of pid %d, but it has no window' % pid)
+    raise SystemExit(3)
+if mine and int(h) == mine:
+    print('that is my own console window - refusing to close it')
+    raise SystemExit(4)
+if not u.PostMessageW(ctypes.c_void_p(h), 0x0010, None, None):
+    print('WM_CLOSE would not post to window %d (error %d)'
+          % (int(h), ctypes.get_last_error()))
+    raise SystemExit(5)
+# LET GO OF IT BEFORE IT GOES. This process is attached to the console it
+# has just closed, and Windows takes every attached process down with the
+# window - so without this line the helper is killed on the way out, its
+# exit code is not 0, and the caller reads a success as a failure. Measured:
+# stop_daemon then said 'no console window' in the same breath as 'closed
+# console window 3802802', and ran the taskkill fallback for nothing.
+k.FreeConsole()
+print('closed console window %d of pid %d' % (int(h), pid))
+"""
+
+
+def _own_console_window():
+    """This process's console window, as an int, or 0. Never attaches."""
+    if os.name != "nt":
+        return 0
+    try:
+        import ctypes
+        k = ctypes.WinDLL("kernel32")
+        k.GetConsoleWindow.restype = ctypes.c_void_p
+        return int(k.GetConsoleWindow() or 0)
+    except Exception:
+        return 0
+
+
+def close_console(pid, timeout=20):
+    """Close the console WINDOW that pid is attached to. Returns (ok, why).
+
+    THE WINDOW IS NOT THE PROCESS'S. This is the whole reason the polite
+    branch below used to be a no-op. `taskkill /PID` without /F posts
+    WM_CLOSE to top-level windows owned by threads of the TARGET process,
+    and a console application owns none of them: the window belongs to
+    whoever created the console. Measured on 2026-08-31 against the live
+    bridge - console window 134498 owned by cmd.exe 12032, the batch a
+    double-click started, with py.exe and then the daemon's python.exe
+    below it in that same console. taskkill answered "can only be
+    terminated forcefully", nobody read the return code, the loop waited
+    its full 45 seconds and then used /F - which skips the console handler,
+    so clean_shutdown was never written and the next start came up in
+    'recovered' mode reporting a crash that had not happened. Precisely
+    what stop_daemon's docstring says it exists to avoid.
+
+    The target is reachable without guessing at anybody's ancestry: attach
+    to that console and ask THAT console for its window. Windows then sends
+    every process attached to it CTRL_CLOSE_EVENT, which is the event the
+    daemon's SetConsoleCtrlHandler is waiting for - so this is the same
+    path as the X button, and RESTART.md's "close the window" said so all
+    along.
+
+    One case this does NOT cover, and does not pretend to: under a tabbed
+    host one window can carry several tabs, and closing it would take them
+    all. What was measured here is the classic console a double-clicked
+    bridge.bat gives. If that ever changes, this is the paragraph to read.
+    """
+    if os.name != "nt":
+        return False, "not Windows - there is no console window to close"
+    try:
+        r = subprocess.run(
+            [sys.executable, "-c", _CLOSE_CONSOLE_SRC,
+             str(pid), str(_own_console_window())],
+            capture_output=True, text=True, errors="replace",
+            timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, "could not ask: %s" % exc
+    why = ((r.stdout or "").strip() or (r.stderr or "").strip()
+           or "no answer from the helper")
+    return r.returncode == 0, why
+
+
 def stop_daemon(port=None, timeout=90):
     """Ask the daemon to stop the way closing its window would.
 
-    taskkill WITHOUT /F sends the console a close event, and the daemon has a
-    handler on it: it writes clean_shutdown, says goodbye in Telegram and
-    exits. /F skips all of that, and the next start comes up in 'recovered'
-    mode telling the owner about a crash that never happened - so it is the
-    second thing tried, never the first.
+    Closing the console WINDOW sends every process attached to that console
+    a close event, and the daemon has a handler on it: it writes
+    clean_shutdown, says goodbye in Telegram and exits. /F skips all of
+    that, and the next start comes up in 'recovered' mode telling the owner
+    about a crash that never happened - so it is the last thing tried,
+    never the first.
+
+    Until 2026-08-31 the polite branch was `taskkill /PID` alone, which
+    cannot reach a console application at all - see close_console() for the
+    measurement. It failed on every run, silently, because nothing read its
+    return code; the only visible symptoms were a 45-second pause and a
+    'recovered' banner nobody could account for. The return value did not
+    change between the two outcomes, which is why it went unnoticed for as
+    long as it did, and why the case for this is an end-to-end one.
 
     Waiting on the PROCESS, not on the port. Measured in simulation: after a
     polite taskkill the port stopped accepting connections while netstat
@@ -594,13 +715,21 @@ def stop_daemon(port=None, timeout=90):
     # session that asked for this. The bridge is built the other way round:
     # the sessions outlive the daemon and simply stop being carried while it
     # is away, which is what makes a restart cheap.
-    subprocess.run(["taskkill", "/PID", str(pid)],
-                   capture_output=True, text=True, errors="replace")
+    closed, why_close = close_console(pid)
+    if not closed:
+        # Nothing to close - a daemon started some other way, or a console
+        # with no window. Fall back to what this used to do on its own: it
+        # is harmless where it does not apply, and it IS right for a
+        # process that genuinely owns a window of its own.
+        subprocess.run(["taskkill", "/PID", str(pid)],
+                       capture_output=True, text=True, errors="replace")
     polite = min(timeout, 45)
     end = time.time() + polite
     while time.time() < end:
         if not process_alive(pid) and not port_open(port):
-            return True, "stopped cleanly (pid %d)" % pid
+            return True, "stopped cleanly (pid %d, %s)" % (
+                pid, why_close if closed else "no console window: " +
+                why_close + "; taskkill instead")
         time.sleep(1.5)
     # It did not take the hint. A bridge that will not stop is worse than a
     # 'recovered' banner, so escalate - and say plainly what it cost.
@@ -609,9 +738,10 @@ def stop_daemon(port=None, timeout=90):
     end = time.time() + max(timeout - polite, 20)
     while time.time() < end:
         if not process_alive(pid) and not port_open(port):
-            return True, ("pid %d ignored the close request and had to be "
-                          "killed, so the next start will report a recovery "
-                          "- that is this, not a crash" % pid)
+            return True, ("pid %d did not stop after the close request "
+                          "(%s), so it had to be killed - the next start "
+                          "will report a recovery, and that is this, not a "
+                          "crash" % (pid, why_close))
         time.sleep(1.5)
     return False, "pid %d is still there after %ds" % (pid, timeout)
 

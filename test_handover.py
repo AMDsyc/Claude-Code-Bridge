@@ -56,6 +56,31 @@ def check(name, got, want):
         FAILED.append(name)
 
 
+def read_or_fail(path, what):
+    """Read a file whose existence a check has JUST asserted.
+
+    Returns "" when it is not there, and says so. The form this replaces
+    was: check the file exists, then open it on the next line regardless of
+    the answer - so `check` marked FAIL, and the read three characters
+    later raised and killed the script, taking every block below it with
+    it. Silently: the output simply stops, with no summary and no FAIL
+    line, which reads like a hang rather than a failure. Measured on the
+    public tree, where QUIET.md is deliberately absent: 83 of 103 blocks
+    ran, and the twenty that did not were never reported missing.
+
+    A check that has already spoken must not be able to un-speak itself by
+    crashing. Every caller has to be safe with "" - that is the point: the
+    dependent checks then fail on their own terms, in the output, where a
+    person can see which ones.
+    """
+    if not path or not os.path.isfile(path):
+        print("   !! %s is not there, so the checks below it cannot pass"
+              % (what,))
+        return ""
+    return open(path, encoding="utf-8").read()
+
+
+
 def reset(compactions=(), sid=SID, compact_at=None, autocompact=80):
     daemon.STATE.clear()
     daemon.STATE.update({"sessions": {}, "compactions": {},
@@ -395,7 +420,31 @@ lv = daemon.life_view(pl, PATH)
 check("so the cycle is computable", lv["cycle"], 150000 - 65000)
 check("and the distance to the wall too", lv["left"], 0 + 3 * 85000)
 check("in turns", lv["turns_left"], 255000 // 4333)
+# 1b's exception is worth ONE TURN, and since 2026-08-31 that is one turn OF
+# THIS PAIR, measured, rather than the module literal LARGEST_TURN_SEEN
+# (200 274) that used to make every distance under 200k qualify. So the case
+# states the history it argues from: a planner whose last three turns run
+# 4-5k, with one 20 000 turn earlier in its life. 168 000 - 150 000 = 18 000
+# past the point, and one 20 000 turn can be an overshoot of that.
+for _c22 in (4000, 5000, 20000, 4000):
+    daemon.note_turn_cost(PATH, "planner", _c22, "pl-1")
+check("the exception is worth one turn of THIS pair, measured",
+      daemon.turn_widest(PATH, "planner"), (20000, "measured"))
 check("plan is the routine one", daemon.plan_for(pl, PATH)["do"], "compacting")
+print("   and the literal was hiding the other half of this same rule. Take")
+print("   the SAME session on a pair that has never taken a turn wider than")
+print("   5k: 18 000 past the point is four turns past it, an overshoot")
+print("   cannot be that wide, so the point is refuted and the session is")
+print("   replaced. Under LARGEST_TURN_SEEN that pair got the exception too,")
+print("   because 18 000 < 200 274 - and so did every pair alive, whatever")
+print("   its turns actually cost")
+daemon.STATE["turns"].pop("%s|planner" % daemon.norm(PATH), None)
+for _c22 in (4000, 5000, 4000):
+    daemon.note_turn_cost(PATH, "planner", _c22, "pl-1")
+check("the same session, on a pair whose turns are small, is replaced",
+      daemon.plan_for(pl, PATH)["do"], "handover")
+check("and the width it was judged by is that pair's own",
+      daemon.turn_widest(PATH, "planner"), (5000, "measured"))
 
 print("\n23. the channel answers the daemon without waiting on the pipe")
 print("   it used to answer BEFORE the write was attempted, full stop, and")
@@ -1575,57 +1624,70 @@ import zipfile as _zf                                    # noqa: E402
 _vp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                    "verify_package.py")
 check("the tool ships with the repo", os.path.exists(_vp), True)
-_ns = {}
-exec(compile(open(_vp, encoding="utf-8").read(), _vp, "exec"), _ns)
+# _ns keeps a FILES key whatever happens, so the checks below fail on their
+# own terms rather than raising KeyError and taking the suite with them.
+_ns = {"FILES": []}
+_vp_src = read_or_fail(_vp, "verify_package.py")
+if _vp_src:
+    exec(compile(_vp_src, _vp, "exec"), _ns)
 # The COUNT is read from the list rather than pinned beside it: it moved
 # 28 -> 29 on 2026-08-21 when QUIET.md joined the package, and a second
 # copy of the number here would only ever be yesterday's. What matters is
 # not how many there are but that the list contains the files a recipient
 # needs in order to check the package - including this checker itself.
-_n_files = len(_ns["FILES"])
-check("it checks every file the package snippet lists, itself included - "
-      "a package its recipient cannot verify is a weaker package",
-      (_n_files >= 28, "source/verify_package.py" in _ns["FILES"],
-       "source/HONESTY_CASES.md" in _ns["FILES"],
-       "source/LICENSE" in _ns["FILES"]), (True, True, True, True))
-check("and the canon's own long form travels with it",
-      "source/QUIET.md" in _ns["FILES"], True)
-_repo = os.path.join(TMP, "pkgrepo")
-_unp = os.path.join(TMP, "pkgunp")
-for _rel in _ns["FILES"]:
-    for _d in (_repo, _unp):
-        _p = os.path.join(_d, _rel)
-        os.makedirs(os.path.dirname(_p), exist_ok=True)
-        with open(_p, "w", encoding="utf-8") as fh:
-            fh.write("content of " + _rel + "\n")
-_zip = os.path.join(TMP, "good.zip")
-with _zf.ZipFile(_zip, "w") as z:
+if _vp_src:
+    _n_files = len(_ns["FILES"])
+    check("it checks every file the package snippet lists, itself included - "
+          "a package its recipient cannot verify is a weaker package",
+          (_n_files >= 28, "source/verify_package.py" in _ns["FILES"],
+           "source/HONESTY_CASES.md" in _ns["FILES"],
+           "source/LICENSE" in _ns["FILES"]), (True, True, True, True))
+    check("and the canon's own long form travels with it",
+          "source/QUIET.md" in _ns["FILES"], True)
+    _repo = os.path.join(TMP, "pkgrepo")
+    _unp = os.path.join(TMP, "pkgunp")
     for _rel in _ns["FILES"]:
-        z.write(os.path.join(_repo, _rel), _rel)
-_rows, _bad, _extra, _names = _ns["compare"](_repo, _zip, _unp)
-check("a package built from the tested tree matches everywhere",
-      (_bad, _extra, len(_names)), ([], [], _n_files))
-_tampered = os.path.join(TMP, "tampered.zip")
-with _zf.ZipFile(_tampered, "w") as z:
-    for _rel in _ns["FILES"]:
-        if _rel == "source/bridgecore/daemon.py":
-            z.writestr(_rel, "content of bridge/daemon.py\n# and one more line\n")
-        else:
+        for _d in (_repo, _unp):
+            _p = os.path.join(_d, _rel)
+            os.makedirs(os.path.dirname(_p), exist_ok=True)
+            with open(_p, "w", encoding="utf-8") as fh:
+                fh.write("content of " + _rel + "\n")
+    _zip = os.path.join(TMP, "good.zip")
+    with _zf.ZipFile(_zip, "w") as z:
+        for _rel in _ns["FILES"]:
             z.write(os.path.join(_repo, _rel), _rel)
-_rows2, _bad2, _extra2, _names2 = _ns["compare"](_repo, _tampered, _unp)
-check("one changed file in the archive is caught, and named",
-      _bad2, ["source/bridgecore/daemon.py"])
-check("the others still match", len(_bad2), 1)
-_extra_zip = os.path.join(TMP, "extra.zip")
-with _zf.ZipFile(_extra_zip, "w") as z:
-    for _rel in _ns["FILES"]:
-        z.write(os.path.join(_repo, _rel), _rel)
-    z.writestr("source/bridgecore/bridge/daemon.py",
-               "the stale nested copy\n")
-_r3, _b3, _e3, _n3 = _ns["compare"](_repo, _extra_zip, _unp)
-check("an entry that is not on the list is caught too - that is how the "
-      "stale nested copy would get in", _e3,
-      ["source/bridgecore/bridge/daemon.py"])
+    _rows, _bad, _extra, _names = _ns["compare"](_repo, _zip, _unp)
+    check("a package built from the tested tree matches everywhere",
+          (_bad, _extra, len(_names)), ([], [], _n_files))
+    _tampered = os.path.join(TMP, "tampered.zip")
+    with _zf.ZipFile(_tampered, "w") as z:
+        for _rel in _ns["FILES"]:
+            if _rel == "source/bridgecore/daemon.py":
+                z.writestr(_rel, "content of bridge/daemon.py\n# and one more line\n")
+            else:
+                z.write(os.path.join(_repo, _rel), _rel)
+    _rows2, _bad2, _extra2, _names2 = _ns["compare"](_repo, _tampered, _unp)
+    check("one changed file in the archive is caught, and named",
+          _bad2, ["source/bridgecore/daemon.py"])
+    check("the others still match", len(_bad2), 1)
+    _extra_zip = os.path.join(TMP, "extra.zip")
+    with _zf.ZipFile(_extra_zip, "w") as z:
+        for _rel in _ns["FILES"]:
+            z.write(os.path.join(_repo, _rel), _rel)
+        z.writestr("source/bridgecore/bridge/daemon.py",
+                   "the stale nested copy\n")
+    _r3, _b3, _e3, _n3 = _ns["compare"](_repo, _extra_zip, _unp)
+    check("an entry that is not on the list is caught too - that is how the "
+          "stale nested copy would get in", _e3,
+          ["source/bridgecore/bridge/daemon.py"])
+else:
+    # Without the file there is nothing to exec, so FILES and compare
+    # do not exist and every check below would raise instead of
+    # failing. One FAIL is recorded for the lot and the suite carries
+    # on: a check that has already spoken must not un-speak itself by
+    # crashing.
+    check("the package checks need verify_package.py and it is gone",
+          False, True)
 print("   and rule 24 applied to this very document: a rule whose check")
 print("   names a function must have that function")
 _canon = daemon.honesty_text() + "\n" + daemon.honesty_cases_text()
@@ -2116,7 +2178,8 @@ check("it admits it rather than inventing a word", "reported no reason"
 check("the raw payload was written to disk", bool(_k) and os.path.isfile(_k),
       True)
 check("and it is the whole payload, unedited",
-      _json.load(open(_k, encoding="utf-8")).get("something_new"),
+      _json.loads(read_or_fail(_k, "the StopFailure payload") or "{}")
+      .get("something_new"),
       "a field nobody has seen yet")
 check("the reason points the reader at it", _k in _r, True)
 check("kept beside the project, under bridge-logs",
@@ -2157,12 +2220,13 @@ try:
         daemon.STATE["stopfail"]["%s|executor" % _sfn]["at"] = time.time() - 200
         daemon.check_lost_turn(_sf)
     check("after the attempts run out, the human is told once", len(_told), 1)
+    _t0 = _told[0][1] if _told else ""
     check("and told what it means - the pair is stopped, not working",
-          "still stopped, so this one needs you" in _told[0][1], True)
+          "still stopped, so this one needs you" in _t0, True)
     check("with the reason in it, not 'unknown'",
-          "Connection closed" in _told[0][1], True)
+          "Connection closed" in _t0, True)
     check("and with what the bridge already tried, so he is not guessing",
-          "picked it back up" in _told[0][1], True)
+          "picked it back up" in _t0, True)
     daemon.check_lost_turn(_sf)
     check("and not told again on every pass", len(_told), 1)
 
@@ -3061,9 +3125,9 @@ _f = daemon.clinch(_cp, _sit())
 check("a pair with work owed and nothing moving is a clinch",
       bool(_f), True)
 check("and it names the missing hop rather than saying 'stuck'",
-      _f["why"], "task_no_turn")
+      (_f or {}).get("why"), "task_no_turn")
 check("naming which half to wake",
-      _f["wake"], "executor")
+      (_f or {}).get("wake"), "executor")
 print("   every legitimate reason to be quiet is excluded FIRST - each of")
 print("   these is a working pair, not a deadlock")
 check("a report being judged is not a clinch",
@@ -3349,12 +3413,24 @@ check("and the oldest kept is the sixth of the nine",
 print("   the done branch hands held work over BEFORE asking the planner")
 print("   for something new - there is nothing to wait for, the fact is")
 print("   known at the moment of the verdict, so clinch is only the backstop")
-_dv = inspect.getsource(daemon)
-check("done takes held work first",
-      "held = take_open_task(path)" in _dv, True)
+# Read from the FUNCTION, not from the module. It used to be the module,
+# and the position of a string in a 12,000-line file is not the order two
+# statements run in: moving the nudge into its own helper (which sits beside
+# note_task_sent, hundreds of lines earlier) turned this red while the
+# behaviour was untouched. What is being asserted is that the done branch
+# takes held work BEFORE it considers asking for new work, so ask the branch.
+_dv = inspect.getsource(daemon.run_review)
+_a77 = "held = take_open_task(path)"
+_b77 = "nudge_for_task"
+check("done takes held work first", _a77 in _dv, True)
+# index() ONLY when both are there. A flat script has no test runner behind
+# it: a ValueError here does not fail one check, it kills the process and
+# takes cases 78-105 with it, silently, because the output simply stops.
+# That is the same shape as the unguarded read of a checked file, and it is
+# why read_or_fail exists a few hundred lines up.
 check("and only asks the planner when there is none",
-      _dv.index("held = take_open_task(path)")
-      < _dv.index("You accepted iteration %d. The loop is still on"), True)
+      (_a77 in _dv and _b77 in _dv
+       and _dv.index(_a77) < _dv.index(_b77)), True)
 daemon.STATE["tasks_open"] = {}
 
 print("\n78. stopping a window means it stopped, not that it was asked")
@@ -3672,13 +3748,21 @@ with open(_seat_tree, "w", encoding="utf-8") as _fh:
         "    print(os.getpid(), flush=True)" + chr(10) +
         "time.sleep(120)" + chr(10))
 _seat_procs = []
+_seat_pids = []
 
 
 def _seat_chain(depth):
     p = subprocess.Popen([sys.executable, _seat_tree, str(depth)],
                          stdout=subprocess.PIPE, text=True)
     _seat_procs.append(p)
-    return [int(x) for x in p.stdout.readline().split()]
+    pids = [int(x) for x in p.stdout.readline().split()]
+    # Every pid, not just the head. p.kill() reaches the process subprocess
+    # started and no descendant of it, and this fixture is a chain by
+    # design - so the cleanup below used to leave two of every three alive
+    # until their own sleep(120) ended. Same defect as test_multipair's
+    # _tree, found the same day and fixed in both.
+    _seat_pids.extend(pids)
+    return pids
 
 
 _win, _wchan, _sub = _seat_chain(2)
@@ -3734,11 +3818,68 @@ check("and channel.py sends it",
       '"ppid": os.getppid()' in _io.open(
           os.path.join(os.path.dirname(daemon.__file__), "channel.py"),
           encoding="utf-8").read(), True)
+from bridgecore import sessions                    # noqa: E402
+_seat_left = []
+for _pid in _seat_pids:
+    # A WAIT on an owned handle, not a kill followed by hoping. os.kill on
+    # Windows is TerminateProcess and returns before the process is reaped,
+    # and only the chain HEADS are Popen objects - the descendants had
+    # nobody to wait on them, so the check below raced. It was green on this
+    # machine and red on the planner's, which shares it with a live daemon
+    # and two pairs. A bounded poll was tried first and is not the fix: a
+    # margin guesses how long dying takes (S5.38), and the next number would
+    # be the same guess, larger.
+    try:
+        if not sessions.terminate_and_wait(_pid, 30):
+            _seat_left.append(_pid)
+    except Exception:
+        _seat_left.append(_pid)
 for _sp in _seat_procs:
     try:
-        _sp.kill()
+        _sp.wait(5)
     except Exception:
         pass
+
+
+def _alive3763(pid):
+    """sessions.pid_alive: the project's own probe, correct on Windows.
+
+    Not `tasklist` (subprocess.run answered stdout=None inside this suite)
+    and above all not `os.kill(pid, 0)`, which on Windows is not a probe at
+    all - it calls TerminateProcess and kills what it was asked about.
+    """
+    from bridgecore import sessions as _sess3763
+    return _sess3763.pid_alive(pid)
+
+
+print("   and the fixture is cleaned up COMPLETELY - every process in the")
+print("   chain. p.kill() reached the head alone, so two of every three")
+print("   outlived the run; found 2026-08-31 with several runs' worth alive")
+print("   THE CONTROL (rule 19): the probe must still be able to SEE a live")
+print("   process here, or an empty list below means nothing at all")
+_ctl3763 = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+check("a process nobody killed reads as alive", _alive3763(_ctl3763.pid), True)
+check("terminate_and_wait says it is gone",
+      sessions.terminate_and_wait(_ctl3763.pid, 30), True)
+check("and the probe agrees, with no sleep in between",
+      _alive3763(_ctl3763.pid), False)
+# Never let the control CRASH the suite. When the sabotage above is real -
+# terminate_and_wait lying, which is exactly what this control exists to
+# catch - the process is still running, wait(5) raises TimeoutExpired, and
+# the run dies before it prints its FAIL summary. That is S5.9: a suite that
+# crashes instead of reporting is not a gate. It is also rule 9: the control
+# must not be the thing that leaks.
+try:
+    _ctl3763.wait(5)
+except Exception:
+    try:
+        _ctl3763.kill()
+        _ctl3763.wait(5)
+    except Exception:
+        pass
+check("the killer reports nothing left behind", _seat_left, [])
+check("the seat fixture leaves no process running",
+      [p for p in _seat_pids if _alive3763(p)], [])
 print("   measured 2026-08-21: all six live channels were direct children")
 print("   of exactly the window pid the bridge recorded at launch, so the")
 print("   test is sound on real data - and there was not one refusal in the")
@@ -3771,15 +3912,15 @@ print("   repository is English-only, and check_public.py enforces that.")
 print("   Spelling the Russian phrases out in escapes would pass the scan")
 print("   while meaning exactly what the scan exists to stop")
 import re as _re29
-check("the Russian canon now carries 33 numbered rules",
-      len(_re29.findall(r"^\d+\. \*\*", _ru, _re29.M)), 33)
+check("the Russian canon now carries 34 numbered rules",
+      len(_re29.findall(r"^\d+\. \*\*", _ru, _re29.M)), 34)
 check("and every one of them still carries its check",
-      len(_re29.findall(r"^\s+\*[^*]+:\*", _ru, _re29.M)), 33)
-check("the English canon carries 33 too",
+      len(_re29.findall(r"^\s+\*[^*]+:\*", _ru, _re29.M)), 34)
+check("the English canon carries 34 too",
       not _en_here
-      or len(_re29.findall(r"^\d+\. \*\*", _en, _re29.M)) == 33, True)
+      or len(_re29.findall(r"^\d+\. \*\*", _en, _re29.M)) == 34, True)
 check("the English header counts them",
-      not _en_here or "Thirty-three rules." in _en, True)
+      not _en_here or "Thirty-four rules." in _en, True)
 print("   the English rule names the mechanism, not just the goal")
 check("born minimised by the operating system",
       not _en_here or ("BORN minimised" in _en
@@ -3803,7 +3944,16 @@ print("   the full text is a separate file, so the canon pays four lines")
 print("   and not an essay - QUIET.md is never delivered to anybody")
 _q = os.path.join(_here, "QUIET.md")
 check("QUIET.md exists", os.path.isfile(_q), True)
-_qt = _io.open(_q, encoding="utf-8").read()
+_qt = read_or_fail(_q, "QUIET.md")
+print("   and the reading itself is guarded, which is not decoration: this")
+print("   exact line used to be an unguarded open() three characters after")
+print("   a check that had ALREADY marked FAIL, so one missing file killed")
+print("   the script and took every block below it - silently, because the")
+print("   output just stops. Measured on a copy with QUIET.md and")
+print("   verify_package.py removed: 49 blocks then a traceback, against")
+print("   103 blocks and four honest FAIL lines with this in place")
+check("a file that is not there reads as empty, not as an exception",
+      read_or_fail(os.path.join(TMP, "no-such-file-at-all.md"), "a probe"), "")
 import re as _re29b
 check("it carries principles, traps and a checklist - four sections",
       len(_re29b.findall(r"^## \d+\.", _qt, _re29b.M)), 4)
@@ -3902,25 +4052,39 @@ print("    sat between 996,305 and 999,920 - and nothing could lift it")
 _poisoned = [776393, 998975, 998619, 999875, 999887,
              999920, 999595, 999648, 999729, 996305]
 check("the old ratchet answered with the outlier", min(_poisoned), 776393)
+# The width of one turn, stated by this case rather than imported. It was
+# the module literal LARGEST_TURN_SEEN = 200274 until 2026-08-31, when that
+# turned out never to have been the largest turn seen (826 turns measured:
+# 532 910) and became a per-pair measurement with a fallback and a source.
+# A case that pins arithmetic states its own inputs; it does not borrow a
+# production figure that is now allowed to move.
+_TURN_W = 200000
 check("the samples are read instead, and the outlier is dropped",
-      daemon.compaction_point(_poisoned), 996305)
-print("   'dropped' means: further below the largest sample than the")
-print("   largest turn ever seen here, so it cannot be an overshoot of the")
-print("   same threshold")
-check("the largest turn seen here is the 2026-08-20 one",
-      daemon.LARGEST_TURN_SEEN, 200274)
-check("999920 - 776393 is further than that",
-      999920 - 776393 > daemon.LARGEST_TURN_SEEN, True)
+      daemon.compaction_point(_poisoned, _TURN_W), 996305)
+print("   'dropped' means: further below the newest sample than one turn of")
+print("   this pair, so it cannot be an overshoot of the same threshold")
+check("999920 - 776393 is further than one turn",
+      999920 - 776393 > _TURN_W, True)
+print("   and the width is no longer a literal: it is measured for the pair,")
+print("   and it says whether it was measured or borrowed")
+check("a pair that has measured nothing says so",
+      daemon.turn_widest(os.path.join(TMP, "no-turns-here"),
+                         "executor")[1] in ("fallback", "assumed"), True)
 check("one sample is still just that sample",
-      daemon.compaction_point([150000]), 150000)
+      daemon.compaction_point([150000], _TURN_W), 150000)
 check("samples that agree still give the minimum",
-      daemon.compaction_point([700100, 712000, 705000]), 700100)
-check("nothing measured is still nothing", daemon.compaction_point([]), None)
+      daemon.compaction_point([700100, 712000, 705000], _TURN_W), 700100)
+check("nothing measured is still nothing",
+      daemon.compaction_point([], _TURN_W), None)
+check("and with no width the claim is not made - the plain minimum",
+      daemon.compaction_point(_poisoned, None), 776393)
 print("   and a file written before today is repaired at startup rather")
 print("   than waiting for the pair to compact again")
 _mg = inspect.getsource(daemon.migrate_compaction_points)
 check("the migration recomputes from the samples",
-      "compaction_point(samples)" in _mg, True)
+      "compaction_point(samples," in _mg, True)
+check("with the width measured for that project, not a constant",
+      'turn_widest(_cal_path, "executor")' in _mg, True)
 check("an entry with no samples is left alone",
       "if not samples:" in _mg, True)
 check("and it runs from main", "migrate_compaction_points()"
@@ -3955,6 +4119,15 @@ def _sj(used):
     return s
 
 
+# The exception below is worth ONE TURN, and since 2026-08-31 that is one
+# turn of this pair rather than a module constant. The sizes in this case
+# were built around 200 274 - the literal that used to be there - so the
+# pair is given a turn of that size and the arithmetic is stated instead of
+# imported. What the case is about is the SHAPE of the rule: past the wall
+# and further than one turn past the point, or neither.
+daemon.note_turn_cost(PATH, "executor", 200274, "sj-1")
+check("the exception is worth one turn, measured for this pair",
+      daemon.turn_widest(PATH, "executor"), (200274, "measured"))
 _w = daemon.wall_view(_sj(850000), PATH)
 check("the wall is the window minus the compaction reserve",
       _w["wall"], 1000000 - daemon.RESERVED_TOKENS)
@@ -4042,9 +4215,10 @@ _1b = [l.strip() for l in _ps.splitlines()
 check("1b's condition is exactly one line, and this is it",
       len(_1b), 1)
 check("and it is a provenance test, not a margin",
-      any(m in _1b[0] for m in ('+', 'margin', 'RESERVED', '0.9')), False)
+      any(m in (_1b[0] if _1b else "")
+          for m in ('+', 'margin', 'RESERVED', '0.9')), False)
 check("and the exception beside it is about the point, not a turn count",
-      "compact < wall and used - compact <= LARGEST_TURN_SEEN" in _ps, True)
+      "compact < wall" in _ps and "used - compact <= _wide" in _ps, True)
 print("   and since 2026-08-22 the line it reads is MEASURED, not the")
 print("   window minus an unmeasured reserve: 33 compactions succeeded")
 print("   above that reserve, so it was replacing sessions that would have")
@@ -4054,7 +4228,9 @@ check("it asks what has actually been survived here",
 check("and still fires on position, not on distance", "used >= wall" in _ps,
       True)
 check("and the exception needs the point below the wall as well",
-      "compact < wall and used - compact <= LARGEST_TURN_SEEN" in _ps, True)
+      "compact < wall" in _ps and "used - compact <= _wide" in _ps, True)
+check("and the turn it compares against is this pair's, measured",
+      "turn_widest(path, sess.get(" in _ps, True)
 print("   and a session with no compaction point at all decides nothing")
 print("   from this: rule 8 says an unknown point is reported, not guessed.")
 print("   Nothing measured AND no threshold passed at launch is the case -")
@@ -4280,7 +4456,8 @@ try:
         "started": time.time() - 1000}}
     daemon.check_processes()
     check("the pair is asked about a 16-minute command", len(_sent90), 1)
-    check("and it went to the planner first", _sent90[0], "planner")
+    check("and it went to the planner first",
+          _sent90[0] if _sent90 else None, "planner")
     check("nobody's phone rang yet", _said90, [])
 
     print("   the same record once it is past the ageing ceiling: nothing")
@@ -4414,29 +4591,31 @@ print("    at 996k for ever and the pair could never recover")
 _stuck = [998975, 998619, 999875, 999887, 999920, 999595, 999648, 999729,
           996305, 998685]
 check("the point while the old regime holds",
-      daemon.compaction_point(_stuck), 996305)
+      daemon.compaction_point(_stuck, _TURN_W), 996305)
 check("a first honest compaction at 700k IS the new point",
-      daemon.compaction_point((_stuck + [700100])[-10:]), 700100)
+      daemon.compaction_point((_stuck + [700100])[-10:], _TURN_W), 700100)
 check("and so is one at 690k",
-      daemon.compaction_point((_stuck + [690000])[-10:]), 690000)
+      daemon.compaction_point((_stuck + [690000])[-10:], _TURN_W), 690000)
 print("   the drop is bigger than any single turn, which is exactly why the")
 print("   old anchor discarded it")
-check("299820 is further than the largest turn ever seen",
-      999920 - 700100 > daemon.LARGEST_TURN_SEEN, True)
+check("299820 is further than one turn of this pair",
+      999920 - 700100 > _TURN_W, True)
 print("   the case the filter was born for still works: the anchor is the")
 print("   NEWEST sample, so a manual /compact far below the recent cluster")
 print("   is still as far away as it ever was")
 _poison = [776393, 998975, 998619, 999875, 999887, 999920, 999595, 999648,
            999729, 996305]
 check("one manual compaction is still dropped",
-      daemon.compaction_point(_poison), 996305)
+      daemon.compaction_point(_poison, _TURN_W), 996305)
 check("the band is two-sided now",
-      "abs(anchor - s) <= LARGEST_TURN_SEEN"
+      "abs(anchor - s) <= widest"
       in inspect.getsource(daemon.compaction_point), True)
 check("and the anchor is the newest sample, not the largest",
       "anchor = good[-1]" in inspect.getsource(daemon.compaction_point), True)
-check("one sample is still itself", daemon.compaction_point([150000]), 150000)
-check("nothing measured is still nothing", daemon.compaction_point([]), None)
+check("one sample is still itself",
+      daemon.compaction_point([150000], _TURN_W), 150000)
+check("nothing measured is still nothing",
+      daemon.compaction_point([], _TURN_W), None)
 
 print("\n93. a handover that never arrives is not tried for ever")
 print("    2026-08-22, 05:16 to 08:41: plan_for said handover, a window")
@@ -4683,9 +4862,18 @@ daemon.STATE["compactions"]["%s|executor" % _k96].append(
      "session": "b"})
 check("the best proven size is the one with a floor",
       daemon.compaction_survivable(PATH, "executor"), 999920)
+print("   'one turn' is this pair's own, now, and ORDINARY rather than")
+print("   widest: the branch asks how far above its own point a session")
+print("   sits without being in trouble, and the top decile is exactly the")
+print("   part that is not ordinary. Its four measured turns go in through")
+print("   note_turn_cost, beside the 200 274 the case above recorded")
+for _c96 in (33877, 15151, 39330, 32199):
+    daemon.note_turn_cost(PATH, "executor", _c96, "s96")
+_ord96, _src96 = daemon.turn_ordinary(PATH, "executor")
+check("and it is measured for this pair", _src96, "measured")
 check("and the line sits one turn above it",
       daemon.compaction_too_big(PATH, "executor", 1000000),
-      999920 + daemon.LARGEST_TURN_SEEN)
+      999920 + _ord96)
 print("   one turn, because a sample IS an overshoot: the threshold is")
 print("   below it, and a session ordinarily ends a turn above its own last")
 print("   compaction size without being in trouble at all")
@@ -4728,7 +4916,25 @@ _he = inspect.getsource(daemon.handle_event)
 check("the error type is still what the branch turns on",
       '"invalid" in etype or "context" in etype' in _he, True)
 check("but it now asks first whether a compaction is under way",
-      "wait_for_compaction(path, role, sess)" in _he, True)
+      "wait_for_compaction(path, role, sess, over)" in _he, True)
+print("   and since 2026-08-30 it hands over what the client actually")
+print("   SAID, because the witness it used to require - a PreCompact -")
+print("   cannot exist when the API refuses first. That is the executor")
+print("   of 18:27:43: prompt is too long, no PreCompact ever, wall")
+print("   handling in the same second, a session killed 2-3 seconds into")
+print("   its own recovery (test_multipair case 55)")
+check("the overflow is read from the payload, not from the category",
+      "overflow_said(event) or overflow_by_size(sess, path, role)" in _he,
+      True)
+check("and it is the client's sentence that identifies one",
+      daemon.overflow_said({"error": "invalid_request", "error_details":
+                            '400 {"message":"prompt is too long: 1000815 '
+                            'tokens > 1000000 maximum"}'}),
+      (1000815, 1000000))
+check("while an invalid_request that is not an overflow is not read as one",
+      daemon.overflow_said({"error": "invalid_request",
+                            "error_details": "400 tool schema is wrong"}),
+      None)
 check("and the StopFailure branch no longer rotates by itself",
       'args=(path, "hit the wall")' in _he, False)
 check("the replacement lives in handle_wall_hit instead",
@@ -5111,6 +5317,480 @@ with io.open(_sp102, "w", encoding="utf-8") as _fh:
     _json.dump(_cfg102, _fh)
 check("a different path is named, with the file it is in",
       len(_pypath102()), 1)
+
+print("\n103. the polite stop reaches a console application")
+print("    relayout.stop_daemon used to try `taskkill /PID` and nothing")
+print("    else before the force. That cannot reach a console app at all:")
+print("    taskkill posts WM_CLOSE to windows owned by the TARGET's own")
+print("    threads, and a console window belongs to whoever created the")
+print("    console - cmd.exe, for a double-clicked bridge.bat. So the")
+print("    branch failed on every run, silently, and the only symptoms")
+print("    were a 45s pause and a 'recovered' banner nobody could account")
+print("    for. THE RETURN VALUE WAS THE SAME EITHER WAY, so a check on")
+print("    what stop_daemon answers could never have caught it (rule 19).")
+print("    This drives the real function against a real console built the")
+print("    real way, and asks the STUB whether its handler ran.")
+
+if os.name != "nt":
+    print("   not Windows: there is no console window here, so this case")
+    print("   has nothing to say. Not counted as passing.")
+else:
+    import socket as _sk103
+    from bridgecore import relayout as _rl103
+
+    _d103 = os.path.join(TMP, "stopwin")
+    os.makedirs(_d103, exist_ok=True)
+
+    # Stands in for the daemon in the one respect that matters: it holds a
+    # port so pid_on_port can find it, and it has a console control handler
+    # that leaves a trace ON DISK. The trace is the witness, and it is
+    # independent of the event (rule 30) - stop_daemon cannot write it, and
+    # a /F kill cannot cause it, because /F never runs a handler.
+    _STUB103 = (
+        "import ctypes, os, socket, sys, time\n"
+        "mark, port = sys.argv[1], int(sys.argv[2])\n"
+        "srv = socket.socket()\n"
+        "srv.bind(('127.0.0.1', port))\n"
+        "srv.listen(5)\n"
+        "R = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)\n"
+        "def _ctrl(ev):\n"
+        "    if ev in (2, 5, 6):\n"
+        "        fh = open(mark, 'w')\n"
+        "        fh.write('handler ran on event %d' % ev)\n"
+        "        fh.close()\n"
+        "        os._exit(0)\n"
+        "    return False\n"
+        "_ref = R(_ctrl)\n"
+        "ctypes.windll.kernel32.SetConsoleCtrlHandler(_ref, True)\n"
+        "fh = open(mark + '.up', 'w')\n"
+        "fh.write(str(os.getpid()))\n"
+        "fh.close()\n"
+        "time.sleep(120)\n")
+    _sp103 = os.path.join(_d103, "stub.py")
+    with open(_sp103, "w") as _fh:
+        _fh.write(_STUB103)
+
+    def _freeport103():
+        s = _sk103.socket()
+        s.bind(("127.0.0.1", 0))
+        n = s.getsockname()[1]
+        s.close()
+        return n
+
+    def _launch103(mark, port):
+        """cmd.exe -> python.exe in ONE console, the real geometry.
+
+        Through a .bat on purpose: that is what puts cmd.exe in the console
+        and leaves python owning no window, which is the whole condition
+        being tested. Born minimised and without focus (rule 29) - the
+        console is created for cmd.exe with this STARTUPINFO and the python
+        child inherits it, so nothing is drawn for anybody to see.
+        """
+        bat = os.path.join(_d103, "run-%d.bat" % port)
+        with open(bat, "w") as fh:
+            fh.write('@echo off\r\n"%s" "%s" "%s" %d\r\n'
+                     % (sys.executable, _sp103, mark, port))
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 7                      # SW_SHOWMINNOACTIVE
+        pr = subprocess.Popen(["cmd", "/c", bat], startupinfo=si,
+                              creationflags=subprocess.CREATE_NEW_CONSOLE,
+                              close_fds=True)
+        for _ in range(120):
+            if os.path.exists(mark + ".up") and _rl103.port_open(port):
+                break
+            time.sleep(0.25)
+        return pr
+
+    _port103 = _freeport103()
+    _mark103 = os.path.join(_d103, "closed.txt")
+    _proc103 = _launch103(_mark103, _port103)
+    _pid103 = _rl103.pid_on_port(_port103)
+    check("the stub holds its port and is the process on it",
+          _pid103 is not None and _rl103.process_alive(_pid103), True)
+    print("   listening on %d as pid %s, launched by cmd.exe %d"
+          % (_port103, _pid103, _proc103.pid))
+
+    print("   THE SABOTAGE (rule 19): the old body's whole polite branch,")
+    print("   run on its own against this stub. It must NOT stop it, or")
+    print("   this case could not tell the two bodies apart.")
+    _tk103 = subprocess.run(["taskkill", "/PID", str(_pid103)],
+                            capture_output=True, text=True,
+                            errors="replace")
+    time.sleep(2.0)
+    check("taskkill /PID alone refuses a console application",
+          _tk103.returncode != 0, True)
+    check("no handler ran, so nothing would have been written cleanly",
+          os.path.exists(_mark103), False)
+    check("and it is still up - this is the 45s the old body then sat out",
+          _rl103.process_alive(_pid103), True)
+
+    print("   now the real function, on that same live stub")
+    _t0103 = time.time()
+    _ok103, _why103 = _rl103.stop_daemon(_port103, timeout=20)
+    _took103 = time.time() - _t0103
+    print("   stop_daemon took %.1fs and said: %s" % (_took103, _why103))
+    check("it reports the stop", _ok103, True)
+    _txt103 = ""
+    if os.path.exists(_mark103):
+        with open(_mark103) as _fh:
+            _txt103 = _fh.read()
+    check("THE CONSOLE HANDLER RAN - the stub's own word for it",
+          _txt103, "handler ran on event 2")
+    check("it did not have to be killed", "killed" in _why103, False)
+    # The first green run of this case still had close_console returning
+    # False on a success: the helper was attached to the console it closed,
+    # so Windows took it down and its exit code was never 0. stop_daemon
+    # then said "no console window" and "closed console window 3802802" in
+    # one sentence and ran the taskkill fallback for nothing. Every check
+    # above passed through that, because the stop DID happen - so the
+    # reason it gives is pinned too, or the same contradiction comes back
+    # silently.
+    check("and the reason names the console close, not the fallback",
+          ("closed console window" in _why103,
+           "taskkill instead" in _why103), (True, False))
+    check("nor did it sit out the polite wait", _took103 < 15, True)
+    check("the stub is gone", _rl103.process_alive(_pid103), False)
+    check("and so is the cmd.exe that owned the window (rule 9)",
+          _rl103.process_alive(_proc103.pid), False)
+
+    print("   close_console refuses what it cannot reach, rather than")
+    print("   reporting a stop that did not happen")
+    _okx103, _whyx103 = _rl103.close_console(_pid103)
+    check("a pid that is gone gets a refusal, not a success", _okx103, False)
+    check("and the refusal says which pid", str(_pid103) in _whyx103, True)
+
+    for _leftover in (_proc103.pid, _pid103):
+        if _rl103.process_alive(_leftover):
+            subprocess.run(["taskkill", "/PID", str(_leftover), "/F"],
+                           capture_output=True, text=True, errors="replace")
+    check("nothing from this case is left running",
+          [x for x in (_proc103.pid, _pid103) if _rl103.process_alive(x)],
+          [])
+
+print("\n104. a hint matches a WHOLE word, and a hyphen binds")
+print("    Both text heuristics used a plain `in`. Word START was the first")
+print("    repair and it was not enough: it cured three misfires and left")
+print("    five, because a hint sits at a word start in every form that was")
+print("    still wrong - an interrogative pronoun turned indefinite by a")
+print("    hyphenated particle, a verb stem reaching the PAST TENSE as")
+print("    readily as the imperative, and 'confirm' inside 'confirmed'.")
+print("    Measured on a fixed corpus: word-start 8 false fires, whole-word")
+print("    0, with missed asks 0 both times. THE LITERALS ARE NOT HERE -")
+print("    this file is published and the public repository carries no")
+print("    Cyrillic; the corpus is test_cases.py case 6.")
+
+print("   THE SABOTAGE (rule 19): what word-start alone did, and still")
+print("   would. If these two agreed there would be nothing to test.")
+
+
+def _startonly104(text, needle):
+    """The previous body, kept here as the control."""
+    i = text.find(needle)
+    while i != -1:
+        before = text[i - 1] if i else ""
+        if not (before.isalnum() or before == "_"):
+            return True
+        i = text.find(needle, i + 1)
+    return False
+
+
+check("word-start called 'confirmed' a request",
+      _startonly104("all of it is confirmed", "confirm"), True)
+check("whole-word does not",
+      daemon.hint_hit("all of it is confirmed", ("confirm",)), False)
+check("nor 'confirms'",
+      daemon.hint_hit("the run confirms the fix", ("confirm",)), False)
+check("but the word itself is still a request",
+      daemon.hint_hit("please confirm before i proceed", ("confirm",)), True)
+
+print("   a hyphen is part of the word, which is the half word-start could")
+print("   not do: the hint is still at the start of a hyphenated form")
+check("a hyphenated compound is not the bare word",
+      daemon.hint_hit("some-thing happened", ("some",)), False)
+check("word-start thought it was",
+      _startonly104("some-thing happened", "some"), True)
+check("and the bare word still matches",
+      daemon.hint_hit("some thing happened", ("some",)), True)
+
+print("   THE COST, pinned so it cannot be forgotten: a stem no longer")
+print("   reaches its own endings, so a list must NAME the forms it means.")
+print("   That is why the hint lists changed in the same commit, and why")
+print("   there is a migration to carry them - see below.")
+check("a stem no longer reaches its longer form",
+      daemon.hint_hit("confirms the run", ("confirm",)), False)
+
+print("   hint_hit on its own, so the contract is not only observed")
+print("   through its two callers")
+check("empty needles never match", daemon.hint_hit("anything", ()), False)
+check("an empty needle is skipped, not a match everywhere",
+      daemon.hint_hit("anything", ("",)), False)
+check("a match at the very start of the text counts",
+      daemon.hint_hit("confirm this", ("confirm",)), True)
+check("a match at the very end counts too",
+      daemon.hint_hit("please confirm", ("confirm",)), True)
+check("a digit before it is inside a word",
+      daemon.hint_hit("utf8confirm", ("confirm",)), False)
+check("an underscore either side is inside a word",
+      (daemon.hint_hit("_confirm", ("confirm",)),
+       daemon.hint_hit("confirm_", ("confirm",))), (False, False))
+check("punctuation either side is a boundary",
+      daemon.hint_hit("(confirm)", ("confirm",)), True)
+check("a later clean occurrence is found when the first is embedded",
+      daemon.hint_hit("utf8confirm, then confirm", ("confirm",)), True)
+check("a multi-word hint still works",
+      daemon.hint_hit("let me know what to do", ("let me know",)), True)
+
+print("   BOTH heuristics go through it, or the repair reaches one and the")
+print("   other keeps the defect")
+_oldq104 = daemon.CFG.get("question_hints")
+_oldi104 = daemon.CFG.get("idle_hints")
+daemon.CFG["question_hints"] = ["ready to ship"]
+daemon.CFG["idle_hints"] = ["out of work"]
+try:
+    check("looks_like_a_question uses it",
+          [daemon.looks_like_a_question([{"who": "assistant", "text": t}])
+           for t in ("nearly ready to ship it", "unready to ship it")],
+          [True, False])
+    check("waiting_for_direction uses it",
+          [daemon.waiting_for_direction([{"who": "assistant", "text": t}])
+           for t in ("i am out of work here", "burnout of workflow")],
+          [True, False])
+finally:
+    daemon.CFG["question_hints"] = _oldq104
+    daemon.CFG["idle_hints"] = _oldi104
+
+print("   `which` is GONE from the built-ins, and that is a removal, not a")
+print("   narrowing: as a whole word it fires on every relative clause, and")
+print("   a real 'which ...?' carries the question mark that is tested")
+print("   before any hint. It caught nothing that was not already caught.")
+# Asserted by BEHAVIOUR with the configured lists emptied, so only the
+# built-ins are in play. A source-text check was written first and was
+# wrong: the comment that records the removal contains the word, so the
+# check went red on a correct build - the failure a scan invites.
+_sq104b, _si104b = daemon.CFG.get("question_hints"), daemon.CFG.get("idle_hints")
+daemon.CFG["question_hints"] = []
+daemon.CFG["idle_hints"] = []
+try:
+    check("with only the built-ins left, a relative clause is not a question",
+          daemon.looks_like_a_question([{"who": "assistant", "text":
+                                         "the branch which the daemon reads"}]),
+          False)
+    check("and the built-ins ARE still in play, or that proved nothing",
+          daemon.looks_like_a_question([{"who": "assistant", "text":
+                                         "please confirm before i proceed"}]),
+          True)
+finally:
+    daemon.CFG["question_hints"] = _sq104b
+    daemon.CFG["idle_hints"] = _si104b
+check("while a real one is still caught, by the question mark",
+      daemon.looks_like_a_question([{"who": "assistant", "text":
+                                     "which branch does it read?"}]), True)
+
+print("\n104b. the lists travel WITH the matcher, or the repair makes")
+print("     things worse")
+print("    Whole-word matching plus the OLD list scores 1 false fire and")
+print("    THREE MISSED questions - worse than either consistent state,")
+print("    because nobody is told when the executor really is asking. The")
+print("    lists live in config.json, which /config cannot write and a")
+print("    running daemon serialises over, so a migration is the only way")
+print("    the two arrive together.")
+print("    The words themselves are NOT in daemon.py: they are the owner's")
+print("    own language and this suite ships publicly, so they are read")
+print("    from hints.local.json, which is packaged and never published.")
+
+_sq104, _si104 = daemon.CFG.get("question_hints"), daemon.CFG.get("idle_hints")
+if not any(daemon.HINTS_AS_PRESCRIBED.values()):
+    print("   this checkout has no hints.local.json, so there is nothing to")
+    print("   carry - and THAT is the contract being checked here, not a skip")
+    check("both lists are empty, not half-loaded",
+          (daemon.HINTS_AS_PRESCRIBED, daemon.HINTS_MEASURED),
+          ({"question_hints": [], "idle_hints": []},
+           {"question_hints": [], "idle_hints": []}))
+    try:
+        daemon.CFG["question_hints"] = []
+        daemon.CFG["idle_hints"] = []
+        check("an empty list is not carried onto an empty list",
+              daemon.migrate_hint_lists(), [])
+        daemon.CFG["question_hints"] = ["a list of my own"]
+        check("nor is anything else touched", daemon.migrate_hint_lists(), [])
+        check("exactly as it was", daemon.CFG["question_hints"],
+              ["a list of my own"])
+    finally:
+        daemon.CFG["question_hints"] = _sq104
+        daemon.CFG["idle_hints"] = _si104
+else:
+    print("   first the half nobody would notice failing: the file is on")
+    print("   disk AND it was read. Empty lists have two causes - no file,")
+    print("   which is the published build, and a file that would not parse,")
+    print("   which is a fault - and until HINTS_PROBLEM they looked alike")
+    check("the file is there and read, with nothing to report",
+          (os.path.exists(daemon.HINTS_FILE), daemon.HINTS_PROBLEM),
+          (True, ""))
+    check("the two lists are not the same, or there would be nothing to carry",
+          daemon.HINTS_AS_PRESCRIBED == daemon.HINTS_MEASURED, False)
+    check("neither list is empty",
+          (bool(daemon.HINTS_MEASURED["question_hints"]),
+           bool(daemon.HINTS_MEASURED["idle_hints"])), (True, True))
+    check("no word was dropped from the question list - it only grew",
+          len(daemon.HINTS_MEASURED["question_hints"])
+          >= len(daemon.HINTS_AS_PRESCRIBED["question_hints"]), True)
+    print("   every measured entry must be reachable by the matcher that")
+    print("   ships, or an entry would be dead on arrival and nothing would")
+    print("   say so")
+    for _k104 in ("question_hints", "idle_hints"):
+        _dead104 = [h for h in daemon.HINTS_MEASURED[_k104]
+                    if not daemon.hint_hit(h, (h,))]
+        check("every %s entry matches itself" % _k104, _dead104, [])
+
+    try:
+        daemon.CFG["question_hints"] = list(
+            daemon.HINTS_AS_PRESCRIBED["question_hints"])
+        daemon.CFG["idle_hints"] = list(
+            daemon.HINTS_AS_PRESCRIBED["idle_hints"])
+        check("the prescribed lists are carried, both of them",
+              sorted(daemon.migrate_hint_lists()),
+              ["idle_hints", "question_hints"])
+        check("and what is in place afterwards is the measured pair",
+              (daemon.CFG["question_hints"], daemon.CFG["idle_hints"]),
+              (daemon.HINTS_MEASURED["question_hints"],
+               daemon.HINTS_MEASURED["idle_hints"]))
+        check("running it again does nothing", daemon.migrate_hint_lists(), [])
+
+        print("   EXACT match only, the same discipline as")
+        print("   migrate_executor_mode: a list somebody has edited is not")
+        print("   somebody else's to rewrite")
+        daemon.CFG["question_hints"] = ["a list of my own"]
+        daemon.CFG["idle_hints"] = ["and another"]
+        check("an edited list is left alone", daemon.migrate_hint_lists(), [])
+        check("exactly as it was", daemon.CFG["question_hints"],
+              ["a list of my own"])
+        print("   and one changed entry is still an edited list, not a match")
+        _near104 = list(daemon.HINTS_AS_PRESCRIBED["question_hints"])
+        _near104[0] = _near104[0] + "x"
+        daemon.CFG["question_hints"] = _near104
+        daemon.CFG["idle_hints"] = ["mine"]
+        check("a near miss is not carried", daemon.migrate_hint_lists(), [])
+    finally:
+        daemon.CFG["question_hints"] = _sq104
+        daemon.CFG["idle_hints"] = _si104
+
+    print("   and the other checkout, reached here because it cannot be")
+    print("   reached there: the public tree cannot run this suite to the")
+    print("   end - it stops at the QUIET.md case, and QUIET.md is in")
+    print("   make_public.NEVER on purpose - so the no-file branch would")
+    print("   otherwise be written and never executed by anybody")
+    _hf104 = daemon.HINTS_FILE
+    _hp104, _hm104 = daemon.HINTS_AS_PRESCRIBED, daemon.HINTS_MEASURED
+    try:
+        daemon.HINTS_FILE = os.path.join(TMP, "there-is-no-such-file.json")
+        _a104, _b104 = daemon._load_hint_lists()
+        check("with no file both halves are empty, not half-loaded",
+              (_a104, _b104),
+              ({"question_hints": [], "idle_hints": []},
+               {"question_hints": [], "idle_hints": []}))
+        daemon.HINTS_AS_PRESCRIBED, daemon.HINTS_MEASURED = _a104, _b104
+        daemon.CFG["question_hints"] = []
+        daemon.CFG["idle_hints"] = []
+        check("an empty list is not carried onto an empty list",
+              daemon.migrate_hint_lists(), [])
+        daemon.CFG["question_hints"] = ["a list of my own"]
+        check("and nothing else is touched either",
+              daemon.migrate_hint_lists(), [])
+        check("exactly as it was", daemon.CFG["question_hints"],
+              ["a list of my own"])
+
+        print("   and the case that must NOT look like the one above: a file")
+        print("   that is there and will not parse. Same empty lists, but it")
+        print("   has to say so, or the words stop working in silence")
+        _bad104 = os.path.join(TMP, "hints-broken.json")
+        with open(_bad104, "w", encoding="utf-8") as _fh104:
+            _fh104.write("{ this is not json")
+        daemon.HINTS_FILE = _bad104
+        _c104, _d104 = daemon._load_hint_lists()
+        check("a broken file still yields empty lists",
+              (_c104, _d104),
+              ({"question_hints": [], "idle_hints": []},
+               {"question_hints": [], "idle_hints": []}))
+        check("but it is NOT silent about it",
+              bool(daemon.HINTS_PROBLEM), True)
+        check("and it names the file, so the sentence is actionable",
+              _bad104 in daemon.HINTS_PROBLEM, True)
+        print("   the two causes must be distinguishable, which is the whole")
+        print("   point - a missing file reports nothing at all")
+        daemon.HINTS_FILE = os.path.join(TMP, "there-is-no-such-file.json")
+        daemon._load_hint_lists()
+        check("a missing file has nothing to report", daemon.HINTS_PROBLEM, "")
+        print("   half a file counts as broken too: the keys are named")
+        with open(_bad104, "w", encoding="utf-8") as _fh104:
+            _fh104.write('{"prescribed": {"question_hints": ["x"]}}')
+        daemon.HINTS_FILE = _bad104
+        daemon._load_hint_lists()
+        check("a half-written file is reported", bool(daemon.HINTS_PROBLEM),
+              True)
+    finally:
+        daemon.HINTS_PROBLEM = ""
+        daemon.HINTS_FILE = _hf104
+        daemon.HINTS_AS_PRESCRIBED, daemon.HINTS_MEASURED = _hp104, _hm104
+        daemon.CFG["question_hints"] = _sq104
+        daemon.CFG["idle_hints"] = _si104
+
+print("\n105. the planner is not told to do what it is already doing")
+print("     The branch fired 1.5 s after the planner's own verdict, to say")
+print("     'you accepted iteration N, now give the executor work'. A")
+print("     planner writing that task at human pace had no chance of")
+print("     beating it. The price of a message is the size of the window")
+print("     it lands in - about 720k for a planner - not the size of the")
+print("     message, so each of those cost a full wake and moved nothing.")
+print("     Measured over the whole journal, 960 firings: the task followed")
+print("     the verdict after a median of 21 s and a p75 of 40 s, and at")
+print("     60 s 787 of the 960 had already gone out.")
+
+check("the wait is the measured one, not a round number",
+      daemon.NUDGE_AFTER_VERDICT_SEC, 60)
+
+_p105 = daemon.norm(PATH)
+_sent105 = []
+_realdel105 = daemon.deliver
+daemon.deliver = lambda path, role, body, meta: (
+    _sent105.append((role, meta.get("kind"), body[:40])) or True)
+_lt105 = daemon.STATE.get("last_task")
+try:
+    print("   the ordinary case: the task went out during the wait")
+    _t0 = time.time()
+    daemon.STATE["last_task"] = {_p105: _t0 + 5}
+    daemon.nudge_for_task(PATH, 42, _t0)
+    check("nothing is sent, because there is nothing to say", _sent105, [])
+
+    print("   THE CASE THE BRANCH EXISTS FOR - it must still fire, or this")
+    print("   is a saving bought by breaking the thing it was saving on")
+    del _sent105[:]
+    daemon.STATE["last_task"] = {_p105: _t0 - 600}
+    daemon.nudge_for_task(PATH, 42, _t0)
+    check("a planner that accepted and went quiet is still told",
+          [(r, k) for r, k, _b in _sent105], [("planner", "info")])
+    check("and it is told which iteration, so it is actionable",
+          "iteration 42" in (_sent105[0][2] if _sent105 else ""), True)
+
+    print("   no record at all is the same as silence: a pair whose task")
+    print("   history the bridge has lost is not one to leave standing")
+    del _sent105[:]
+    daemon.STATE["last_task"] = {}
+    daemon.nudge_for_task(PATH, 42, _t0)
+    check("with no record it errs towards telling", len(_sent105), 1)
+
+    print("   and it may never take a pair down with it: a timer thread")
+    print("   that raises takes its message with it and says nothing")
+    del _sent105[:]
+    daemon.STATE["last_task"] = "not a dict at all"
+    daemon.nudge_for_task(PATH, 42, _t0)
+    check("a broken record is survived, not raised", _sent105, [])
+finally:
+    daemon.deliver = _realdel105
+    if _lt105 is None:
+        daemon.STATE.pop("last_task", None)
+    else:
+        daemon.STATE["last_task"] = _lt105
 
 print("\n" + ("-" * 60))
 if FAILED:

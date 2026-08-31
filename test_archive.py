@@ -223,9 +223,10 @@ write([user("2026-08-01T14:00:00Z", "x"), assistant("2026-08-01T14:00:01Z")],
 m = archive.build(PROJ, known)
 snaps = [x for x in m["files"] if x["kind"] == "snapshot"]
 check("one snapshot", len(snaps), 1)
-check("attributed to the same session", snaps[0]["session_id"], "known-sid")
-check("the time it was taken is kept", snaps[0]["taken_at"], "143000")
-check("and it inherits the role", snaps[0]["role"], "executor")
+_snap0 = snaps[0] if snaps else {}
+check("attributed to the same session", _snap0.get("session_id"), "known-sid")
+check("the time it was taken is kept", _snap0.get("taken_at"), "143000")
+check("and it inherits the role", _snap0.get("role"), "executor")
 print("   the session row gathers its files")
 sess = {s["session_id"]: s for s in m["sessions"]}["known-sid"]
 check("two files for that session", sess["files"], 2)
@@ -257,7 +258,9 @@ if t:
     t.join(30)
 check("the second call did not start its own build", second_call, None)
 check("the first one finished", len(seen), 1)
-check("and it produced the map", seen[0]["totals"]["files"], len(m["files"]))
+check("and it produced the map",
+      ((seen[0].get("totals") or {}).get("files") if seen else None),
+      len(m["files"]))
 check("which is remembered for the next reader",
       archive.last_map(PROJ)["totals"]["files"], len(m["files"]))
 
@@ -295,8 +298,9 @@ _known12 = {"known-sid": {"role": "executor", "project": "proj",
 m12 = archive.build(PROJ, _known12)
 _c12 = [f for f in m12["files"] if f["session_id"] == CARRIED_SID]
 check("the carried file is in the map", len(_c12), 1)
-check("with no role guessed for it", _c12[0]["role"], "unknown")
-check("and no project either", _c12[0]["project"], "unknown")
+_c120 = _c12[0] if _c12 else {}
+check("with no role guessed for it", _c120.get("role"), "unknown")
+check("and no project either", _c120.get("project"), "unknown")
 check("it is counted as unknown rather than hidden",
       m12["totals"]["unknown_files"] >= 1, True)
 check("and MAP.md says so in words rather than quietly",

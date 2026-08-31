@@ -306,6 +306,67 @@ def stop(project, role, pid=None, wait=None):
     return not pid_alive(target)
 
 
+def terminate_and_wait(pid, timeout=30.0):
+    """Kill a process and WAIT on it. True when it is really gone.
+
+    The point is ownership, not patience. Every other way of asking "has it
+    gone yet" in this project is a poll with a margin on it, and a margin is
+    a guess about how long dying takes - the same thing S5.38 refused when
+    it was about a transcript. A guess that is right on a quiet machine and
+    wrong on a busy one is worse than either answer, because it makes the
+    result depend on who runs it: measured 2026-08-31, the same suite on the
+    same code was green here and red on the planner's run, which shares this
+    machine with a live daemon and two pairs.
+
+    On Windows there is a real thing to wait on. The process handle is
+    signalled when the process ends, so WaitForSingleObject with a genuine
+    timeout returns AT the moment of death rather than at the next poll. Two
+    details make it deterministic rather than merely likelier:
+
+      * the handle is opened BEFORE TerminateProcess, so there is no window
+        in which the pid could be reused and the wait could attach to a
+        stranger; and
+      * holding the handle keeps the process object alive after exit, so a
+        process that dies instantly is still waitable - the handle is simply
+        already signalled and the wait returns at once.
+
+    OpenProcess failing means there is nothing to open, which for a pid we
+    were about to kill means it has gone and been reaped. That is True, not
+    an error.
+
+    POSIX has no such handle for a process that is not our child, so there
+    it stays a bounded poll - said plainly rather than pretended away. The
+    fixtures this exists for run on Windows.
+    """
+    if not pid:
+        return True
+    pid = int(pid)
+    if os.name == "nt":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        # SYNCHRONIZE | PROCESS_TERMINATE
+        h = k32.OpenProcess(0x100000 | 0x0001, False, pid)
+        if not h:
+            return not pid_alive(pid)
+        try:
+            k32.TerminateProcess(h, 1)
+            ms = 0xFFFFFFFF if timeout is None else int(max(0.0, timeout)
+                                                        * 1000)
+            return k32.WaitForSingleObject(h, ms) == 0   # WAIT_OBJECT_0
+        finally:
+            k32.CloseHandle(h)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except Exception:
+        pass
+    end = time.time() + (timeout or 0)
+    while time.time() < end:
+        if not pid_alive(pid):
+            return True
+        time.sleep(0.05)
+    return not pid_alive(pid)
+
+
 def pid_alive(pid):
     """Is this pid still a RUNNING process? Cross-platform, best effort.
 

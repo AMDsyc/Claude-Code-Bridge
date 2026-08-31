@@ -63,6 +63,31 @@ def check(name, got, want):
         FAILED.append(name)
 
 
+def read_or_fail(path, what):
+    """Read a file whose existence a check has JUST asserted.
+
+    Returns "" when it is not there, and says so. The form this replaces
+    was: check the file exists, then open it on the next line regardless of
+    the answer - so `check` marked FAIL, and the read three characters
+    later raised and killed the script, taking every block below it with
+    it. Silently: the output simply stops, with no summary and no FAIL
+    line, which reads like a hang rather than a failure. Measured on the
+    public tree, where QUIET.md is deliberately absent: 83 of 103 blocks
+    ran, and the twenty that did not were never reported missing.
+
+    A check that has already spoken must not be able to un-speak itself by
+    crashing. Every caller has to be safe with "" - that is the point: the
+    dependent checks then fail on their own terms, in the output, where a
+    person can see which ones.
+    """
+    if not path or not os.path.isfile(path):
+        print("   !! %s is not there, so the checks below it cannot pass"
+              % (what,))
+        return ""
+    return open(path, encoding="utf-8").read()
+
+
+
 PROJ = os.path.join(TMP, "proj")
 LOGS = os.path.join(PROJ, "bridge-logs")
 RAW = os.path.join(LOGS, "2026-08-02", "raw")
@@ -174,9 +199,9 @@ check("the file it cited was read out of its own Sources section",
 check("an extract was written", os.path.exists(rec["extract"]), True)
 check("it lives in bridge-logs/extracts",
       os.path.basename(os.path.dirname(rec["extract"])), "extracts")
-body = open(rec["extract"], encoding="utf-8").read()
+body = read_or_fail(rec["extract"], "the extract")
 check("the extract opens with the question",
-      body.splitlines()[0], "# how was delivery fixed?")
+      (body.splitlines() or [""])[0], "# how was delivery fixed?")
 check("and carries the answer", "answering the HTTP request" in body, True)
 check("and says which files it cited", "sid-1.jsonl" in body.split("---")[-1],
       True)

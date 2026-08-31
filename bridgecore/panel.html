@@ -228,9 +228,9 @@ details .inner{padding:4px 14px 14px;color:var(--label);line-height:1.6}
   <div class="grid g2">
     <div class="card" id="cardExec">
       <h2 style="margin-top:0">executor - does the work</h2>
-      <div class="lab">model chain - drops down the list when a limit runs out</div>
+      <div class="lab">model chain - the first one is what it STARTS on; the rest are what it drops down to when a limit runs out</div>
       <div id="chainExec"></div>
-      <div class="row" style="margin-top:6px"><select id="addModelExec" style="width:170px"></select><button class="btn" data-add="executor">add</button></div>
+      <div class="row" style="margin-top:6px"><select id="addModelExec" style="width:170px"></select><button class="btn" data-first="executor">start with</button><button class="btn" data-add="executor">add as fallback</button></div>
       <div class="lab" style="margin-top:12px">permission mode</div>
       <select id="modeExec">
         <option value="auto">auto - works alone, asks only for the risky things</option>
@@ -245,9 +245,9 @@ details .inner{padding:4px 14px 14px;color:var(--label);line-height:1.6}
     </div>
     <div class="card">
       <h2 style="margin-top:0">planner - reviews, lives in the app</h2>
-      <div class="lab">model chain</div>
+      <div class="lab">model chain - the first one is what it STARTS on</div>
       <div id="chainPlan"></div>
-      <div class="row" style="margin-top:6px"><select id="addModelPlan" style="width:170px"></select><button class="btn" data-add="planner">add</button></div>
+      <div class="row" style="margin-top:6px"><select id="addModelPlan" style="width:170px"></select><button class="btn" data-first="planner">start with</button><button class="btn" data-add="planner">add as fallback</button></div>
       <div class="lab" style="margin-top:12px">permission mode</div>
       <select id="modePlan">
         <option value="plan">plan - read-only, reviews and answers only</option>
@@ -853,6 +853,12 @@ function renderPanel(){
     (mine.debt_open===1?'':'s')+' still open - <code>bridge-logs/DEBT.md</code>');
   if(mine.no_artifacts)carry.push('<b>'+mine.no_artifacts+'</b> piece'+
     (mine.no_artifacts===1?'':'s')+' accepted with nothing to open');
+  /* An accepted `done` whose words asked for nothing is kept back rather
+     than spent on a wake of its own - and then it has to be on screen,
+     because content nobody can see is the defect this came out of. */
+  if(mine.held_chars)carry.push('<b>'+mine.held_chars+'</b> character'+
+    (mine.held_chars===1?'':'s')+' of an accepted verdict held for the next '+
+    'message to the executor');
   $("#carrying").innerHTML=carry.length
     ? '<div class="alert">'+carry.join(' &nbsp;·&nbsp; ')+'</div>' : "";
   $("#noteBox").style.display=S.note?"":"none";
@@ -1190,9 +1196,21 @@ function renderLaunch(){
       var c=document.createElement("span");c.className="chip";
       var lb=mlabel(m);
       var tail=lb?' <span class="dim">· '+esc(lb)+'</span>':(D.model_probe_running?' <span class="dim">· checking…</span>':' <span class="dim">· ?</span>');
-      c.innerHTML=esc(m)+tail+' <b data-r="'+role+'" data-i="'+i+'">x</b>';host.appendChild(c)});
+      /* Which one actually starts was the invisible half of this window.
+         The launch sends CHAINS[role][0] and the preview shows it, but the
+         chips were drawn identically, so a chain of [fable, opus] read as
+         "both are selected" - and the owner, who had chosen opus in the
+         drop-down, got a fable planner on 2026-08-30. The head says so. */
+      var head=(i===0)?' <span class="amber">· starts here</span>':'';
+      c.innerHTML=esc(m)+tail+head+' <b data-r="'+role+'" data-i="'+i+'">x</b>';host.appendChild(c)});
     var sel=$(role==="executor"?"#addModelExec":"#addModelPlan");
+    /* Keep what the person picked across the rebuild. Without this the
+       select silently snapped back to the first option on every render
+       (2.5s), so the control never held the choice long enough to be
+       acted on - the same class as the chain edit of §5.8. */
+    var was=sel.value;
     sel.innerHTML=(D.models||[]).map(function(m){var lb=mlabel(m);return '<option value="'+esc(m)+'">'+esc(m)+(lb?" — "+esc(lb):"")+'</option>'}).join("");
+    if(was&&(D.models||[]).indexOf(was)>=0)sel.value=was;
   });
   $$("#w-launch .chip b").forEach(function(b){b.onclick=function(){
     window._launchTouched=true;
@@ -1213,6 +1231,23 @@ $$("[data-add]").forEach(function(b){b.onclick=function(){
   var role=b.dataset.add,sel=$(role==="executor"?"#addModelExec":"#addModelPlan");
   if(sel.value&&CHAINS[role].indexOf(sel.value)<0){window._launchTouched=true;
     CHAINS[role].push(sel.value)}renderLaunch()}});
+/* "start with" - the gesture this window did not have, and the whole of the
+   2026-08-30 report. launchRole() sends CHAINS[role][0]; the drop-down fed
+   only "add", which APPENDS. So choosing opus on a planner whose saved chain
+   was ["fable"] produced ["fable","opus"] at best - and the launch still sent
+   fable. Nothing in the window could put a model at the head except deleting
+   every chip in front of it, so "I chose Opus for both halves" started a fable
+   planner, with model_req="fable" recorded against it in STATE["pids"].
+   Move-to-front rather than insert, or picking a model already in the chain
+   would leave a duplicate behind the head and change what the ladder falls
+   down to. The latch is set for the same reason the x button sets it (§5.8):
+   the very next render re-reads the saved chains and would throw this away. */
+$$("[data-first]").forEach(function(b){b.onclick=function(){
+  var role=b.dataset.first,sel=$(role==="executor"?"#addModelExec":"#addModelPlan");
+  if(!sel.value)return;
+  window._launchTouched=true;
+  var rest=(CHAINS[role]||[]).filter(function(m){return m!==sel.value});
+  rest.unshift(sel.value);CHAINS[role]=rest;renderLaunch()}});
 $("#modeExec").onchange=function(){MODE.executor=this.value;preview()};
 $("#adminExec").onchange=function(){MODE.admin=this.checked;preview()};
 $("#modePlan").onchange=function(){MODE.planner=this.value;preview()};

@@ -508,6 +508,18 @@ writes it down itself: search a transcript under `~/.claude/projects/` for
 `compact_boundary` and read `preTokens`. That is the client's own number, not
 the bridge's, which is why it settles the question.
 
+**This project's own configuration does not set the key at all**, and the
+reasoning is worth having before you set it yourself. A threshold below the
+ceiling only earns its place if working near the ceiling costs something.
+Measured on a project here that has never had the key: it compacts at
+999,213–1,000,933, the client calls those `auto`, and about 10k of context
+survives each time. Its api-error records are **all** rate limits; a genuine
+*prompt is too long* appears twice in its entire history, both in one old
+session. Meanwhile the threshold decides how much work a session gets through
+before it is replaced — roughly 2.3M tokens at a 477k point, 3.4M at 700k, 5M
+at the ceiling — and each replacement pays for a fresh context and, if a
+dialog is involved, some of your evening. Lower is not safer for free.
+
 Environment variables:
 
 | variable | what it does |

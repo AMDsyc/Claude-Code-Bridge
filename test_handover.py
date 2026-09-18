@@ -34,6 +34,10 @@ import time
 
 TMP = tempfile.mkdtemp(prefix="bridge-test-")
 os.environ["BRIDGE_DATA"] = os.path.join(TMP, "data")
+# The client's own config is isolated too: install() marks a project trusted
+# there, and without this a suite would merge its throwaway temp projects into
+# the real ~/.claude.json on this machine.
+os.environ["BRIDGE_CLAUDE_JSON"] = os.path.join(TMP, ".claude.json")
 os.environ["PYTHONUTF8"] = "1"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -255,10 +259,51 @@ check("compactions on record", (row["compactions_done"], row["budget"]),
 check("distance to the wall on record", row["left_to_wall"] is not None, True)
 check("kept for the panel", len(daemon.STATE.get("handover_log") or []), 1)
 
-print("\n13. every launch path records the compaction threshold it passed")
-lsrc = inspect.getsource(daemon.ensure_session)
-check("ensure_session records it", "autocompact=compact_pct(path)" in lsrc,
-      True)
+# A percentage written into a launch path itself rather than read from
+# the project - `compact_pct=90` or similar. The project's own setting
+# is the only place a number may live, which is the whole difference
+# between this and the bridge-wide default removed on 2026-09-01.
+import re as _re                                          # noqa: E402
+_re13 = _re.compile(r"compact_pct\s*=\s*\d")
+print("\n13. EVERY launch path passes the threshold, and none invents one")
+print("    This case has now said three things, and the guard underneath")
+print("    has not moved once: whatever the policy is, all the launch paths")
+print("    must share it. The original incident was one path of six")
+print("    forgetting to record what it had passed, so a window the bridge")
+print("    had configured looked like somebody else's ever after. On")
+print("    2026-09-01 nothing was passed at all and this asserted the empty")
+print("    list. On 2026-09-02 the owner asked for a threshold again - as a")
+print("    PROJECT setting - so the list must now be full instead, and a")
+print("    path that quietly stops passing it is caught here. -> 8.2")
+_lpaths = [daemon.ensure_session, daemon.handover, daemon.rotate_executor]
+check("every launch path hands the project's percentage down",
+      sorted(f.__name__ for f in _lpaths
+             if "compact_pct=launch_pct(" in inspect.getsource(f)),
+      sorted(f.__name__ for f in _lpaths))
+print("    and NOT a number of its own: the only value any of them may")
+print("    pass is what the project's config says")
+check("no launch path names a percentage itself",
+      [f.__name__ for f in _lpaths
+       if _re13.search(inspect.getsource(f))], [])
+print("    the record carries BOTH terms, because either alone is not a")
+print("    threshold: a percentage without autoCompactWindow is inert (8.2)")
+reset()
+daemon.reg_pid(PATH, "executor", 4321, "sid-ac")
+_rec = daemon.STATE["pids"]["%s|executor" % daemon.norm(PATH)]
+check("reg_pid records the threshold and the window it multiplies with",
+      ("autocompact" in _rec, "compact_window" in _rec), (True, True))
+print("    and for a project that asks for nothing, both are None rather")
+print("    than a guess - this fixture's project sets neither")
+check("nothing claimed for a project that set nothing",
+      (_rec.get("autocompact"), _rec.get("compact_window")), (None, None))
+check("...and the control: it wrote the record it was asked for",
+      _rec.get("pid"), 4321)
+print("    with the control: the same sources DO still show a launch")
+print("    happening, so the empty list above is not an empty read")
+check("...the launch paths are still launch paths",
+      sorted(f.__name__ for f in _lpaths
+             if "sessions.launch(" in inspect.getsource(f)),
+      sorted(f.__name__ for f in _lpaths))
 
 print("\n15. a window the bridge did not start is not half of the pair")
 check("executor is managed", daemon.managed("executor"), True)
@@ -1592,6 +1637,43 @@ check("a named test counts",
 check("a yes does not", daemon.residence_ok("Residence: yes"), False)
 check("and a version number is not a residence",
       daemon.residence_ok("Residence: version 2.1.232"), False)
+print("   AND IT HAS TO ACCEPT THE SEPARATORS THIS MACHINE ACTUALLY USES.")
+print("   The file:place branch was ^[\\w./-]+::?[\\w.]+$ - no backslash in")
+print("   the class, no hyphen to the right of the colon - so an honest")
+print("   residence written in native Windows paths was REFUSED by the gate,")
+print("   and the writer reads that as the gate being fussy (rule 24).")
+print("   The absolute path is the trap: a drive letter makes TWO colon")
+print("   groups, so adding a backslash to the class fixes the relative")
+print("   form and leaves this one refused - half a fix that looks whole.")
+check("a relative Windows path with a function",
+      daemon.residence_ok(r"Residence: bridgecore\daemon.py:handover"), True)
+print("   The absolute case is DERIVED, never written down: a published")
+print("   suite may not carry this machine's layout - check_public refuses")
+print("   an absolute local path, and its placeholder form cannot carry a")
+print("   filename, so no literal exists that both gates would pass. It is")
+print("   computed instead, which is the stronger check anyway: the drive")
+print("   letter is whatever the machine running this actually uses.")
+print("   On POSIX there is no drive letter and no second colon group - the")
+print("   trap is a Windows one, and this is a Windows-first project.")
+_abs = os.path.abspath("/proj/pkg/mod.py")
+check("an ABSOLUTE path - on Windows the drive is a SECOND colon group",
+      daemon.residence_ok("Residence: %s:handover" % _abs), True)
+check("hyphens in the place name, right of the colon",
+      daemon.residence_ok("Residence: bridge-logs/handoff/"
+                          "087-shift.md:whose-compaction-counts"), True)
+print("   and every refusal it used to make it must go on making, because a")
+print("   gate with a hole is worse than a gate that nags")
+print("   (the Russian word that started this gate is refused too, and")
+print("    it is checked in test_cases.py block 4 - a published suite")
+print("    carries no Cyrillic, written out or escaped)")
+check("a bare yes is still not a residence",
+      daemon.residence_ok("Residence: yes"), False)
+check("a bare version is still not a residence",
+      daemon.residence_ok("Residence: 2.1.232"), False)
+check("a bare commit hash is still not a residence",
+      daemon.residence_ok("Residence: a7474c0"), False)
+check("and a line under the length floor is still not one",
+      daemon.residence_ok("Residence: x.y"), False)
 print("   debt is parsed from the executor's own words, and the register is")
 print("   rendered from state so the file and the counter cannot disagree")
 _dp = os.path.join(TMP, "debtproj")
@@ -2928,6 +3010,22 @@ from bridgecore import sessions as _sess                 # noqa: E402
 # A whole project to compare against, built here rather than borrowed from
 # the machine: a suite that passes only where the bridge happens to be
 # installed is a suite that proves nothing on anybody else's disk.
+# THE CLIENT'S CONFIG IS ONE OF THE MARKS, and the only one that is not a
+# file in the project. A window launched into a folder the client has not
+# been told to trust stops on the trust dialog with "No, exit" selected,
+# runs no hooks, starts no MCP server - and nobody answers, because rule 29
+# births it minimised and unfocused. Read verbatim off a fixture window's
+# console on 2026-09-03. The file here is a throwaway one (BRIDGE_CLAUDE_JSON)
+# with a stranger's entry in it, so "install did not touch anybody else" is a
+# check and not a hope. The stranger's KEY is not path-shaped on purpose:
+# check_public refuses an absolute local path in a published file whether it
+# points at anything or not, and this suite is published.
+_cj = os.environ["BRIDGE_CLAUDE_JSON"]
+_io.open(_cj, "w", encoding="utf-8").write(_js.dumps(
+    {"numStartups": 7,
+     "projects": {"a-stranger-project": {"hasTrustDialogAccepted": False,
+                                       "allowedTools": ["x"]}}}))
+
 _whole = os.path.join(TMP, "whole_project")
 os.makedirs(_whole, exist_ok=True)
 _inst.install(_whole, "executor")
@@ -2943,7 +3041,7 @@ _io.open(os.path.join(_blind, ".mcp.json"), "w", encoding="utf-8").write(
     u'{"mcpServers": {"aftereffects": {"command": "node", "args": ["x"]}}}')
 _gaps = _inst.marks_missing(_blind)
 check("a stripped project reports every kind of missing mark",
-      len(_gaps), 5)
+      len(_gaps), 6)
 check("the hooks gap names the settings file it is about",
       any("settings.json" in g and "no bridge hook" in g for g in _gaps), True)
 check("and it names every one of the eight events, not just the first",
@@ -2967,6 +3065,55 @@ _io.open(os.path.join(_bad, ".claude", "settings.json"), "w",
          encoding="utf-8").write(u"{not json at all")
 check("unreadable settings say so rather than reading as 'absent'",
       any("not valid JSON" in g for g in _inst.marks_missing(_bad)), True)
+
+print("   AND THE TRUST MARK, which lives in the client's config and not in")
+print("   the project. Without it the window stops before its first hook,")
+print("   and the default answer on that screen is `No, exit` - so a blind")
+print("   keystroke does not rescue it either.")
+check("the stripped project is named as untrusted, with the file and the key",
+      any(".claude.json" in g and "not marked trusted" in g
+          and "No, exit" in g for g in _gaps), True)
+# A SECOND stripped project, because installing into _blind here would
+# repair it before case 69 gets to prove that the launch gate repairs it -
+# a test that quietly does another test's work is a test that stops failing.
+_blind_t = os.path.join(TMP, "blind_for_trust")
+os.makedirs(os.path.join(_blind_t, ".claude"), exist_ok=True)
+_io.open(os.path.join(_blind_t, ".claude", "settings.json"), "w",
+         encoding="utf-8").write(
+    u'{"permissions": {"allow": ["mcp__bridge__task"]}}')
+_inst.install(_blind_t, "executor")
+_cj_after = _js.loads(_io.open(_cj, encoding="utf-8").read())
+_bkey = os.path.abspath(_blind_t).replace("\\", "/")
+check("install marks the folder trusted for the client",
+      (_cj_after.get("projects") or {}).get(_bkey, {})
+      .get("hasTrustDialogAccepted"), True)
+check("and marks_missing stops naming it",
+      any("not marked trusted" in g for g in _inst.marks_missing(_blind_t)),
+      False)
+print("   MERGED, never replaced: a stranger's entry and every other key")
+print("   survive, and one backup is kept")
+check("somebody else's project is untouched",
+      (_cj_after.get("projects") or {}).get("a-stranger-project"),
+      {"hasTrustDialogAccepted": False, "allowedTools": ["x"]})
+check("and the keys that have nothing to do with us are still there",
+      _cj_after.get("numStartups"), 7)
+check("a backup of the client config was kept",
+      os.path.isfile(_cj + ".before-bridge"), True)
+check("the backup is what it was BEFORE the field went in",
+      (_js.loads(_io.open(_cj + ".before-bridge", encoding="utf-8").read())
+       .get("projects") or {}).get(_bkey, {}).get("hasTrustDialogAccepted"),
+      None)
+print("   CONTROL: it never raises and never invents a file - an unreadable")
+print("   config and a missing one are both simply nothing done")
+_cj_bad = os.path.join(TMP, "claude-not-json.json")
+_io.open(_cj_bad, "w", encoding="utf-8").write(u"{not json")
+check("unreadable client config: nothing done, nothing raised",
+      _inst.trust_folder(_blind_t, config=_cj_bad), "")
+check("a client config that does not exist: the same",
+      _inst.trust_folder(_blind_t, config=os.path.join(TMP, "no-such.json")),
+      "")
+check("and a project already trusted is not rewritten",
+      _inst.trust_folder(_blind_t), "")
 
 print("\n69. the gate repairs at launch, and says so where a person will see")
 print("    it. It lives in sessions.launch and not at any of its callers -")
@@ -3079,6 +3226,17 @@ _real_popen = _sess.subprocess.Popen
 _real_probe = daemon.maybe_auto_probe
 _sess.subprocess.Popen = _FakePopen
 daemon.maybe_auto_probe = lambda *a, **k: None
+# THIS BLOCK MEANS THE REAL COMMAND LINE, which is the whole point of it:
+# it replaces Popen rather than build_command precisely so it can read the
+# flags sessions.py really produces. sessions.real_client_refused stops a
+# suite reaching a real client (-> DECISIONS.md 8.11) and refused here
+# before Popen ever saw the command, taking four checks with it. So this
+# is the one place that says outright that it means it. Nothing can be
+# spawned while _FakePopen is in front, and if it ever were not, _caught
+# would be empty and every check below would fail loudly rather than a
+# window opening quietly.
+_was_real = os.environ.get("BRIDGE_REAL_CLIENT")
+os.environ["BRIDGE_REAL_CLIENT"] = "1"
 _lp = os.path.join(TMP, "launch_model_project")
 os.makedirs(os.path.join(_lp, ".claude"), exist_ok=True)
 for _role, _want in (("executor", "opus"), ("planner", "sonnet")):
@@ -3097,6 +3255,10 @@ check("no model chosen means no --model flag",
       "--model" in (_caught[0] if _caught else []), False)
 _sess.subprocess.Popen = _real_popen
 daemon.maybe_auto_probe = _real_probe
+if _was_real is None:
+    os.environ.pop("BRIDGE_REAL_CLIENT", None)
+else:
+    os.environ["BRIDGE_REAL_CLIENT"] = _was_real
 
 print("\n72. tier 1: both halves waiting on each other")
 print("    The case this was built for: the executor finished a piece")
@@ -3504,16 +3666,45 @@ print("   is nothing in the way. Conflating them blocked every handover the")
 print("   suite drives, where no real process exists at all")
 check("the rotation asks whether a KNOWN process is still alive",
       "_pid and sessions.pid_alive(_pid)" in _rot, True)
-check("and so does the handover",
-      "_pid and sessions.pid_alive(_pid)" in _hand, True)
 check("a handover that refuses still answers in its own shape, a dict",
       '"ok": False, "error":' in _hand, True)
 check("and returns before launching anything",
       _rot.index("refuse_replacement") < _rot.index("sessions.launch"), True)
-check("a handover refuses too",
-      "refuse_replacement(path, role, _pid, \"handover\")" in _hand, True)
-check("and it refuses the WHOLE handover, not just the stuck half",
-      _hand.index("refuse_replacement") < _hand.index("sessions.launch"), True)
+# CHANGED DELIBERATELY 2026-09-04 (X1b), and one of these claims is
+# REVERSED rather than moved. Three of them used to read handover()'s own
+# text: that it asked `_pid and sessions.pid_alive(_pid)`, that it called
+# refuse_replacement, and that it did so BEFORE sessions.launch - "it
+# refuses the whole handover, not just the stuck half". All three were
+# right while the old window was stopped first: a window that would not
+# close then meant two live executors on one seat.
+#
+# The order is the other way round now. The replacement is launched and
+# has reported for duty before anything is stopped, so refusing at this
+# point would leave the new window AND the old one running with nobody
+# told which is which - the very outcome the old claim existed to
+# prevent. The refusal is kept (it still journals at warn and rings a
+# person) and the swap completes. -> DECISIONS.md 8.7
+_stop = inspect.getsource(daemon.stop_the_replaced)
+check("the handover's refusal moved with the stop, into stop_the_replaced",
+      'refuse_replacement(path, role, pid, "handover")' in _stop, True)
+check("and it still asks the process, not the request",
+      "sessions.pid_alive(pid)" in _stop, True)
+check("but it is no longer an abort - the swap finishes after it",
+      _stop.index("refuse_replacement") < _stop.index("retire_sessions"),
+      True)
+check("and handover() stops nothing itself any more",
+      "sessions.stop(" in _hand, False)
+# CORRECTED THE SAME DAY, and the first version of this line was wrong in
+# a way worth keeping on the record: it asserted "launches first, records
+# what to stop afterwards", which is exactly the order that let a fast
+# replacement drop the handover record before stop_after was written - and
+# then have it resurrected empty. The pids are known before the launch, so
+# they are written before it, and what happens after is a PRUNE that never
+# re-creates. -> DECISIONS.md 8.7, test_multipair case 76
+check("it writes down what to stop BEFORE it launches anything",
+      _hand.index('"stop_after"') < _hand.index("sessions.launch"), True)
+check("and afterwards it prunes that record, never re-creates it",
+      "hv is not None" in _hand, True)
 print("   and the refusal is not silent - it names the pid that would not")
 print("   die, at warn, and calls a person, because a window nobody can")
 print("   close is not something the bridge can solve on its own")
@@ -3543,15 +3734,18 @@ for _m in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
            "CLAUDE_PID", "CLAUDE_CODE_MESSAGING_TOKEN",
            "CLAUDE_CODE_ENTRYPOINT"):
     check("%s does not pass through" % _m, _m in _clean, False)
-print("   but the two the bridge sets ITSELF must survive - stripping by")
-print("   prefix would have taken them, and the compaction point would go")
-print("   back to being a guess")
+print("   the ONE that is still ours survives - stripping by prefix would")
+print("   have taken it too. The compaction override is no longer among")
+print("   them: it stopped being SET on 2026-09-01, and the same edit had")
+print("   to make it start being STRIPPED, because a variable nobody sets")
+print("   but everybody inherits still reaches every window - measured, in")
+print("   a window a launch really opened, at 70 before and nothing after")
 _dirty["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = "80"
 _dirty["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"] = "200"
 _clean2 = sessions.clean_env(_dirty)
-check("the compaction override survives",
-      _clean2.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"), "80")
-check("and the stop-hook cap survives",
+check("an inherited compaction override does NOT pass through",
+      "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE" in _clean2, False)
+check("and the stop-hook cap, which IS ours, still does",
       _clean2.get("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"), "200")
 check("while the rest of the environment is untouched",
       bool(_clean2.get("PATH")), True)
@@ -3632,25 +3826,50 @@ print("    request too big to send: 1,000,274 tokens against a")
 print("    1,000,000 window. At 80% the threshold was 800k, which")
 print("    leaves 200,000 of headroom - and the turn wanted 200,274.")
 print("    It missed by 274 tokens")
-check("the threshold is 70 now, not 80",
-      store.PROJECT_DEFAULTS.get("autocompact_pct"), 70)
-print("   70% leaves 300k - half as much again as the largest single turn")
-print("   ever seen here. That margin IS the number's reason")
+check("the bridge keeps no compaction threshold of its own",
+      "autocompact_pct" in store.PROJECT_DEFAULTS, False)
+print("   70% left 300k - half as much again as the largest single turn")
+print("   ever seen here. That arithmetic is still what anyone who sets a")
+print("   threshold has to do; it is simply no longer ours to set")
 _win = 1000000
 _thr = min(int(_win * 70 / 100), _win - 13000)
 check("on a 1M window that is a 700k threshold", _thr, 700000)
 check("leaving 300k of headroom for one turn", _win - _thr, 300000)
 check("which is more than the turn that died needed",
       (_win - _thr) > 200274, True)
-print("   and the value reaches the window: the client reads")
-print("   CLAUDE_AUTOCOMPACT_PCT_OVERRIDE as a PERCENT and honours it for")
-print("   0 < n <= 100, and launch() puts it in the environment it passes")
+print("   and launch() hands an override ONLY where it can work. Both")
+print("   halves or neither: the percentage and autoCompactWindow multiply,")
+print("   and the pair that never had the companion setting got the same 70")
+print("   and compacted at the ceiling regardless - so sending one to a")
+print("   project with no key would not merely do nothing, it would record")
+print("   a threshold the window is not running under (8.2)")
 _ls = inspect.getsource(sessions.launch)
-check("launch sets the override from what it was given",
-      'env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(int(autocompact_pct))'
-      in _ls, True)
-check("and passes that environment to the process",
-      "env=env" in _ls, True)
+check("launch sets the override", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE" in _ls,
+      True)
+check("through the both-halves test and not straight from its argument",
+      "compact_pct_for(project, compact_pct)" in _ls, True)
+_nokey = os.path.join(TMP, "pct-nokey")
+os.makedirs(os.path.join(_nokey, ".claude"), exist_ok=True)
+with io.open(os.path.join(_nokey, ".claude", "settings.json"), "w",
+             encoding="utf-8") as _fh:
+    _json.dump({"hooks": {}}, _fh)
+check("a project with no autoCompactWindow is given nothing",
+      sessions.compact_pct_for(_nokey, 90), None)
+with io.open(os.path.join(_nokey, ".claude", "settings.json"), "w",
+             encoding="utf-8") as _fh:
+    _json.dump({"hooks": {}, "autoCompactWindow": 1000000}, _fh)
+check("with the key, the project's percentage is what goes",
+      sessions.compact_pct_for(_nokey, 90), 90)
+check("and a project that asked for none still gets none",
+      sessions.compact_pct_for(_nokey, None), None)
+check("a nonsense percentage is refused rather than sent",
+      [sessions.compact_pct_for(_nokey, v) for v in (0, 101, -5, "x")],
+      [None, None, None, None])
+print("   with a control, because a negative on source text is also green")
+print("   when the source read is not the source you think it is")
+check("...and launch still sets what it always set", 
+      'env["BRIDGE_ROLE"] = role' in _ls, True)
+check("and passes that environment to the process", "env=env" in _ls, True)
 print("   the detector no longer accuses the setting of going missing. It")
 print("   said so five times between 2026-07-30 and 2026-08-17 and was")
 print("   wrong every time: `at` is where the TURN ENDED, not where")
@@ -3681,21 +3900,35 @@ check("while whatever was already there is untouched",
 check("writing it twice is a no-op, not a rewrite",
       _inst2.keep_autocompact_on(_acp), False)
 
-print("\n82. the frozen consoles were not QuickEdit, and one number, one place")
+print("\n82. the frozen consoles WERE QuickEdit, and the reading said not")
 print("    The owner reported both windows hanging, freed by Esc, and")
 print("    nothing moving in either window - not even a spinner. QuickEdit")
-print("    fits that shape: a click puts a console into selection mode and")
-print("    the writing process blocks. So it was measured rather than")
+print("    fits that shape exactly: a click puts a console into selection")
+print("    mode and the writing process blocks. It WAS measured rather than")
 print("    assumed - AttachConsole to a live window, open CONIN$, read the")
-print("    input mode")
-print("   RESULT: mode=0x0208 in every live window - ENABLE_WINDOW_INPUT and")
-print("   ENABLE_VIRTUAL_TERMINAL_INPUT, with ENABLE_QUICK_EDIT_MODE (0x40)")
-print("   CLEAR and ENABLE_MOUSE_INPUT (0x10) clear too. The client turns")
-print("   QuickEdit off itself, so a click selects nothing and reaches")
-print("   nothing. HYPOTHESIS EXCLUDED - and no fix was built for it")
+print("    input mode - and the measurement came back mode=0x0208, with")
+print("    ENABLE_QUICK_EDIT_MODE (0x40) clear. This case then pinned")
+print("    'hypothesis excluded, no fix was built'.")
+print("   THAT WAS WRONG, AND THIS CASE WAS WRONG WITH IT. 2026-09-05:")
+print("   0x0208 also has ENABLE_EXTENDED_FLAGS (0x80) CLEAR, and with THAT")
+print("   bit clear the mode word carries no QuickEdit or Insert bit at all")
+print("   - they come from the console's defaults, and this machine's")
+print("   HKCU/Console/QuickEdit is 1. The reading could not see the flag it")
+print("   was used to rule out. Meanwhile the owner's windows went on")
+print("   freezing, and the frozen one's TITLE read the host's own word for")
+print("   a selection: 78 s in which that window's title never changed while")
+print("   two controls changed five times each. -> DECISIONS.md 8.14")
+print("   So the assertion is INVERTED rather than deleted: the bootstrap")
+print("   exists now, and a check that pins its absence would be this same")
+print("   mistake written down a second time.")
 _ss = inspect.getsource(sessions)
-check("no QuickEdit bootstrap was added to the launch path",
-      "ENABLE_QUICK_EDIT" in _ss, False)
+check("the launch path DOES clear QuickEdit now",
+      "ENABLE_QUICK_EDIT" in _ss or "QUICK_EDIT" in _ss, True)
+check("and it sets EXTENDED in the same write, which is the whole defect",
+      "EXTENDED" in _ss, True)
+check("the arithmetic, so this cannot rot: on the mode that was measured, "
+      "clearing 0x40 alone is a no-op", 0x0208 & ~0x0040, 0x0208)
+check("and setting 0x80 with it is not", (0x0208 | 0x0080) & ~0x0040, 0x0288)
 check("and the launch command is still claude, not a wrapper",
       inspect.getsource(sessions.build_command).count('cmd = ["claude"]'), 1)
 print("   what remains in suspicion is ours and already written down: a")
@@ -3712,11 +3945,13 @@ _panel2 = _io.open(os.path.join(os.path.dirname(daemon.__file__),
                                 "panel.html"), encoding="utf-8").read()
 check("the hard-coded fallback is gone", "autocompact_pct||80" in _panel2,
       False)
-check("the panel reads the default the bridge sends",
-      "defaults||{}).autocompact_pct" in _panel2, True)
+check("and so is the control itself, now that nothing is behind it",
+      "acPct" in _panel2, False)
 _dsrc2 = inspect.getsource(daemon)
-check("and /state sends it, from the one place it is defined",
-      'store.PROJECT_DEFAULTS.get("autocompact_pct")' in _dsrc2, True)
+check("and nothing in the daemon reads a compaction default any more",
+      'PROJECT_DEFAULTS.get("autocompact_pct")' in _dsrc2, False)
+check("...with the control that both sources were really read",
+      len(_panel2) > 10000 and len(_dsrc2) > 10000, True)
 
 print("\n83. a channel a subagent started may not take the window's seat")
 print("    PROJECT is os.getcwd() and ROLE is BRIDGE_ROLE, and anything a")
@@ -3912,15 +4147,33 @@ print("   repository is English-only, and check_public.py enforces that.")
 print("   Spelling the Russian phrases out in escapes would pass the scan")
 print("   while meaning exactly what the scan exists to stop")
 import re as _re29
-check("the Russian canon now carries 34 numbered rules",
-      len(_re29.findall(r"^\d+\. \*\*", _ru, _re29.M)), 34)
+# 34 -> 35 on 2026-09-04, deliberately: rule 35 is "no claim about state
+# without a witness opened in this same turn", and its gate is claim_gate
+# on the planner's Stop hook (-> DECISIONS.md 8.8). These four are a COPY
+# of a number and are meant to be: a rule added quietly is a rule the
+# English twin, the header and the titles tier can drift away from, and
+# that is what they catch. They caught this one.
+check("the Russian canon now carries 35 numbered rules",
+      len(_re29.findall(r"^\d+\. \*\*", _ru, _re29.M)), 35)
 check("and every one of them still carries its check",
-      len(_re29.findall(r"^\s+\*[^*]+:\*", _ru, _re29.M)), 34)
-check("the English canon carries 34 too",
+      len(_re29.findall(r"^\s+\*[^*]+:\*", _ru, _re29.M)), 35)
+# ONE check marker per rule, not "at least one". Rule 35's first draft
+# carried two - its check and its gate on separate italic lines - which
+# reads as a 36th check for a 35th rule and would have made this counter
+# meaningless from then on. The gate is named inside the check line.
+check("the English canon carries 35 too",
       not _en_here
-      or len(_re29.findall(r"^\d+\. \*\*", _en, _re29.M)) == 34, True)
+      or len(_re29.findall(r"^\d+\. \*\*", _en, _re29.M)) == 35, True)
 check("the English header counts them",
-      not _en_here or "Thirty-four rules." in _en, True)
+      not _en_here or "Thirty-five rules." in _en, True)
+# AND THE TITLES TIER CARRIES IT, which is the half a count cannot see.
+# honesty_titles() matches the number and the bold title ON ONE LINE, and
+# rule 35's first draft wrapped its title onto the second - so the rule was
+# in the full text and absent from the titles, which is every delivery
+# after a session's first. That is S5.39's class exactly: a rule that never
+# reaches a running session.
+check("and every rule reaches the titles tier, not just the full text",
+      len(_re29.findall(r"^\d+\. ", daemon.honesty_titles(), _re29.M)), 35)
 print("   the English rule names the mechanism, not just the goal")
 check("born minimised by the operating system",
       not _en_here or ("BORN minimised" in _en
@@ -4158,8 +4411,17 @@ print("   because nothing gets one turn past 996k and lives")
 cal[store.calib_key("opus 5", PATH)]["compact_at_tokens"] = 996305
 store.save_calibration(cal)
 _w2 = daemon.wall_view(_sj(970000), PATH)
+# Guarded, and the guard was earned: rule 1r can blank this point (it is
+# `compact_refuted` then), and written as a bare `>` the comparison raised
+# TypeError against None and took the 40-odd blocks below it in silence -
+# no FAIL line, no summary, output simply stopping. That is the class the
+# read_or_fail note in CLAUDE.md is about, in its comparison form. The
+# answer to a blanked point here is False, which fails on its own line and
+# names itself.
 check("the repaired point is above the wall",
-      _w2["compact"] > _w2["wall"], True)
+      bool(_w2["compact"]) and _w2["compact"] > _w2["wall"], True)
+check("and it was not refuted - a point above the wall is the pair's real "
+      "problem, not a stale number", _w2.get("compact_refuted"), None)
 print("   since 2026-08-22 rule 1a catches this one EARLIER and calmly - a")
 print("   point that leaves less room than a compaction needs means this")
 print("   session can never summarise itself, so it is replaced two of its")
@@ -4223,14 +4485,28 @@ print("   and since 2026-08-22 the line it reads is MEASURED, not the")
 print("   window minus an unmeasured reserve: 33 compactions succeeded")
 print("   above that reserve, so it was replacing sessions that would have")
 print("   summarised themselves perfectly well (case 96)")
+print("   Both terms are read ONCE at the top of the rules that share them,")
+print("   because 1r, 1a and 1b all ask about the same ceiling and the same")
+print("   widest turn, and three lookups is how they come to disagree.")
 check("it asks what has actually been survived here",
-      "compaction_too_big(path, sess.get(\"role\")" in _ps, True)
+      "_ceil = compaction_too_big_why(path, _rrole" in _ps
+      and 'wall = _ceil["ceiling"]' in _ps, True)
 check("and still fires on position, not on distance", "used >= wall" in _ps,
       True)
 check("and the exception needs the point below the wall as well",
       "compact < wall" in _ps and "used - compact <= _wide" in _ps, True)
 check("and the turn it compares against is this pair's, measured",
-      "turn_widest(path, sess.get(" in _ps, True)
+      "_wide, _wide_src = turn_widest(path, _rrole)" in _ps, True)
+print("   and the SENTENCE beside the number is that number's own. It used")
+print("   to be wv['wall_source'], which describes window - RESERVED_TOKENS")
+print("   while the figure printed came from compaction_too_big: on")
+print("   2026-09-02 the journal read 'past the 559k wall (window minus the")
+print("   33k compaction reserve)' and window minus that reserve is 967 000")
+print("   (5.45)")
+check("the handover reason labels the number it prints",
+      '_ceil.get("source")' in _ps, True)
+check("and no longer borrows wall_view's label for it",
+      'wv.get("wall_source")' in _ps, False)
 print("   and a session with no compaction point at all decides nothing")
 print("   from this: rule 8 says an unknown point is reported, not guessed.")
 print("   Nothing measured AND no threshold passed at launch is the case -")
@@ -4479,9 +4755,18 @@ try:
 
     print("   the ceiling is the SAME constant inflight_live uses - one idea")
     print("   of 'too long to be real' in this file, not two")
+    # The claim has not moved, the place has: since 2026-09-03 the ceiling
+    # is decided in ONE function that three readers call, because a
+    # background command needs a different one and two ideas of "too long"
+    # is exactly what this case exists to prevent. So the assertion follows
+    # it - check_processes must ask record_expired, and record_expired must
+    # be the thing that knows the constant.
     _cp90 = inspect.getsource(daemon.check_processes)
-    check("check_processes reads INFLIGHT_MAX_SEC",
-          "run > INFLIGHT_MAX_SEC" in _cp90, True)
+    check("check_processes asks record_expired rather than timing it itself",
+          "record_expired(meta)" in _cp90, True)
+    check("and record_expired is where INFLIGHT_MAX_SEC is read",
+          "INFLIGHT_MAX_SEC" in inspect.getsource(daemon.record_expired),
+          True)
     check("and inflight_live agrees the record is not work",
           len(daemon.inflight_live(PATH)), 0)
     print("   a record just under the ceiling is still ordinary work")
@@ -5318,6 +5603,76 @@ with io.open(_sp102, "w", encoding="utf-8") as _fh:
 check("a different path is named, with the file it is in",
       len(_pypath102()), 1)
 
+print("\n102b. install is idempotent whatever spells the interpreter")
+print("      2026-09-02, found by running install on a live project and")
+print("      watching its eight bridge hooks become SIXTEEN. That project's")
+print("      hooks are written `\"command\": \"py\"`; install builds its own")
+print("      entry with sys.executable, an absolute path to the same")
+print("      interpreter. `already_there` matched on command AND args and")
+print("      so called it absent, while `marks_missing` four lines down")
+print("      matched on args alone and called it present - two readers of")
+print("      one fact, free to disagree, and they did. Every event would")
+print("      then fire twice: two Stop events a turn, two status posts, two")
+print("      PreCompact samples. -> DECISIONS.md 8.4")
+_ip = os.path.join(TMP, "install-idem")
+os.makedirs(os.path.join(_ip, ".claude"), exist_ok=True)
+_isp = os.path.join(_ip, ".claude", "settings.json")
+
+
+def _hookcount():
+    with io.open(_isp, encoding="utf-8") as _fh:
+        cfg = _json.load(_fh)
+    return sum(1 for groups in (cfg.get("hooks") or {}).values()
+               for g in groups for h in (g.get("hooks") or [])
+               if list(h.get("args") or []) == ["-m", "bridgecore.hook"])
+
+
+_install.install(_ip, python=sys.executable, statusline=False)
+_n1 = _hookcount()
+check("a fresh install writes one hook per event", _n1, len(_install.EVENTS))
+_install.install(_ip, python=sys.executable, statusline=False)
+check("installing again adds none", _hookcount(), _n1)
+
+print("   now the shape that broke it: the SAME hooks, with the")
+print("   interpreter written the way a person writes it")
+with io.open(_isp, encoding="utf-8") as _fh:
+    _icfg = _json.load(_fh)
+for _groups in (_icfg.get("hooks") or {}).values():
+    for _g in _groups:
+        for _h in (_g.get("hooks") or []):
+            if list(_h.get("args") or []) == ["-m", "bridgecore.hook"]:
+                _h["command"] = "py"
+with io.open(_isp, "w", encoding="utf-8") as _fh:
+    _json.dump(_icfg, _fh)
+check("marks_missing already read that correctly",
+      [m for m in _install.marks_missing(_ip) if "hook" in m], [])
+_install.install(_ip, python=sys.executable, statusline=False)
+check("and install no longer doubles them", _hookcount(), _n1)
+check("leaving the owner's own spelling alone - `py` is what works on "
+      "this machine, not a mistake to correct",
+      sorted({_h.get("command")
+              for _groups in (_json.load(io.open(_isp, encoding="utf-8"))
+                              .get("hooks") or {}).values()
+              for _g in _groups for _h in (_g.get("hooks") or [])
+              if list(_h.get("args") or []) == ["-m", "bridgecore.hook"]}),
+      ["py"])
+
+print("   THE SABOTAGE (rule 19): a hook that is NOT ours, with the same")
+print("   command, must still be added rather than mistaken for ours")
+with io.open(_isp, encoding="utf-8") as _fh:
+    _icfg = _json.load(_fh)
+_icfg["hooks"]["Stop"] = [{"hooks": [{"type": "command", "command": "py",
+                                      "args": ["-m", "somebody.else"]}]}]
+with io.open(_isp, "w", encoding="utf-8") as _fh:
+    _json.dump(_icfg, _fh)
+_install.install(_ip, python=sys.executable, statusline=False)
+with io.open(_isp, encoding="utf-8") as _fh:
+    _after = _json.load(_fh)
+_stop = [h for g in _after["hooks"]["Stop"] for h in (g.get("hooks") or [])]
+check("somebody else's hook survives and ours joins it",
+      (len(_stop), sorted(str(h.get("args")) for h in _stop)),
+      (2, ["['-m', 'bridgecore.hook']", "['-m', 'somebody.else']"]))
+
 print("\n103. the polite stop reaches a console application")
 print("    relayout.stop_daemon used to try `taskkill /PID` and nothing")
 print("    else before the force. That cannot reach a console app at all:")
@@ -5467,6 +5822,130 @@ else:
     check("nothing from this case is left running",
           [x for x in (_proc103.pid, _pid103) if _rl103.process_alive(x)],
           [])
+
+print("\n103b. the restart asks the daemon before it stops it")
+print("     2026-09-02: the pair may restart the bridge itself now, and the")
+print("     safety of that rests on nothing being lost - PENDING is in")
+print("     memory, so a Stop hook blocked on a report is answered by")
+print("     nobody once its daemon is gone. The rule said 'check first',")
+print("     and the first restart under it was taken half a minute after")
+print("     the check, with a whole report going out, being answered and")
+print("     coming back inside the gap - six seconds clear. A precondition")
+print("     kept by memory is not one (24), and a check separated from its")
+print("     act is 5.17. The gate asks in the same call as the stop. -> 8.3")
+
+import json                                                      # noqa: E402
+import socket                                                    # noqa: E402
+import threading                                                 # noqa: E402
+from http.server import BaseHTTPRequestHandler                   # noqa: E402
+from http.server import ThreadingHTTPServer                      # noqa: E402
+from bridgecore import relayout as _rl103b                       # noqa: E402
+
+_d103b = os.path.join(TMP, "gate")
+os.makedirs(_d103b, exist_ok=True)
+_STATE103B = {"pairs": {}}
+
+
+class _Gate103B(BaseHTTPRequestHandler):
+    """A stand-in daemon that answers /state and nothing else."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        body = json.dumps(_STATE103B).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+_srv103b = ThreadingHTTPServer(("127.0.0.1", 0), _Gate103B)
+_port103b = _srv103b.server_address[1]
+threading.Thread(target=_srv103b.serve_forever, daemon=True).start()
+
+_QUIET103B = {"busy": {"reviewing": False, "verdict_in_flight": False,
+                       "inflight": 0, "handover": False, "compacting": []}}
+try:
+    print("   a pair with a report waiting for a verdict")
+    _STATE103B["pairs"] = {
+        "proj-one": {"name": "One", "busy": dict(_QUIET103B["busy"],
+                                                reviewing=True)},
+        "proj-two": {"name": "Two", "busy": dict(_QUIET103B["busy"])}}
+    _v, _lines = _rl103b.busy_now(_port103b)
+    check("the gate calls that busy", _v, "busy")
+    check("and names the pair and what would be lost",
+          bool(_lines) and _lines[0].startswith("One:")
+          and "loses it" in _lines[0], True)
+    print("   the refusal reads: %s" % _lines[0])
+    # stop_daemon is REPLACED for this call, and that is not tidiness. The
+    # port here is held by this very Python process, so a run_now that gets
+    # past the gate reaches `taskkill /F` on the suite itself - which is
+    # exactly what the first sabotage run did: the output stops at this
+    # case's header and nothing after it exists. A case that can kill the
+    # run cannot report a failure, so the stop is stubbed and whether it was
+    # REACHED becomes the witness - independent of the gate's own answer.
+    _stopped103b = []
+    _realstop103b = _rl103b.stop_daemon
+    _rl103b.stop_daemon = lambda *_a, **_k: (_stopped103b.append(1),
+                                             (False, "must not be reached"))[1]
+    try:
+        _r103b = _rl103b.run_now(_d103b, _port103b, out=lambda *_a: None)
+    finally:
+        _rl103b.stop_daemon = _realstop103b
+    check("run_now refuses rather than stopping", _r103b.get("ok"), False)
+    check("at the gate, before anything was stopped", _r103b.get("stage"),
+          "gate")
+    check("and the stop was never reached at all", _stopped103b, [])
+
+    print("   the other four things that would be lost, each named")
+    for _field, _needle in (("verdict_in_flight", "on its way to the"),
+                            ("inflight", "still running"),
+                            ("handover", "handover is under way")):
+        _STATE103B["pairs"] = {"proj-one": {"name": "One", "busy": dict(
+            _QUIET103B["busy"], **{_field: 2 if _field == "inflight"
+                                   else True})}}
+        _v2, _l2 = _rl103b.busy_now(_port103b)
+        check("%s is a refusal, and says so" % _field,
+              (_v2, _needle in " ".join(_l2)), ("busy", True))
+    _STATE103B["pairs"] = {"proj-one": {"name": "One", "busy": dict(
+        _QUIET103B["busy"], compacting=["executor"])}}
+    _v3, _l3 = _rl103b.busy_now(_port103b)
+    check("a session left alone to compact is a refusal too",
+          (_v3, "left alone to compact" in " ".join(_l3)), ("busy", True))
+
+    print("   the same daemon with nothing owed: it stops")
+    _STATE103B["pairs"] = {
+        "proj-one": {"name": "One", "busy": dict(_QUIET103B["busy"])},
+        "proj-two": {"name": "Two", "busy": dict(_QUIET103B["busy"])}}
+    check("the gate calls that quiet", _rl103b.busy_now(_port103b)[0], "quiet")
+
+    print("   FAIL CLOSED, and the third answer is the honest one: a port")
+    print("   nobody is serving is positive evidence that no daemon is")
+    print("   running, and no Stop hook can block on a socket that refuses")
+    print("   connections. A port that IS open and will not answer is the")
+    print("   one that must not be read as 'nothing there'")
+    _STATE103B["pairs"] = {"proj-one": {"name": "One"}}
+    check("a daemon that predates the gate cannot be assumed quiet",
+          _rl103b.busy_now(_port103b)[0], "unreachable")
+    _free103b = socket.socket()
+    _free103b.bind(("127.0.0.1", 0))
+    _freeport = _free103b.getsockname()[1]
+    _free103b.close()
+    check("a port nobody is serving is 'no daemon', not a refusal",
+          _rl103b.busy_now(_freeport)[0], "no daemon")
+
+    print("   and --force is named in the refusal, because the case it is")
+    print("   for - a daemon that is really dead - has to be reachable")
+    _src103b = inspect.getsource(_rl103b.run_now)
+    check("the refusal points at --force", "--force" in _src103b, True)
+    check("and the gate runs in the same call as the stop, with nothing "
+          "between", _src103b.index("wait_until_quiet")
+          < _src103b.index("stop_daemon(port)"), True)
+finally:
+    _srv103b.shutdown()
+    _srv103b.server_close()
 
 print("\n104. a hint matches a WHOLE word, and a hyphen binds")
 print("    Both text heuristics used a plain `in`. Word START was the first")
@@ -5791,6 +6270,239 @@ finally:
         daemon.STATE.pop("last_task", None)
     else:
         daemon.STATE["last_task"] = _lt105
+
+print("\n106. the live data folder has ONE writer, and it is the daemon")
+print("     2026-09-13 00:31:48: a measurement script imported the package")
+print("     with BRIDGE_DATA on the live folder, ran run_check(all) and")
+print("     saved the STATE it had loaded at 00:17:35 over the daemon's")
+print("     state.json - and wrote 'planner_check ... passed' into the live")
+print("     journal under the planner's name, when the planner had run")
+print("     nothing. The daemon's clean stop at 00:32:20 wrote its memory")
+print("     back, so nothing was lost - by the order of events, not by a")
+print("     rule. The same class had been caught before; rule 25 says a")
+print("     legal exception does not happen twice. -> DECISIONS.md 8.20")
+_probe106 = r'''
+import os, sys
+sys.path.insert(0, %r)
+from bridgecore import store
+out = []
+try:
+    store.journal("probe", "a stranger writes")
+    out.append("journal:allowed")
+except store.SecondAuthority as e:
+    out.append("journal:refused")
+    out.append("names_data:%%s" %% (os.environ["BRIDGE_DATA"] in str(e)))
+    out.append("names_way_out:%%s" %% ("temp" in str(e)))
+try:
+    store.save_state({"probe": 1})
+    out.append("save:allowed")
+except store.SecondAuthority:
+    out.append("save:refused")
+out.append("claimed:%%s" %% (store.second_authority() == ""))
+store.claim_writer()
+out.append("after_claim:%%s" %% (store.second_authority() == ""))
+print(" ".join(out))
+''' % os.path.dirname(os.path.abspath(__file__))
+
+
+# THE CHILD HAS ITS OWN TEMP ROOT, so "live-shaped" does not depend on
+# where this tree happens to lie. The planner's `check` copies the whole
+# tree under tempfile.mkdtemp() and runs the suites from there; a folder
+# built beside this file was then under the child's temp folder too,
+# data_is_throwaway() answered True, the stranger was let in and five
+# checks went red on the planner's run while staying green in source -
+# "the result depended on who ran it" (2026-09-13 01:53). The gate was
+# right; the case had defined "live" by the tree's address.
+_tmp106 = os.path.join(TMP, "child-temp-106")
+os.makedirs(_tmp106, exist_ok=True)     # gettempdir() wants an existing one
+
+
+def _stranger106(data):
+    env = dict(os.environ, BRIDGE_DATA=data, BRIDGE_NO_HOOKS="1",
+               TMPDIR=_tmp106, TEMP=_tmp106, TMP=_tmp106)
+    env.pop("BRIDGE_PORT", None)
+    r = subprocess.run([sys.executable, "-c", _probe106], env=env,
+                       capture_output=True, text=True, timeout=60)
+    return (r.stdout.strip() + " " + r.stderr.strip()[-200:]).split()
+
+
+# A folder that is NOT under the CHILD's temp and does not exist: the
+# refusal comes before any write, so nothing is created in the tree.
+_live106 = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "data-second-authority-probe-%d" % os.getpid())
+_out106 = _stranger106(_live106)
+check("a stranger on a live-shaped folder is refused the journal",
+      "journal:refused" in _out106, True)
+check("and refused save_state", "save:refused" in _out106, True)
+check("the refusal names BRIDGE_DATA", "names_data:True" in _out106, True)
+check("and the way out - a copy under the temp folder",
+      "names_way_out:True" in _out106, True)
+check("nothing was created in the tree by the refused writes",
+      os.path.exists(_live106), False)
+check("the same process, once it claims the folder, may write",
+      "after_claim:True" in _out106, True)
+_thr106 = os.path.join(_tmp106, "throwaway-data")
+_out106b = _stranger106(_thr106)
+check("a folder under temp is nobody's live state - allowed both ways",
+      ("journal:allowed" in _out106b, "save:allowed" in _out106b),
+      (True, True))
+print("     and the daemon claims it in ONE place - main(), after the port")
+print("     check that already stops two daemons serving one port")
+_src106 = inspect.getsource(daemon.main)
+check("main() claims the folder", "store.claim_writer()" in _src106, True)
+check("after the port refusal, not before",
+      _src106.find("store.claim_writer()")
+      > _src106.find("Port %d is already being served"), True)
+check("and nowhere else in the package",
+      sum(1 for _f in ("daemon", "sessions", "channel", "hook", "relayout",
+                       "install", "archive", "telegram", "statusline")
+          for _l in inspect.getsource(
+              __import__("bridgecore." + _f, fromlist=[_f])).splitlines()
+          if "claim_writer()" in _l and not _l.strip().startswith("#")
+          and "def claim_writer" not in _l), 1)
+
+print("\n107. the planner's channel serves calls CONCURRENTLY - a check does")
+print("     not hold a verdict behind it")
+print("     2026-09-13, planner transcript + journal: check issued 00:33:20,")
+print("     `continue` on report 337 issued 00:37:11 while it ran, the client")
+print("     gave the verdict call up at 00:39:11 ('still running'), and the")
+print("     daemon saw the verdict at 00:47:38 - the same second the check")
+print("     returned (journal: planner_check, then verdict). channel.main()")
+print("     read stdin one call at a time; `check` waits the whole")
+print("     acceptance run (853 s). Real order: a channel PROCESS, its")
+print("     JSON-RPC stdin, a stub daemon that sleeps in /check, and the")
+print("     stub's own arrival log as the receiver. -> DECISIONS.md 8.21")
+import json as _js107                                          # noqa: E402
+import threading as _thr107                                    # noqa: E402
+from http.server import BaseHTTPRequestHandler as _BH107       # noqa: E402
+from http.server import ThreadingHTTPServer as _THS107         # noqa: E402
+
+
+
+def _until107(fn, seconds=15.0):
+    """Wait for the fact the check asserts (the rule under case 74)."""
+    end = time.time() + seconds
+    while time.time() < end:
+        if fn():
+            return True
+        time.sleep(0.05)
+    return bool(fn())
+
+
+_log107 = []            # (time, "in"|"out", path) as the stub daemon saw it
+_HOLD107 = 6.0          # how long the stub holds /check - seconds, not minutes
+
+
+class _Stub107(_BH107):
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(n)
+        _log107.append((time.time(), "in", self.path))
+        if self.path == "/check":
+            time.sleep(_HOLD107)
+            body = {"ok": True, "rows": [{"what": "py_compile", "exit": 0}],
+                    "dir": "stub"}
+        elif self.path == "/verdict":
+            body = {"ok": True, "delivered": True}
+        else:
+            body = {"ok": True}
+        _log107.append((time.time(), "out", self.path))
+        data = _js107.dumps(body).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+_srv107 = _THS107(("127.0.0.1", 0), _Stub107)
+_port107 = _srv107.server_address[1]
+_thr107.Thread(target=_srv107.serve_forever, daemon=True).start()
+_proj107 = os.path.join(TMP, "channel-107")
+os.makedirs(_proj107, exist_ok=True)
+_env107 = dict(os.environ, BRIDGE_PORT=str(_port107), BRIDGE_ROLE="planner",
+               BRIDGE_DATA=os.path.join(TMP, "channel-107-data"),
+               BRIDGE_NO_HOOKS="1",
+               PYTHONPATH=os.path.dirname(os.path.abspath(__file__)))
+_ch107 = subprocess.Popen([sys.executable, "-m", "bridgecore.channel"],
+                          cwd=_proj107, env=_env107, stdin=subprocess.PIPE,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+_replies107 = []        # (time, id) in the order the CLIENT side reads them
+
+
+def _reader107():
+    for raw in _ch107.stdout:
+        try:
+            row = _js107.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            continue
+        if "id" in row and ("result" in row or "error" in row):
+            _replies107.append((time.time(), row["id"], row))
+
+
+_thr107.Thread(target=_reader107, daemon=True).start()
+
+
+def _send107(obj):
+    _ch107.stdin.write((_js107.dumps(obj) + "\n").encode("utf-8"))
+    _ch107.stdin.flush()
+
+
+def _reply107(mid):
+    return next((r for r in _replies107 if r[1] == mid), None)
+
+
+try:
+    _send107({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+              "params": {"protocolVersion": "2025-06-18"}})
+    check("the channel process answers initialize",
+          _until107(lambda: _reply107(0) is not None, 20), True)
+    _send107({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    _t0 = time.time()
+    _send107({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+              "params": {"name": "check", "arguments": {}}})
+    check("PRECONDITION: the stub is holding /check",
+          _until107(lambda: any(k == "in" and p == "/check"
+                            for _t, k, p in _log107), 10), True)
+    _send107({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+              "params": {"name": "verdict",
+                         "arguments": {"verdict": "continue",
+                                       "feedback": "Checked: x"}}})
+    check("the verdict's reply reaches the client side",
+          _until107(lambda: _reply107(2) is not None, _HOLD107 + 20), True)
+    check("and the check's reply, after its hold",
+          _until107(lambda: _reply107(1) is not None, _HOLD107 + 20), True)
+    _v_in = next((t for t, k, p in _log107 if k == "in" and p == "/verdict"),
+                 None)
+    _c_out = next((t for t, k, p in _log107 if k == "out" and p == "/check"),
+                  None)
+    check("THE RECEIVER: /verdict arrived at the daemon BEFORE /check returned",
+          (_v_in is not None and _c_out is not None and _v_in < _c_out), True)
+    check("by seconds, not by a race - the whole hold is in between",
+          ((_c_out - _v_in) > _HOLD107 * 0.5)
+          if (_v_in and _c_out) else False, True)
+    check("the client side read the verdict's reply before the check's",
+          [mid for _t, mid, _r in _replies107 if mid in (1, 2)], [2, 1])
+    check("and the check's reply still carries the run's result",
+          "CHECK PASSED" in _js107.dumps(_reply107(1)[2] if _reply107(1)
+                                         else {}), True)
+    check("the verdict was answered inside the hold, not after it",
+          (_reply107(2)[0] - _t0) < _HOLD107 if _reply107(2) else False,
+          True)
+finally:
+    try:
+        _ch107.stdin.close()
+    except Exception:
+        pass
+    try:
+        _ch107.wait(10)
+    except Exception:
+        _ch107.kill()
+    _srv107.shutdown()
+    _srv107.server_close()
 
 print("\n" + ("-" * 60))
 if FAILED:

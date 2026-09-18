@@ -1,6 +1,6 @@
 # Rules of honest work
 
-Thirty-four rules. Every one of them has already been broken by somebody
+Thirty-five rules. Every one of them has already been broken by somebody
 working on this bridge. They are short on purpose: this text goes in front of
 every task and every report, so its length is paid for on every delivery.
 
@@ -249,6 +249,19 @@ turned out to be broken a few hours later.
     *Check:* name what the recipient will do differently for having read it.
     Nothing to name - do not send it. If you end a turn with a question, show
     that its answer was not already in the task.
+35. **No claim about state without a witness opened in this same turn.**
+    What happened, what was lost, whether it "went to plan" - that is
+    journal lines and files opened in THIS turn, and every such
+    sentence carries its address: file:line, or the time of the
+    journal line. With no address, write "not checked", or do not
+    write it. The bridge's own words about itself are not a witness
+    (rule 30): they are the thing to be checked. A witness is a
+    file's `stat`, a journal line, a transcript.
+    *Check:* name the address beside every sentence about a pair.
+    The gate is `claim_gate`: a planner turn carrying such a sentence
+    with an empty registry of what it opened does not close. It
+    catches a class, not everything, and that is said here so nobody
+    mistakes it for a guarantee.
 
 ## What stands in the way of the action
 

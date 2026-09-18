@@ -33,6 +33,10 @@ import tempfile
 
 TMP = tempfile.mkdtemp(prefix="bridge-archive-test-")
 os.environ["BRIDGE_DATA"] = os.path.join(TMP, "data")
+# The client's own config is isolated too: install() marks a project trusted
+# there, and without this a suite would merge its throwaway temp projects into
+# the real ~/.claude.json on this machine.
+os.environ["BRIDGE_CLAUDE_JSON"] = os.path.join(TMP, ".claude.json")
 os.environ["PYTHONUTF8"] = "1"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 

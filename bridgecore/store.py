@@ -27,6 +27,7 @@ Two rules here matter more than anything else in this file:
 import hashlib
 import json
 import os
+import tempfile
 import time
 import threading
 
@@ -41,6 +42,60 @@ MODELS_PATH = os.path.join(DATA, "models.json")
 PROFILES_PATH = os.path.join(DATA, "profiles.json")
 
 _lock = threading.RLock()
+
+
+class SecondAuthority(RuntimeError):
+    """A process that is not the daemon tried to write the live folder."""
+
+
+# THE LIVE FOLDER HAS ONE WRITER. STATE lives in the daemon's memory and
+# state.json is its serialisation - the right way round, because the
+# memory is what every decision reads. A second process that imports the
+# package with BRIDGE_DATA pointing at the live folder gets its OWN copy of
+# STATE, as old as its import, and the first save_state() it makes writes
+# that copy over the daemon's file. 2026-09-13 00:31:48: a measurement of
+# run_check(all) - a script, not the daemon - saved a STATE it had loaded at
+# 00:17:35 over the live state.json, fourteen minutes of the daemon's
+# changes gone from disk; the daemon's own clean stop at 00:32:20 wrote its
+# memory back, so nothing was lost - by the order of events, not by any
+# rule. Had the daemon died in those 32 seconds the file would have been
+# the stale copy. The same class had been caught before ("a second
+# authority on live BRIDGE_DATA"), and rule 25 says a legal exception does
+# not happen twice; this is the gate under it. -> DECISIONS.md 8.20
+#
+# Who may write: the daemon, which claims it in main() the moment the port
+# check has passed (two daemons cannot both serve one port); and anybody
+# whose BRIDGE_DATA is under the temp folder - a suite, a check copy, a
+# throwaway - because that folder is nobody's live state. Everyone else is
+# refused with the way out in the sentence.
+_WRITER = {"daemon": False}
+
+
+def claim_writer():
+    """The daemon says it is the daemon. Called once, from main()."""
+    _WRITER["daemon"] = True
+
+
+def data_is_throwaway(data=None):
+    """Is BRIDGE_DATA under the temp folder, i.e. a suite's or a copy's?"""
+    try:
+        tmp = os.path.normcase(os.path.abspath(tempfile.gettempdir()))
+        here = os.path.normcase(os.path.abspath(data or DATA))
+    except Exception:
+        return False
+    return here == tmp or here.startswith(tmp + os.sep)
+
+
+def second_authority():
+    """The sentence refusing this process, or "" when it may write."""
+    if _WRITER["daemon"] or data_is_throwaway():
+        return ""
+    return ("this process is not the daemon serving the bridge, and "
+            "BRIDGE_DATA=%s is the LIVE folder - a second writer here puts "
+            "its own stale copy of STATE over the daemon's file. Nothing was "
+            "written. Point BRIDGE_DATA at a copy under the temp folder "
+            "(the suites and run_check do), or ask the daemon over HTTP."
+            % DATA)
 
 
 def norm(p):
@@ -189,6 +244,34 @@ DEFAULT_CONFIG = {
     "archive_claude": "claude",
     "quiet_when_present": False,
     "presence_file": "",
+    # MAY THE BRIDGE READ A LIVE WINDOW'S CONSOLE AT ALL. With this false
+    # the bridge never calls AttachConsole on anybody's window - no screen
+    # is read and no Enter is sent, and the two places that would have
+    # (nudge_deaf_window, answer_window_prompt) say so in the journal.
+    #
+    # IT SHIPS ON, and the reason it exists at all is worth the paragraph.
+    # 2026-09-05 the owner's windows began freezing - the picture stopping
+    # while the model carried on, tool calls and all, and a keystroke
+    # reviving it without interrupting the turn. Reading a console was the
+    # first suspect, because the bridge had only started doing it for real
+    # at 23:16 the evening before, which fits "this did not used to
+    # happen". It was the wrong suspect. The cause was found from outside,
+    # without attaching to anything: the frozen window's TITLE carried the
+    # legacy console host's own word for a selection, localised, which is
+    # what the host puts there while one is up - and a selection blocks the
+    # application in WriteConsole until it is cleared. Measured: 78 s in
+    # which that window's title never changed while two control windows
+    # changed five times each. The word itself is quoted in DECISIONS.md,
+    # which is not published; this file is, and check_public refuses
+    # Cyrillic in a published file whether written as characters or as
+    # \uXXXX escapes. It refused this comment once already.
+    #
+    # So the switch stays, off is a real off, and the default is ON:
+    # turning a mechanism off for a cause it did not have is how a bridge
+    # loses a repair it needs. What it buys is the ability to stop in one
+    # move next time something is suspected, which is the thing that was
+    # missing when this was suspected. -> DECISIONS.md 8.14
+    "nudge_console": True,
     "projects": {},
 }
 
@@ -211,23 +294,25 @@ PROJECT_DEFAULTS = {
     # and a new window costs a manual dialog - so it must be rare, not routine.
     # "ceiling": the old behaviour, rotate before compaction ever happens.
     "rotate_policy": "compact",
-    # Percent of the context window at which Claude Code compacts. Set it and
-    # the point is known instead of discovered; leave it None to keep Claude
-    # Code's own default, which has changed between versions.
-    #
-    # 70, not 80, since 2026-08-21, and the arithmetic is an incident rather
-    # than a preference. Compaction fires BETWEEN turns, so what has to fit
-    # between the threshold and the end of the window is one whole turn:
-    #
-    #   window                     1 000 000
-    #   at 80% the threshold is      800 000   -> 200 000 of headroom
-    #   the turn that died needed  1 000 274   -> it wanted 200 274
-    #
-    # It missed by 274 tokens, and the session died with its own compaction
-    # request too big to send. 70% gives 300 000 - half as much again as the
-    # largest single turn ever seen here - and that margin is the whole
-    # reason for the number.
-    "autocompact_pct": 70,
+    # RAISED WITHOUT ASKING. This key existed and was in no defaults at
+    # all, so `project_config(...).get("auto_restart_dead_sessions")` was
+    # falsy for every project ever configured and the automatic restart in
+    # handle_session_died had never run once - a dead window rang a person
+    # and waited. 2026-09-04, the owner: a fallen executor is to be raised
+    # without questions so it can carry on. A project that wants the old
+    # behaviour sets this to false deliberately. -> DECISIONS.md 8.8
+    "auto_restart_dead_sessions": True,
+    # There was an "autocompact_pct" here, 70 since 2026-08-21, and the
+    # bridge handed it to every window it opened as
+    # CLAUDE_AUTOCOMPACT_PCT_OVERRIDE. It is gone (2026-09-01, the owner's
+    # decision): the bridge does not manage auto-compaction at all. The
+    # evidence that removing it costs nothing came from the pair that
+    # never had the companion setting - it received the same variable and
+    # compacted at the ceiling regardless, so the variable was demonstrably
+    # not in force. What the number was FOR is still true of anyone who
+    # sets a threshold themselves, and lives in README.md: a threshold and
+    # a window size MULTIPLY, and one whole turn has to fit above the
+    # result. The bridge no longer has an opinion about where that is.
     # How many compactions a session is worth continuing through. Each one
     # frees 60-70% of the context and the session carries on, so compaction
     # is not the danger; what degrades is understanding. Reports converge on
@@ -486,6 +571,9 @@ def save_state(state):
     A run of them is a different animal - a file genuinely locked, a
     read-only disk - and the count is what tells them apart.
     """
+    why = second_authority()
+    if why:
+        raise SecondAuthority(why)
     lost = None
     with _lock:
         try:
@@ -549,12 +637,21 @@ def secret():
 
 def journal(kind, text, project="", session="", level="log", extra=None,
             project_dir=None):
-    """Append one line to today's journal. Never raises.
+    """Append one line to today's journal. Never raises - IN THE DAEMON.
 
     Written centrally (the panel reads it) and, when project_dir is given,
     into <project>/bridge-logs/<date>/ as well - the logs live with the
     project, as asked.
+
+    A process that is not the daemon and is not on a throwaway folder is
+    refused loudly (SecondAuthority) rather than quietly: the daemon's own
+    edge paths are unaffected because the daemon has claimed the folder,
+    and a stranger writing "planner_check ... passed" into the live journal
+    under the planner's name is exactly what 2026-09-13 00:31:48 was.
     """
+    why = second_authority()
+    if why:
+        raise SecondAuthority(why)
     row = {
         "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "kind": kind,

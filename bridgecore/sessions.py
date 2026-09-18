@@ -22,11 +22,13 @@ process before starting the new one - never two live sessions fighting
 over the same seat.
 """
 
+import io
 import json
 import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 from . import store
@@ -61,11 +63,26 @@ PROCS = {}
 # so the daemon inherited that session's environment, and launch() copies
 # os.environ wholesale into every window it opens.
 #
-# The list is narrow on purpose - NOT everything matching CLAUDE_*. Two of
-# those are ours and must survive: CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, which
-# is how the compaction point stops being a guess, and
-# CLAUDE_CODE_STOP_HOOK_BLOCK_CAP. Stripping by prefix would take them too.
+# The list is narrow on purpose - NOT everything matching CLAUDE_*. ONE of
+# those is ours and must survive, CLAUDE_CODE_STOP_HOOK_BLOCK_CAP, and
+# stripping by prefix would take it too.
+#
+# CLAUDE_AUTOCOMPACT_PCT_OVERRIDE stood in that same sentence as "ours"
+# until 2026-09-01. It is not ours any more - launch() sets no compaction
+# threshold, by the owner's decision that the bridge does not manage
+# auto-compaction at all - and the moment it stopped being SET it had to
+# start being STRIPPED. Those are the same question from opposite ends,
+# and answering only one of them changes nothing.
+#
+# Measured, not reasoned. The same suite on the same code, twice: with the
+# variable in the parent environment the stub client recorded 70 in a
+# window the bridge had just opened; with it removed, the same launch
+# recorded nothing. So a daemon restarted from inside a window that has
+# one - which is exactly how `relayout --now` gets typed - would have gone
+# on handing it out invisibly, and with reg_pid no longer recording a
+# threshold there would have been nothing anywhere to say that it had.
 INHERITED_CLIENT_MARKS = (
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
     "CLAUDECODE",
     "CLAUDE_CODE_SESSION_ID",
     "CLAUDE_CODE_CHILD_SESSION",
@@ -97,7 +114,15 @@ def _bridge_root():
 
 
 def build_command(project, role, resume_id=None, permission_mode=None,
-                  model=None, disallow=None):
+                  model=None, disallow=None, prompt=None):
+    """The command line for one window.
+
+    `prompt` is the client's positional [prompt] - "claude --help" calls it
+    "Your prompt" - and it is what makes a window's FIRST act something the
+    bridge chose. V1 uses it to run /init in a replacement executor. It
+    goes LAST, after every flag, because it is positional; anything that
+    took it for a flag value would eat it.
+    """
     cfg = ROLE_DEFAULTS.get(role, ROLE_DEFAULTS["executor"])
     cmd = ["claude"]
     if resume_id:
@@ -113,6 +138,8 @@ def build_command(project, role, resume_id=None, permission_mode=None,
         # a deny beats every permission mode, so this holds whatever mode
         # the window was started in
         cmd += ["--disallowedTools", ",".join(disallow)]
+    if prompt:
+        cmd.append(prompt)
     return cmd
 
 
@@ -198,8 +225,88 @@ def ensure_marks(project, role=""):
         return []
 
 
+def project_compact_window(project):
+    """The `autoCompactWindow` this project's own settings ask for, or None.
+
+    Read from the project's `.claude/settings.json` at every launch rather
+    than remembered: it is the owner's file, edited by hand, and a value
+    cached anywhere else would be a second authority over it.
+    """
+    p = os.path.join(project, ".claude", "settings.json")
+    try:
+        with io.open(p, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    n = data.get("autoCompactWindow")
+    return int(n) if isinstance(n, int) and n > 0 else None
+
+
+def compact_pct_for(project, pct):
+    """The percentage this window may honestly be given, or None.
+
+    BOTH HALVES OR NEITHER, and that is the whole of what 8.2 measured. The
+    percentage and `autoCompactWindow` MULTIPLY - 700000 x 70 % gave a point
+    at 476-482k over 14 samples - and WITHOUT the key the variable is inert:
+    the pair next door received the same 70 and compacted at the ceiling
+    regardless. So sending a percentage to a project that has no key would
+    not merely do nothing; it would write a threshold into `reg_pid` that
+    the window is not running under, which is the class of claim this
+    project keeps having to unpick.
+
+    Returns None when either half is missing, so the caller sends nothing
+    and records nothing.
+    """
+    if not pct:
+        return None
+    try:
+        pct = int(pct)
+    except (TypeError, ValueError):
+        return None
+    if not 0 < pct <= 100:
+        return None
+    return pct if project_compact_window(project) else None
+
+
+def real_client_refused(cmd):
+    """Why this process must not spawn that command, or "" if it may.
+
+    A SUITE MAY NOT OPEN A REAL CLIENT WINDOW. Every suite stubs
+    build_command, so the rule was kept by each of them remembering it -
+    and on 2026-09-04 seventeen real windows were left open by runs where
+    that did not hold. A precondition kept by memory is not a
+    precondition, so this is asked HERE, at the one place a process is
+    actually started, and it refuses rather than warns.
+
+    The test is structural: a suite puts BRIDGE_DATA in a fresh temp
+    directory, and the bridge never does. It looks at the executable
+    only - a stubbed command runs an interpreter, so it is never touched -
+    and BRIDGE_REAL_CLIENT=1 says the real thing is meant.
+    """
+    if os.environ.get("BRIDGE_REAL_CLIENT") == "1":
+        return ""
+    exe = os.path.basename((list(cmd) or [""])[0] or "")
+    if os.path.splitext(exe)[0].lower() != "claude":
+        return ""
+    data = os.environ.get("BRIDGE_DATA") or ""
+    if not data:
+        return ""
+    try:
+        tmp = os.path.normcase(os.path.abspath(tempfile.gettempdir()))
+        here = os.path.normcase(os.path.abspath(data))
+    except Exception:
+        return ""
+    if here != tmp and not here.startswith(tmp + os.sep):
+        return ""
+    return ("BRIDGE_DATA is %s, under the temp folder, so this is a test "
+            "harness - and the command would start a REAL client (%s) with "
+            "the real flags, in a window nothing here will close. Stub "
+            "sessions.build_command, or set BRIDGE_REAL_CLIENT=1 to mean "
+            "it." % (data, exe))
+
+
 def launch(project, role, resume_id=None, permission_mode=None, model=None,
-           disallow=None, autocompact_pct=None):
+           disallow=None, compact_pct=None, prompt=None):
     """Start a session in its own minimised console. Returns pid."""
     if not os.path.isdir(project):
         raise ValueError("no such folder: %s" % project)
@@ -208,20 +315,25 @@ def launch(project, role, resume_id=None, permission_mode=None, model=None,
 
     env = clean_env()
     env["BRIDGE_ROLE"] = role
-    if autocompact_pct:
-        # Where compaction fires stops being a guess the moment we set it.
-        # Claude Code's own default has moved around between versions and
-        # reports disagree about it, so the bridge names the number instead
-        # of trying to infer it.
-        env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(int(autocompact_pct))
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONPATH"] = _bridge_root() + os.pathsep + env.get("PYTHONPATH", "")
     if role == "executor":
         env.setdefault("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP", "200")
+    # 2026-09-02, the owner's decision, a deliberate partial reversal of
+    # 2026-09-01: the threshold comes back, but as a PROJECT setting and
+    # only where the project's own settings carry the key it multiplies
+    # with. `clean_env` still strips an inherited one, so there is exactly
+    # one source for this variable and it is this line. -> DECISIONS.md 8.2
+    applied = compact_pct_for(project, compact_pct)
+    if applied:
+        env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(applied)
 
     cmd = build_command(project, role, resume_id, permission_mode, model,
-                        disallow)
+                        disallow, prompt)
+    why = real_client_refused(cmd)
+    if why:
+        raise RuntimeError(why)
 
     if os.name == "nt":
         si = subprocess.STARTUPINFO()
@@ -562,6 +674,298 @@ def tail_of_transcript(path, turns=6, per_turn=1200, tail_bytes=600000):
         rows.append({"who": kind, "text": text[:per_turn],
                      "at": row.get("timestamp") or ""})
     return rows[-turns:]
+
+
+# ---------------------------------------------------------------------------
+# What a window that has not come up is ASKING
+#
+# A window the bridge launches is born minimised and unfocused (rule 29), so
+# a question at its start is a question nobody is looking at. On 2026-09-04
+# one sat like that from 04:02 to 10:13 - six hours without an executor -
+# and it was the client's `--dangerously-load-development-channels` warning,
+# waiting for Enter. Measured that day: nothing in the client's config
+# answers that one, and `--channels` instead removes the prompt and silently
+# stops delivering. So the only thing left is to read the screen and answer
+# it. -> source/ANALYSIS-client-silence.md
+#
+# BOTH HELPERS RUN IN A CHILD PROCESS, and for the same three reasons
+# relayout.close_console documents: FreeConsole must come first (a process
+# born with CREATE_NO_WINDOW has a console without a window, and
+# AttachConsole then answers ACCESS_DENIED); the console must be let go
+# before the child exits; and - this one is ours - once attached, anything
+# the child prints goes INTO the watched window and would type itself into
+# the very prompt being measured. So the screen is written to a file and
+# only the path is printed, after FreeConsole.
+#
+# AND BOTH ARE RAW STRINGS, r""" - which is the whole difference between a
+# helper that runs and one that has never run. These hold PYTHON SOURCE, so
+# every escape in them belongs to the child and not to this file: written
+# without the r, the two characters backslash-n inside `"\n".join(lines)`
+# became a real newline HERE, and the child was handed an unterminated
+# string literal. It died of SyntaxError before reading a thing - and
+# because console_screen catches everything and answers "", a dead helper
+# and a genuinely blank screen are the same answer, so nothing anywhere
+# said so. Measured 2026-09-04: nudge_deaf_window was reached ten times
+# that day and journalled neither of its two loud lines, and console_screen
+# returned 0 characters for all four live windows, including the one doing
+# the asking. _ANSWER_SRC carried the same defect at its '\r', so no Enter
+# was ever sent either. probe_console_screen.py has that same line in its
+# OWN source, where nothing nests it, which is why the measurement of that
+# day was honest about the technique and silent about this path.
+# test_multipair case 82 compiles both and then RUNS them against a real
+# console. -> DECISIONS.md 8.10
+
+_SCREEN_SRC = r"""
+import ctypes, ctypes.wintypes as w, sys
+pid, out = int(sys.argv[1]), sys.argv[2]
+k = ctypes.WinDLL('kernel32', use_last_error=True)
+
+
+class COORD(ctypes.Structure):
+    _fields_ = [('X', ctypes.c_short), ('Y', ctypes.c_short)]
+
+
+class SMALL_RECT(ctypes.Structure):
+    _fields_ = [('Left', ctypes.c_short), ('Top', ctypes.c_short),
+                ('Right', ctypes.c_short), ('Bottom', ctypes.c_short)]
+
+
+class CSBI(ctypes.Structure):
+    _fields_ = [('dwSize', COORD), ('dwCursorPosition', COORD),
+                ('wAttributes', ctypes.c_ushort), ('srWindow', SMALL_RECT),
+                ('dwMaximumWindowSize', COORD)]
+
+
+k.FreeConsole()
+if not k.AttachConsole(pid):
+    raise SystemExit(2)
+k.CreateFileW.restype = w.HANDLE
+h = k.CreateFileW('CONOUT$', 0x80000000 | 0x40000000, 0x3, None, 3, 0, None)
+if h == w.HANDLE(-1).value:
+    k.FreeConsole()
+    raise SystemExit(3)
+info = CSBI()
+if not k.GetConsoleScreenBufferInfo(h, ctypes.byref(info)):
+    k.FreeConsole()
+    raise SystemExit(4)
+width = info.dwSize.X
+lines = []
+buf = ctypes.create_unicode_buffer(width + 1)
+got = w.DWORD(0)
+for y in range(info.dwSize.Y):
+    if not k.ReadConsoleOutputCharacterW(h, buf, width, COORD(0, y),
+                                         ctypes.byref(got)):
+        break
+    lines.append(buf[:got.value].rstrip())
+k.FreeConsole()
+body = "\n".join(lines).strip()
+open(out, 'w', encoding='utf-8').write(body)
+"""
+
+_ANSWER_SRC = r"""
+import ctypes, ctypes.wintypes as w, sys
+pid = int(sys.argv[1])
+k = ctypes.WinDLL('kernel32', use_last_error=True)
+
+
+class CHAR_U(ctypes.Union):
+    _fields_ = [('UnicodeChar', ctypes.c_wchar), ('AsciiChar', ctypes.c_char)]
+
+
+class KEY_EVENT(ctypes.Structure):
+    _fields_ = [('bKeyDown', ctypes.c_int),
+                ('wRepeatCount', ctypes.c_ushort),
+                ('wVirtualKeyCode', ctypes.c_ushort),
+                ('wVirtualScanCode', ctypes.c_ushort),
+                ('uChar', CHAR_U), ('dwControlKeyState', ctypes.c_ulong)]
+
+
+class EVENT_U(ctypes.Union):
+    _fields_ = [('KeyEvent', KEY_EVENT)]
+
+
+class INPUT_RECORD(ctypes.Structure):
+    _fields_ = [('EventType', ctypes.c_ushort), ('Event', EVENT_U)]
+
+
+k.FreeConsole()
+if not k.AttachConsole(pid):
+    raise SystemExit(2)
+k.CreateFileW.restype = w.HANDLE
+h = k.CreateFileW('CONIN$', 0x80000000 | 0x40000000, 0x3, None, 3, 0, None)
+if h == w.HANDLE(-1).value:
+    k.FreeConsole()
+    raise SystemExit(3)
+recs = (INPUT_RECORD * 2)()
+for i, down in enumerate((1, 0)):
+    recs[i].EventType = 1
+    recs[i].Event.KeyEvent.bKeyDown = down
+    recs[i].Event.KeyEvent.wRepeatCount = 1
+    recs[i].Event.KeyEvent.wVirtualKeyCode = 0x0D
+    recs[i].Event.KeyEvent.uChar.UnicodeChar = '\r'
+written = w.DWORD(0)
+ok = k.WriteConsoleInputW(h, recs, 2, ctypes.byref(written))
+k.FreeConsole()
+raise SystemExit(0 if ok and written.value == 2 else 5)
+"""
+
+
+QUICK_EDIT_FLAG = 0x0040        # ENABLE_QUICK_EDIT_MODE
+EXTENDED_FLAGS = 0x0080         # ENABLE_EXTENDED_FLAGS
+
+# RAW, and this one is not a formality: _SCREEN_SRC and _ANSWER_SRC held
+# their own Python source in NON-raw strings for the whole of their lives
+# and never compiled once (-> DECISIONS.md 8.10). Every child source in
+# this module is raw from now on, whether it currently needs it or not.
+_QUIET_EDIT_SRC = r"""
+import ctypes, json, sys
+from ctypes import wintypes
+
+QUICK_EDIT = 0x0040
+EXTENDED = 0x0080
+GENERIC_READ = 0x80000000
+GENERIC_WRITE = 0x40000000
+SHARE_RW = 0x00000003
+OPEN_EXISTING = 3
+
+pid = int(sys.argv[1])
+apply_it = sys.argv[2] == "1"
+forced = int(sys.argv[3])
+out = {"pid": pid}
+k = ctypes.windll.kernel32
+k.FreeConsole()
+if not k.AttachConsole(pid):
+    out["error"] = "AttachConsole failed for %d" % pid
+else:
+    try:
+        k.CreateFileW.restype = wintypes.HANDLE
+        h = k.CreateFileW("CONIN$", GENERIC_READ | GENERIC_WRITE, SHARE_RW,
+                          None, OPEN_EXISTING, 0, None)
+        if not h or h == ctypes.c_void_p(-1).value:
+            out["error"] = "CONIN$ could not be opened"
+        else:
+            m = wintypes.DWORD(0)
+            if not k.GetConsoleMode(h, ctypes.byref(m)):
+                out["error"] = "GetConsoleMode failed"
+            else:
+                out["before"] = int(m.value)
+                if apply_it:
+                    if forced >= 0:
+                        want = forced
+                    else:
+                        want = (m.value | EXTENDED) & ~QUICK_EDIT
+                    out["asked"] = int(want)
+                    out["ok"] = bool(k.SetConsoleMode(h, want))
+                m2 = wintypes.DWORD(0)
+                if k.GetConsoleMode(h, ctypes.byref(m2)):
+                    out["after"] = int(m2.value)
+            k.CloseHandle(h)
+    except Exception as exc:
+        out["error"] = str(exc)
+    finally:
+        k.FreeConsole()
+
+with open(sys.argv[4], "w", encoding="utf-8") as fh:
+    json.dump(out, fh)
+"""
+
+
+def console_quiet_edit(pid, apply=True, mode=None, timeout=20):
+    """Turn QuickEdit OFF on the console this pid is attached to.
+
+    Returns {"before", "after", "asked", "ok", "error"} - always a dict,
+    never raises. `before` and `after` are the console's input mode as it
+    was and as it is; both are read with GetConsoleMode, so the caller
+    reports a measurement rather than its own intention (rule 30). With
+    apply=False nothing is written and only `before` is filled.
+
+    WHY THIS EXISTS. 2026-09-05: the owner's windows kept freezing - the
+    picture stopping while the model carried on, tool calls and all, and a
+    keystroke reviving it without interrupting the turn. The legacy console
+    host blocks the application in WriteConsole while a SELECTION is up,
+    and Esc clears the selection and is eaten by the host, so nothing ever
+    reached the client and no transcript ever recorded a break. It was
+    caught from outside, with nothing attached: the frozen window's TITLE
+    read the host's own word for a selection, and across 78 s that title
+    never changed while two control windows changed five times each.
+
+    AND THE 0x80 IS THE WHOLE POINT. CLAUDE.md excluded QuickEdit in
+    August on a reading of 0x0208 in which bit 0x40 was clear - but 0x0208
+    also has ENABLE_EXTENDED_FLAGS clear, and with THAT bit clear the mode
+    word carries no QuickEdit or Insert bit at all: they come from the
+    console's defaults, and HKCU\\Console\\QuickEdit on this machine is 1.
+    So `mode & ~QUICK_EDIT` is a no-op on exactly the consoles that need
+    fixing - 0x0208 in, 0x0208 out - and the flag has to be turned on in
+    the same write that turns QuickEdit off. test_multipair case 88 pins
+    the arithmetic and then does it on a console the suite owns.
+
+    `mode` is a TEST SEAM, never a setting: it writes exactly that value,
+    so a case can put a console into the client's 0x0208 and show what the
+    August reading could and could not see. -> DECISIONS.md 8.14
+    """
+    if os.name != "nt" or not pid:
+        return {"error": "not windows" if os.name != "nt" else "no pid"}
+    res = os.path.join(tempfile.gettempdir(),
+                       "bridge-qe-%d-%d.json" % (pid, int(time.time() * 1000)))
+    try:
+        subprocess.run([sys.executable, "-c", _QUIET_EDIT_SRC, str(pid),
+                        "1" if apply else "0",
+                        str(-1 if mode is None else int(mode)), res],
+                       capture_output=True, timeout=timeout,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW",
+                                             0))
+        with io.open(res, encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception as exc:
+        return {"error": str(exc)}
+    finally:
+        try:
+            os.remove(res)
+        except OSError:
+            pass
+
+
+def console_screen(pid, timeout=20):
+    """The text on the console pid is attached to, or "". Never raises."""
+    if os.name != "nt":
+        return ""
+    tmp = os.path.join(tempfile.gettempdir(),
+                       "bridge-screen-%d-%d.txt" % (pid, int(time.time())))
+    try:
+        subprocess.run([sys.executable, "-c", _SCREEN_SRC, str(pid), tmp],
+                       capture_output=True, timeout=timeout,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW",
+                                             0))
+        with io.open(tmp, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except Exception:
+        return ""
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def console_answer(pid, timeout=20):
+    """Press Enter in that console. True if the key was accepted.
+
+    NEVER call this on a window that has come up. A live session's prompt
+    takes Enter as "send what is typed here", and what is typed there is
+    whatever the last thing to touch that window left behind. The only
+    caller checks `registered` first, and that check is the safety, not
+    politeness.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        r = subprocess.run([sys.executable, "-c", _ANSWER_SRC, str(pid)],
+                           capture_output=True, timeout=timeout,
+                           creationflags=getattr(subprocess,
+                                                 "CREATE_NO_WINDOW", 0))
+        return r.returncode == 0
+    except Exception:
+        return False
 
 
 def claude_processes():

@@ -302,8 +302,6 @@ details .inner{padding:4px 14px 14px;color:var(--label);line-height:1.6}
       <div class="gline"><span class="name">rotate at</span><input type="range" id="thRotate" min="70" max="97"><span class="val" id="thRotateV"></span></div>
       <div class="gline"><span class="name">hand over at</span><input type="range" id="thHandover" min="60" max="98"><span class="val" id="thHandoverV"></span></div>
       <div class="dim" style="line-height:1.6;margin-bottom:6px">Percent of the distance to the wall, not of the context window. The wall is where a session actually breaks; it is measured the first time one does, and estimated just under the window until then.</div>
-      <div class="gline"><span class="name">compact at</span><input type="range" id="acPct" min="30" max="95"><span class="val" id="acPctV"></span></div>
-      <div class="dim" style="line-height:1.6;margin-bottom:6px">Percent of the context window at which the session compacts. The bridge passes this to every window it opens, so the point is known instead of discovered - Claude Code's own default has moved between versions and reports of it disagree. Lower compacts more often but summarises less each time; higher keeps more working memory but leaves less room for the summary itself.</div>
       <div class="lab" style="margin-top:14px">when context runs out</div>
       <select id="rotPolicy">
         <option value="compact">let the session compact - rotate only if it hits the wall</option>
@@ -1347,15 +1345,6 @@ function renderSessions(){
     $("#thHandover").value=th.handover_at||90;
   }
   $("#thHandoverV").textContent=$("#thHandover").value+"%";
-  if(!window._acTouched){
-    var pcy=((D.config||{}).projects||{})[CUR]||{};
-    /* the default comes from the bridge, never a second copy here:
-       this said ||80 and kept saying it after the real default
-       became 70 */
-    $("#acPct").value=pcy.autocompact_pct
-      ||(((D.config||{}).defaults||{}).autocompact_pct)||"";
-  }
-  $("#acPctV").textContent=$("#acPct").value+"%";
   if(!window._polTouched){
     var pcx=((D.config||{}).projects||{})[CUR]||{};
     $("#rotPolicy").value=pcx.rotate_policy||"compact";
@@ -1377,13 +1366,6 @@ function renderSessions(){
 }
 ["thHandoff","thWarn","thRotate","thHandover"].forEach(function(id){$("#"+id).oninput=function(){THRDIRTY=true;
   $("#"+id+"V").textContent=this.value+"%"}});
-$("#acPct").oninput=function(){window._acTouched=true;$("#acPctV").textContent=this.value+"%"};
-$("#acPct").onchange=function(){
-  if(!CUR){window._acTouched=false;return}
-  var pr=((D.config||{}).projects||{});pr[CUR]=pr[CUR]||{};
-  pr[CUR].autocompact_pct=+this.value;
-  post("/config",{projects:pr}).then(function(){window._acTouched=false;tick()});
-};
 $("#rotPolicy").onchange=function(){
   window._polTouched=true;
   if(!CUR){window._polTouched=false;return}

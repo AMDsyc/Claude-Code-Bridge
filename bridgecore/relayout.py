@@ -54,6 +54,7 @@ import stat
 import subprocess
 import sys
 import time
+import urllib.request
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -817,14 +818,193 @@ def wait_port_free(port=None, timeout=120):
     return False, "the bridge is still holding its port after %ds" % timeout
 
 
-def run_now(base=None, port=None, start_wait=180, out=say, stop=True):
+SELF_CMD = "bridgecore.relayout"
+
+
+def count_inflight(b):
+    """Tracked commands that are somebody else's. Returns (count, mine).
+
+    A GATE MAY NOT COUNT ITSELF. `relayout --now` started in the background
+    is a Bash tool like any other: PreToolUse tracks it, and it then waits
+    for the command it IS. On 2026-09-03 that is exactly what happened -
+    the restart was launched with run_in_background, the record outlived
+    the process, and every later `--now` was refused with "1 tracked
+    command(s) still running" naming its own ancestor. Nothing lifts that
+    but the record ageing out at BG_MAX_SEC, eight hours away.
+
+    The commands come from the daemon's `inflight_cmds`, which is built
+    from `inflight_live` - so what is skipped here is a record the daemon
+    itself still calls live, and there is no second idea of liveness. An
+    older daemon sends only the count; then nothing is excluded, which is
+    the pre-2026-09-03 behaviour and fails towards refusing.
+    """
+    n = int(b.get("inflight") or 0)
+    cmds = b.get("inflight_cmds")
+    if not isinstance(cmds, list):
+        return n, 0
+    # A BACKGROUND JOB IS NOT WORK THIS GATE PROTECTS. Nothing waits on
+    # one: it outlives its own PostToolUse, the stuck watch skips it, and
+    # reseed_proctrack hands it straight back after a restart - measured,
+    # 70 of them came back two seconds after the daemon returned. They
+    # held a restart for five minutes on 2026-09-04 and cost nothing when
+    # it went ahead anyway. -> DECISIONS.md 8.10 part D
+    #
+    # ONE PASS OVER THE COMMANDS, because the two exclusions overlap: the
+    # gate's own restart is usually itself a background job. Subtracting
+    # the two counts removed that record twice and took a real foreground
+    # command with it, which would have stopped the daemon under live
+    # work. An older daemon sends neither list and nothing is excluded,
+    # which is the previous behaviour and errs towards refusing.
+    bgc = b.get("inflight_bg_cmds")
+    bgset = set(bgc) if isinstance(bgc, list) else set()
+    mine, skipped = 0, 0
+    for c in cmds:
+        c = c or ""
+        if SELF_CMD in c:
+            mine += 1
+            skipped += 1
+        elif c in bgset:
+            skipped += 1
+    return max(0, len(cmds) - skipped), mine
+
+
+def blocking_lines(lines):
+    """The lines that are a REFUSAL, out of everything busy_now says.
+
+    ONE definition, three consumers - the verdict, the waiting message and
+    the `why` a caller records - because a line saying what was EXCLUDED
+    reads exactly like a line saying what is running, and three places each
+    deciding for themselves is how "still busy: not counting 1 relayout
+    command of my own" gets printed at somebody.
+    """
+    return [ln for ln in lines
+            if "not counting" not in ln and ln != "every pair is idle"]
+
+
+def busy_now(port=None, timeout=8):
+    """What the live daemon says it would lose if it stopped this second.
+
+    Returns (verdict, lines). `verdict` is "quiet", "busy", "no daemon" or
+    "unreachable"; `lines` names what and whose, so a refusal is actionable
+    rather than a No.
+
+    WHY IT ASKS THE DAEMON AND NOT A PERSON. `PENDING` lives in the daemon's
+    memory, so a Stop hook blocked on a report is answered by nobody once
+    that daemon is gone - the executor's turn ends with no verdict and the
+    report is lost rather than delayed. The rule said "check first"; on
+    2026-09-02 the check was taken half a minute before the stop and a whole
+    report went out, was answered, and came back inside that gap, six
+    seconds clear. A precondition kept by memory is not a precondition
+    (rule 24), and a check separated in time from its act is 5.17. This runs
+    inside the same call as the stop. -> DECISIONS.md 8.3
+
+    THREE ANSWERS, NOT TWO, AND THE THIRD IS THE HONEST ONE. A port nobody
+    is serving is positive evidence that no daemon is running, and no Stop
+    hook can be blocked on a socket that refuses connections - so that is
+    "no daemon" and it proceeds. A port that IS open but will not answer
+    /state is the fail-closed case: something is there and cannot be asked,
+    which is not the same as nothing being there.
+    """
+    if not port_open(port):
+        return "no daemon", ["nothing is listening on port %d" % (port or PORT)]
+    url = "http://127.0.0.1:%d/state" % (port or PORT)
+    try:
+        raw = urllib.request.urlopen(url, timeout=timeout).read()
+        st = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        return "unreachable", ["port %d is open but /state did not answer: %s"
+                               % (port or PORT, exc)]
+    lines = []
+    for path, pair in (st.get("pairs") or {}).items():
+        name = pair.get("name") or path
+        b = pair.get("busy")
+        if b is None:
+            # An older daemon, from before this block existed. It cannot be
+            # asked, and guessing "quiet" is the answer this gate exists to
+            # stop making.
+            return "unreachable", [
+                "%s: this daemon predates the restart gate and cannot say "
+                "whether it is busy" % name]
+        if b.get("reviewing"):
+            lines.append("%s: a report is waiting for a verdict - stopping "
+                         "now loses it and the executor's turn ends unread"
+                         % name)
+        if b.get("verdict_in_flight"):
+            lines.append("%s: a verdict is on its way to the executor" % name)
+        n_inflight, mine = count_inflight(b)
+        _bgc = b.get("inflight_bg_cmds")
+        _bg = len([c for c in (_bgc if isinstance(_bgc, list) else [])
+                   if SELF_CMD not in (c or "")])
+        if _bg:
+            # SAID OUT LOUD, like the gate's own command above: a record
+            # that was excluded has to be visible, or a refusal that
+            # changed meaning cannot be audited. The gate's own restart is
+            # not counted here again - it has its own line, and one record
+            # reported twice reads as two.
+            lines.append("%s: not counting %d background command(s) - "
+                         "nothing waits on those" % (name, _bg))
+        if mine:
+            # SAID OUT LOUD, because a gate that quietly ignores a record
+            # is one nobody can audit. Named whether it changed the answer
+            # or not: "I excluded one and the rest still hold it" and "I
+            # excluded one and now it is quiet" have to read differently.
+            lines.append("%s: not counting %d relayout command(s) of my own"
+                         % (name, mine))
+        if n_inflight:
+            lines.append("%s: %d tracked command(s) still running"
+                         % (name, n_inflight))
+        if b.get("handover"):
+            lines.append("%s: a handover is under way" % name)
+        for role in (b.get("compacting") or []):
+            lines.append("%s: the %s is being left alone to compact"
+                         % (name, role))
+    return (("busy" if blocking_lines(lines) else "quiet"),
+            (lines or ["every pair is idle"]))
+
+
+def wait_until_quiet(port=None, seconds=0, out=say):
+    """Ask again until it is quiet, or give up. Returns (verdict, lines).
+
+    Nothing waits by default: a restart that silently blocks for minutes is
+    worse than one that says why it will not run, because the person is
+    standing there either way and only one of the two tells them anything.
+    """
+    end = time.time() + max(0.0, float(seconds))
+    while True:
+        verdict, lines = busy_now(port)
+        if verdict != "busy" or time.time() >= end:
+            return verdict, lines
+        out("   still busy: %s" % (blocking_lines(lines) or lines)[0])
+        time.sleep(min(5.0, max(1.0, end - time.time())))
+
+
+def run_now(base=None, port=None, start_wait=180, out=say, stop=True,
+            gate=True, wait=0):
     """The whole thing, with a way back. Returns a dict.
 
     stop=False means the daemon is already on its way out - it asked for
     this itself - so wait for the port instead of killing anything.
+
+    RUN IT IN THE FOREGROUND: `--wait` does the waiting, and a restart put
+    into the background is a tracked command that outlives its process and
+    then blocks the next restart (count_inflight above).
     """
     base = base or BASE
     out("Bridge: finishing the folder rebuild.")
+    if stop and gate:
+        # The gate and the stop in one call, with nothing between them.
+        verdict, lines = wait_until_quiet(port, wait, out=out)
+        if verdict in ("busy", "unreachable"):
+            for line in lines:
+                out("   %s" % line)
+            out("   Not stopping. Wait for the pair to finish a turn, or "
+                "run again with --wait <seconds>.")
+            out("   If the daemon is genuinely dead and this is in the way, "
+                "--force says so deliberately.")
+            return {"ok": False, "stage": "gate",
+                    "why": (blocking_lines(lines) or lines)[0],
+                    "busy": lines, "verdict": verdict}
+        out("   %s" % lines[0])
     if stop:
         ok, why = stop_daemon(port)
     else:
@@ -881,7 +1061,10 @@ def main(argv=None):
         return 0 if r.get("ok") else 1
 
     if "--now" in argv:
-        r = run_now(base, port)
+        wait = 0
+        if "--wait" in argv:
+            wait = float(argv[argv.index("--wait") + 1])
+        r = run_now(base, port, gate="--force" not in argv, wait=wait)
         return 0 if r.get("ok") else 1
 
     # The quiet path, called by bridge.bat before every start. Silent when

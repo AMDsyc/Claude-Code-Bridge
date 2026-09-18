@@ -79,6 +79,12 @@ Four tools:
   finished and the loop should end; rare, and it is the only verdict that
   stops the run.
 
+  WORK GOES IN A TASK, NOT IN A WAIT. A `wait` longer than 250 characters
+  now reaches the executor as words while something is running, so what you
+  write there is not lost any more - but it arrives as a remark, not as an
+  assignment, and a `wait` sent with nothing running still reaches nobody.
+  If you want a piece done, use the task tool.
+
   done and stop are GATED, and the gate is in the daemon, not in your good
   intentions. Neither is taken unless the feedback carries a Checked:
   block naming what you opened yourself, and unless the bridge finds those
@@ -92,10 +98,15 @@ Four tools:
   and a judgement made from the words of a report is acceptance by hearsay
   under another name. Only wait is free of the Checked: block - it judges
   nothing, it says a process is still running.
-- check: run this project's acceptance yourself. The bridge copies the
-  sources somewhere isolated, runs the suites, py_compile and the package
-  byte check there, and hands you back the exit codes and where the output
-  was written. It changes nothing and it never touches the live project.
+- check: run this project's acceptance yourself, WHERE THE PROJECT NAMES
+  ITS CHECKS. Elsewhere the tool answers at once that there is nothing to
+  run: the bridge's own suites test the bridge, and running them over a
+  report about your project would prove nothing about it while costing
+  your pair minutes of silence - both windows look frozen while it runs.
+  Where checks ARE named, the bridge copies the sources somewhere
+  isolated, runs the suites, py_compile and the package byte check there,
+  and hands you back the exit codes and where the output was written. It
+  changes nothing and it never touches the live project.
 
   Call it before accepting any report that changed code. On projects that
   say which checks accept their code, done and stop are REFUSED without a
@@ -259,8 +270,10 @@ def backlog_view():
 
 
 def rpc_write(obj):
-    """Direct write - only for replies to the session's own JSON-RPC calls,
-    which are already on the stdio thread and must answer in order."""
+    """Direct write - for replies to the session's own JSON-RPC calls.
+    One whole line per call under the lock; the ORDER is whatever order
+    the calls finish in, which JSON-RPC allows (a reply carries its id) and
+    which is the point - see serve_request."""
     line = json.dumps(obj, ensure_ascii=False)
     with _out_lock:
         sys.stdout.write(line + "\n")
@@ -431,7 +444,11 @@ TOOLS = [{
                                        "piece is accepted; the loop carries "
                                        "on and you give the next piece with "
                                        "the task tool. wait = a long process "
-                                       "is still running. stop = the whole "
+                                       "is still running - its words reach "
+                                       "the executor only while something "
+                                       "IS running, and only past 250 "
+                                       "characters, so give WORK with the "
+                                       "task tool. stop = the whole "
                                        "job is finished and the loop should "
                                        "be switched off - rare."},
             "feedback": {"type": "string",
@@ -488,12 +505,15 @@ TOOLS = [{
     "name": "check",
     "description": ("Run this project's own acceptance yourself - the bridge "
                     "does it for you, in an isolated copy, and hands you the "
-                    "raw exit codes. Call it BEFORE accepting any report that "
-                    "changed code: 'done' and 'stop' are refused without a "
-                    "successful run made after the report arrived. You cannot "
-                    "run anything in your own window, which is exactly why "
-                    "this exists - without it 'I verified it' can only mean "
-                    "'I read that it was verified'."),
+                    "raw exit codes. This works where the project NAMES its "
+                    "checks; elsewhere it answers at once that there is "
+                    "nothing to run, and costs nothing. Call it BEFORE "
+                    "accepting any report that changed code: 'done' and "
+                    "'stop' are refused without a successful run made after "
+                    "the report arrived. You cannot run anything in your own "
+                    "window, which is exactly why this exists - without it "
+                    "'I verified it' can only mean 'I read that it was "
+                    "verified'."),
     "inputSchema": {
         "type": "object",
         "properties": {
@@ -562,6 +582,12 @@ def handle_request(msg):
                     if out and out.get("ok")
                     else "the bridge daemon is not reachable; the verdict "
                          "was NOT delivered")
+            # The daemon decides whether there is anything to add and this
+            # only carries it, so there is one place that knows what a
+            # `wait` costs. It rides on the answer the caller is already
+            # waiting for: no delivery, no wake, no round trip.
+            if out and out.get("note"):
+                text = "%s; %s" % (text, out["note"])
             return {"jsonrpc": "2.0", "id": mid,
                     "result": {"content": [{"type": "text", "text": text}]}}
         if params.get("name") == "loop":
@@ -698,6 +724,18 @@ def main():
     sys.stderr.write("bridge channel up for %s role=%s on 127.0.0.1:%d\n"
                      % (PROJECT, ROLE, port))
 
+    # EVERY REQUEST IN ITS OWN THREAD. This loop used to call
+    # handle_request inline, one call at a time - and `check` inside it
+    # waits on the daemon for the whole acceptance run (853 s since
+    # 2026-09-12, 8.19). Everything the session called meanwhile sat in
+    # stdin behind it: on 2026-09-13 the planner issued `continue` on
+    # report 337 at 00:37:11, ten minutes into its own check, the client
+    # gave the call up as "still running" at 00:39:11, and the verdict
+    # reached the daemon at 00:47:38 - the same second the check returned
+    # (journal, planner_check then verdict). The executor stood on its
+    # Stop hook for those ten minutes. A JSON-RPC reply carries its id, so
+    # replies may go out in the order calls FINISH; rpc_write holds the
+    # lock for one whole line. -> DECISIONS.md 8.21
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -706,18 +744,24 @@ def main():
             msg = json.loads(line)
         except Exception:
             continue
-        try:
-            reply = handle_request(msg)
-        except Exception as exc:
-            sys.stderr.write("bridge channel error: %s\n" % exc)
-            reply = None
-            if msg.get("id") is not None:
-                reply = {"jsonrpc": "2.0", "id": msg["id"],
-                         "error": {"code": -32000, "message": str(exc)}}
-        if reply is not None:
-            rpc_write(reply)
+        threading.Thread(target=serve_request, args=(msg,),
+                         name="rpc-%s" % msg.get("id"), daemon=True).start()
 
     post_daemon("/channel/unregister", {"project": PROJECT, "role": ROLE})
+
+
+def serve_request(msg):
+    """One JSON-RPC request, start to reply, on its own thread."""
+    try:
+        reply = handle_request(msg)
+    except Exception as exc:
+        sys.stderr.write("bridge channel error: %s\n" % exc)
+        reply = None
+        if msg.get("id") is not None:
+            reply = {"jsonrpc": "2.0", "id": msg["id"],
+                     "error": {"code": -32000, "message": str(exc)}}
+    if reply is not None:
+        rpc_write(reply)
 
 
 if __name__ == "__main__":

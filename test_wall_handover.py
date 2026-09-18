@@ -29,6 +29,7 @@ replaced by a recorder. The live daemon on 8765 is never contacted.
 
 Run:  python test_wall_handover.py
 """
+import io
 import json
 import os
 import shutil
@@ -41,6 +42,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 TMP = tempfile.mkdtemp(prefix="bridge-wall-test-")
 os.environ["BRIDGE_DATA"] = os.path.join(TMP, "data")
+# The client's own config is isolated too: install() marks a project trusted
+# there, and without this a suite would merge its throwaway temp projects into
+# the real ~/.claude.json on this machine.
+os.environ["BRIDGE_CLAUDE_JSON"] = os.path.join(TMP, ".claude.json")
 os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(TMP, "claude-home")
 os.environ["PYTHONUTF8"] = "1"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -116,6 +121,23 @@ def _stub_build(*a, **kw):
 
 sessions.build_command = _stub_build
 sessions.CREATE_NEW_CONSOLE = 0        # no console windows for a test
+
+# WRAPPED, NOT REPLACED. Since 2026-09-04 the handover opens the new
+# window BEFORE stopping the old one, and WHEN the old one is stopped is
+# now a claim this suite makes - so the calls are recorded. The real
+# function still runs: a stub would mean the stub processes were never
+# killed and the assertion would be about a recorder rather than about
+# the bridge.
+STOPS = []
+_real_stop = sessions.stop
+
+
+def _watched_stop(project, role, pid=None, wait=None):
+    STOPS.append((role, pid))
+    return _real_stop(project, role, pid=pid, wait=wait)
+
+
+sessions.stop = _watched_stop
 
 TG = []
 telegram.send = lambda cfg, text, level="silent", buttons=None: TG.append(
@@ -195,17 +217,17 @@ def post(path, payload, secret=False):
     return json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
 
 
-def hook(name, role, sid, **extra):
+def hook(name, role, sid, proj=PROJ, **extra):
     ev = {"hook_event_name": name, "role": role, "session_id": sid,
-          "project_dir": PROJ, "cwd": PROJ}
+          "project_dir": proj, "cwd": proj}
     ev.update(extra)
     return post("/event", ev)
 
 
-def statusline(role, sid, tokens, window=WINDOW):
+def statusline(role, sid, tokens, window=WINDOW, proj=PROJ):
     return post("/status", {"role": role, "payload": {
         "session_id": sid,
-        "workspace": {"current_dir": PROJ, "project_dir": PROJ},
+        "workspace": {"current_dir": proj, "project_dir": proj},
         "model": {"display_name": MODEL, "id": "claude-opus-5"},
         "context_window": {"context_window_size": window,
                            "used_percentage": round(tokens * 100.0 / window, 1),
@@ -233,10 +255,10 @@ def journal_has(fragment):
     return [r for r in journal_text() if fragment in (r.get("text") or "")]
 
 
-def sess_of(role):
+def sess_of(role, proj=PROJ):
     for s in (daemon.STATE.get("sessions") or {}).values():
         if s.get("role") == role and daemon.norm(s.get("path")) == \
-                daemon.norm(PROJ) and s.get("state") not in ("ended", "died"):
+                daemon.norm(proj) and s.get("state") not in ("ended", "died"):
             return s
     return {}
 
@@ -298,7 +320,7 @@ def settled():
     return waited
 
 
-def backdate(role, minutes=15):
+def backdate(role, minutes=15, proj=PROJ):
     """Make a session look silent, which is what assess() waits for.
 
     Both fields, because touch_session writes both and nothing in the bridge
@@ -308,7 +330,7 @@ def backdate(role, minutes=15):
     over, because silence used to be measured off "%H:%M:%S" mapped onto
     today (-> DECISIONS.md 5.27 and rule 6.5). Silence is an EPOCH question.
     """
-    s = sess_of(role)
+    s = sess_of(role, proj)
     when = time.time() - minutes * 60
     s["last_seen"] = time.strftime("%H:%M:%S", time.localtime(when))
     s["seen_at"] = when
@@ -350,21 +372,36 @@ check("the loop is on",
       daemon.loop_state(PROJ)[1].get("active"), True)
 check("the window was observed, not deduced",
       daemon.wall_view(sess_of("executor"), PROJ)["window"], WINDOW)
-# Not a magic number: it is PROJECT_DEFAULTS["autocompact_pct"] of the
-# window, and it moved 80 -> 70 on 2026-08-21 because compaction fires
-# BETWEEN turns and 80% left only 200k of headroom, while the turn that
-# killed a session needed 200,274. Read from the default rather than
-# copied, so the suite follows the decision instead of pinning yesterday's.
-_want_compact = min(int(WINDOW * store.PROJECT_DEFAULTS["autocompact_pct"]
-                        / 100.0), WINDOW - 13000)
-check("the compaction point comes from the launch threshold",
-      daemon.wall_view(sess_of("executor"), PROJ)["compact"], _want_compact)
-check("and that threshold leaves a whole turn of headroom",
-      WINDOW - _want_compact >= 200274, True)
+# The bridge used to hand every window a threshold and this read it back
+# out of wall_view. It hands out none since 2026-09-01 - the owner's
+# decision that the bridge does not manage auto-compaction at all - so the
+# honest answer before anything has compacted is that the point is NOT
+# KNOWN, rather than a percentage of the window dressed up as a fact. It
+# becomes known from a measurement, which is what this scenario goes on to
+# take. The old arithmetic is kept below because it is still true of
+# anyone who sets a threshold of their own; it is just not ours any more.
+_wv = daemon.wall_view(sess_of("executor"), PROJ)
+check("no compaction point is claimed before one is measured",
+      _wv["compact"], None)
+check("and it says WHY, instead of naming a number nobody set",
+      "not started with a threshold" in (_wv["compact_source"] or ""), True)
+check("the window is still observed - the control for the two above",
+      _wv["window"], WINDOW)
+check("and 70% would still have left a whole turn of headroom",
+      WINDOW - min(int(WINDOW * 70 / 100.0), WINDOW - 13000) >= 200274, True)
 check("nothing has compacted yet",
       daemon.compactions_done(PROJ, "executor"), 0)
-check("so the distance to the wall is not sizeable",
-      daemon.life_view(sess_of("executor"), PROJ)["sizeable"], False)
+print("    and with no point there is no cycle, so the distance to the")
+print("    wall is not offered at all. It used to be offered and merely")
+print("    called not sizeable, because the point was a percentage the")
+print("    bridge had set. life_view already had this branch written; the")
+print("    removal is what made it the one that runs")
+_lv = daemon.life_view(sess_of("executor"), PROJ)
+check("the distance is not claimed", "sizeable" in _lv, False)
+check("and the blank says why", "not known for this window"
+      in (_lv.get("why_blank") or ""), True)
+check("...the control: life_view still answered about this session",
+      _lv.get("budget"), daemon.COMPACTIONS_TO_WALL)
 
 print("\nA2. four ordinary compactions: fire, summarise, finish the turn")
 print("    the floor is recorded at the Stop that follows a compaction, so")
@@ -401,7 +438,15 @@ print("    between PreCompact and the next status line the size on record")
 print("    describes a conversation that is being replaced by a summary")
 statusline("executor", EX1, FIRED[4])
 hook("PreCompact", "executor", EX1, transcript_path="")
-check("five compactions now", daemon.compactions_done(PROJ, "executor"), 5)
+# CHANGED DELIBERATELY 2026-09-12: a PreCompact is the client ANNOUNCING a
+# compaction, and until the summary comes back smaller it is not one. On
+# 2026-09-07 a watched pair's client fired PreCompact every three minutes at
+# 811k under a rate limit and never shrank; the count went 5 -> 20 in an
+# hour and the next resume was replaced eight minutes after it started
+# for "compacted 20 times". So the fifth is counted below, when the
+# smaller reading lands - here it is still four. -> DECISIONS.md 8.18
+check("four compactions LANDED - the fifth is announced, not yet counted",
+      daemon.compactions_done(PROJ, "executor"), 4)
 pend = sess_of("executor").get("compaction_pending")
 check("the reading is marked as in flight", bool(pend), True)
 check("and it remembers what it was", pend.get("tokens"), FIRED[4])
@@ -429,6 +474,8 @@ print("\n    the summary lands; the first smaller reading clears the mark")
 statusline("executor", EX1, FLOORS[4])
 check("the mark is gone",
       bool(sess_of("executor").get("compaction_pending")), False)
+check("and NOW it is five - the summary came back smaller",
+      daemon.compactions_done(PROJ, "executor"), 5)
 plan_now = daemon.plan_for(sess_of("executor"), PROJ)
 check("and NOW the plan is handover", plan_now["do"], "handover")
 check("for the reason the rule gives",
@@ -438,31 +485,171 @@ check("the planner, meanwhile, is nowhere near it",
 check("and nothing is blocking it",
       daemon.handover_blocked(PROJ, ("executor",)), None)
 
-print("\nA4. the turn ends - and THIS is the handover moment")
-print("    it lands on the floor, right after a compaction, where the")
-print("    window has just been freed and there is room to write a handoff")
+print("\nA4. the turn ends - and the bridge ASKS FOR THE HANDOFF")
+print("    CHANGED DELIBERATELY 2026-09-04 (X1). What stood here asserted")
+print("    that this Stop cut the turn and fired the handover. It did, and")
+print("    that is exactly what the piece removed: the session was killed")
+print("    where it stood and `handover()` carried only the daemon's own")
+print("    ten-line table. On 2026-09-04 04:02 a real executor was replaced")
+print("    with its project handoff untouched since the day before, in the")
+print("    middle of its work, under a reason line reading `a fresh session")
+print("    with the handoff is what comes next` - about a file that did not")
+print("    exist. The wall now DEMANDS the handoff and waits for a witness")
+print("    on the FILE; the launch assertions move to A4b below, unchanged.")
+# Reached through getattr, because the RED proof of this piece runs these
+# very checks against a daemon that has none of these names - and a flat
+# script that raises there stops, taking every block below it with it, which
+# is no proof at all. Same idiom as test_multipair case 68.
+_MARK = getattr(daemon, "HANDOFF_MARK", "HANDOFF WRITTEN:")
+_pend = getattr(daemon, "handover_pending_for", lambda *a, **k: {})
 pl_sess_before = dict(sess_of("planner"))
 pl_compactions_before = daemon.compactions_done(PROJ, "planner")
 DELIVERED["planner"] = []
 before = len(launches())
 out = finish_turn("executor", EX1, "the fifth cycle is spent")
 ho = (out.get("hook_output") or {})
-check("the turn was cut rather than reviewed", ho.get("continue"), False)
-check("and the session was told why",
-      "Handing over to a fresh executor" in (ho.get("stopReason") or ""), True)
-note("stopReason", ho.get("stopReason"))
-check("no report was sent for review - the turn did not finish normally",
-      any("Executor report" in (d.get("content") or "")
-          for d in DELIVERED["planner"]), False)
+check("the turn is NOT cut - the session has a handoff to write",
+      ho.get("continue"), None)
+_ctx = ((ho.get("hookSpecificOutput") or {}).get("additionalContext") or "")
+check("and the demand rides back on the same hook return, no extra trip",
+      ("HANDED OVER AFTER THIS TURN" in _ctx,
+       _MARK in _ctx), (True, True))
+# JOINED BEFORE IT IS DENIED - `handover()` runs on a thread, and
+# "nothing was opened" asked on the next line would be racing it.
+# settled() joins anything named handover*/rotate*, which is why those
+# threads carry names.
+#
+# AND IT STILL CANNOT DISCRIMINATE ON THE OLD CODE, which is said here
+# rather than left to be discovered: the handover thread as it stood was
+# started WITHOUT a name (the name is part of this change), so settled()
+# finds nothing to join there and this check answers 0 by timing. The
+# claim it makes is covered by the line below it, "nothing is recorded as
+# under way", which reads state instead of a clock and does go red on the
+# old code. This one earns its place on the NEW code, where the join is
+# real.
+note("anything the wall started, waited for", settled())
+check("nothing was opened yet", len(launches()) - before, 0)
+check("and nothing is recorded as under way",
+      bool((daemon.STATE.get("handover") or {}).get(daemon.norm(PROJ))), False)
+check("the pending record names the file and when it was asked for",
+      (bool(_pend(PROJ, "executor").get("file")),
+       bool(_pend(PROJ, "executor").get("at"))),
+      (True, True))
 check("the fifth floor was recorded before the decision was taken",
       [f["after"] for f in daemon.floors(PROJ, "executor")], FLOORS)
+
+print("\nA4a. another turn ends WITHOUT the file: nothing is killed")
+before = len(launches())
+out = finish_turn("executor", EX1, "still working, no handoff yet")
+check("no window is opened for a session that has not written its handoff",
+      len(launches()) - before, 0)
+check("the demand still stands",
+      bool(_pend(PROJ, "executor")), True)
+check("and it was said ONCE, at warn, not once per turn",
+      len([r for r in daemon.store.recent_events(200, project=PROJ)
+           if "waits for the executor's handoff" in (r.get("text") or "")]), 1)
+
+print("\nA4a2. it SAYS the handoff is written, and the file has not moved")
+print("     THE WITNESS THAT MATTERS (rule 30). A report claiming its own")
+print("     handoff exists is the witness the event produces; the file's")
+print("     mtime is the one it cannot. Without this a version that took")
+print("     the session's word for it passes everything else - which is")
+print("     exactly what the sabotage `word-is-enough` showed.")
+_hf = (_pend(PROJ, "executor").get("file")
+       or os.path.join(PROJ, "bridge-logs", time.strftime("%Y-%m-%d"),
+                       "handoff", "001-executor.md"))
+before = len(launches())
+out = finish_turn("executor", EX1,
+                  "%s %s\n\nsaid, but nothing was written" % (_MARK, _hf))
+note("anything that Stop started, waited for", settled())
+check("a claim with no file behind it replaces nobody",
+      len(launches()) - before, 0)
+check("and the demand still stands", bool(_pend(PROJ, "executor")), True)
+
+print("\nA4b. the handoff is written - and THIS is the handover moment")
+_hf = (_pend(PROJ, "executor").get("file")
+       or os.path.join(PROJ, "bridge-logs", time.strftime("%Y-%m-%d"),
+                       "handoff", "001-executor.md"))
+try:
+    os.makedirs(os.path.dirname(_hf), exist_ok=True)
+except OSError:
+    pass
+io.open(_hf, "w", encoding="utf-8").write(
+    u"# what the next session needs\n\nthe thread, written by the session "
+    u"that is being replaced\n")
+# THE FILE THE REPORT NAMES, WHICH IS NOT THE ONE THAT WAS DEMANDED.
+# They differ in every real handover - the session writes a shift handoff
+# under its own name and says so on the first line - and until 2026-09-05
+# this fixture used ONE file for both, so no check here could tell the
+# demanded file from the checked one. That is what let the journal line
+# print the demanded one for a year: on 2026-09-05 16:10:25 it read "The
+# executor wrote its handoff (BRIDGE_HANDOFF.md)" while handoff_written
+# had accepted 191-shift.md, and a shift read that as the daemon taking a
+# header edit for a handoff. -> DECISIONS.md 8.17
+_own = os.path.join(PROJ, "bridge-logs", time.strftime("%Y-%m-%d"),
+                    "handoff", "191-shift.md")
+io.open(_own, "w", encoding="utf-8").write(
+    u"# the shift handoff\n\nMARK-OWN-HANDOFF-A4B - the thread itself\n")
+DELIVERED["planner"] = []
+before = len(launches())
+_stops_before = len(STOPS)
+_oldpid_ex = daemon.pid_of(PROJ, "executor")
+out = finish_turn("executor", EX1,
+                  "%s %s\n\nthe fifth cycle is spent"
+                  % (_MARK, _own))
+ho = (out.get("hook_output") or {})
+check("NOW the turn is cut", ho.get("continue"), False)
+check("and the session is told its handoff is what goes across",
+      "handoff is written" in (ho.get("stopReason") or ""), True)
+note("stopReason", ho.get("stopReason"))
+check("the demand is spent",
+      bool(_pend(PROJ, "executor")), False)
 for _ in range(300):
     if len(launches()) > before:
         break
     time.sleep(0.1)
 check("exactly one window was opened", len(launches()) - before, 1)
+# CHANGED DELIBERATELY 2026-09-04 (X1b), and it is a NEW claim rather
+# than a reworded one: until that day this block could say nothing
+# about the old window, because the handover had already killed it
+# three lines earlier - stop, sleep 2, launch. The order is reversed
+# now and this is the half of it that belongs here; the other half is
+# in A6, where the replacement reports for duty and only THEN is the
+# old one stopped. On 2026-09-04 04:02:19 the old order stopped an
+# executor whose replacement never came up, and the pair had no
+# executor for six hours. -> DECISIONS.md 8.7
+check("and the session being replaced was NOT stopped to make room",
+      STOPS[_stops_before:], [])
+check("and the seed carries the session's OWN handoff, not only the table",
+      ((daemon.STATE.get("seed") or {}).get(daemon.norm(PROJ)) or {})
+      .get("own_handoff"), _own)
+_wrote = [r.get("text") or ""
+          for r in daemon.store.recent_events(300, project=PROJ)
+          if "wrote its handoff" in (r.get("text") or "")]
+check("and the journal names the file that was CHECKED",
+      bool(_wrote) and _own in _wrote[-1], True)
+check("and says which one was asked for, since the two differ",
+      bool(_wrote) and _hf in _wrote[-1], True)
 
-lr = launches()[-1]
+# GUARDED, because everything below reads it. Under a sabotage that stops
+# the handover happening at all there is no new launch, and launches()[-1]
+# then hands back an OLDER window whose argv has no --model: a raise three
+# lines later that takes the rest of the file with it, silently. One FAIL
+# for the lot instead - the same principle as read_or_fail.
+_lrs = launches()
+lr = (_lrs[-1] if len(_lrs) > before
+      else {"argv": [], "role": "", "cwd": "", "autocompact": "?"})
+
+
+def argof(rec, flag):
+    """The value after a flag, or "". `.index()` on a missing flag raises,
+    and a raise here kills the flat script - which is how a sabotage that
+    stops the launch produced a traceback instead of FAIL lines."""
+    av = list((rec or {}).get("argv") or [])
+    return av[av.index(flag) + 1] if flag in av and av.index(flag) + 1 < len(av) else ""
+
+check("a window was actually opened to read the argv of",
+      len(_lrs) > before, True)
 note("the stub's argv", " ".join(lr["argv"]))
 check("it is the executor that was launched", lr["role"], "executor")
 check("in the project folder", os.path.normcase(lr["cwd"]),
@@ -474,16 +661,18 @@ check("with the executor's permission mode",
       # so the default became bypassPermissions. Read from the config
       # rather than written out again, so this case follows the decision
       # instead of having to be found and edited next time it moves.
-      lr["argv"][lr["argv"].index("--permission-mode") + 1],
+      argof(lr, "--permission-mode"),
       store.DEFAULT_CONFIG["role_modes"]["executor"])
 check("with the first model of the executor chain",
-      lr["argv"][lr["argv"].index("--model") + 1], "opus")
+      argof(lr, "--model"), "opus")
 check("with remote control, so it shows up in the app",
       "--remote-control" in lr["argv"], True)
 check("and the development-channels flag the channel needs",
       "--dangerously-load-development-channels" in lr["argv"], True)
-check("the compaction threshold was passed to it", lr["autocompact"],
-      str(store.PROJECT_DEFAULTS["autocompact_pct"]))
+check("NO compaction threshold is handed to the window it opens",
+      lr["autocompact"], None)
+check("...and the control: the stub really did record this launch",
+      lr["role"], "executor")
 check("no --resume: a handover is a NEW session, not the old one",
       "--resume" in lr["argv"], False)
 
@@ -583,6 +772,25 @@ check("the handoff was delivered to the new executor",
 check("as a task, so it starts working",
       any((d.get("meta") or {}).get("kind") == "task"
           for d in DELIVERED["executor"]), True)
+# THE WHOLE POINT OF X1, AND IT HAD NEVER ARRIVED. A4b already proved the
+# seed CARRIES the file; nothing until 2026-09-05 asked whether the
+# replacement was ever told. It was not: the SessionStart handler pops
+# STATE["seed"] and starts resume_after_handover three statements later,
+# which read the same key and found nothing - so every replaced executor
+# there has ever been was told "The previous session left NO handoff of
+# its own (no file was named)" while the file sat on disk, named in the
+# report the bridge had just accepted. A mechanism can be green and dead;
+# what closed the gap was asking the RECEIVER instead of the record.
+# -> DECISIONS.md 8.17
+check("and it carries the previous session's OWN words, not only the table",
+      any("MARK-OWN-HANDOFF-A4B" in (d.get("content") or "")
+          for d in DELIVERED["executor"]), True)
+check("naming the file they came from",
+      any(_own in (d.get("content") or "")
+          for d in DELIVERED["executor"]), True)
+check("and never says there was no handoff when there was one",
+      any("left NO handoff of its own" in (d.get("content") or "")
+          for d in DELIVERED["executor"]), False)
 check("and the surviving planner was told the hands changed",
       any("has been replaced by a fresh session" in (d.get("content") or "")
           for d in DELIVERED["planner"]), True)
@@ -591,6 +799,16 @@ check("told through its channel, as information not a task",
           for d in DELIVERED["planner"]), True)
 check("the handover is no longer under way",
       bool((daemon.STATE.get("handover") or {}).get(daemon.norm(PROJ))), False)
+# THE OTHER HALF OF A4b's ORDER CLAIM. One stop, of the pid A4b
+# recorded before the handover started, and not one moment before the
+# replacement said it was up.
+for _ in range(200):
+    if STOPS[_stops_before:]:
+        break
+    time.sleep(0.1)
+check("and the window it replaced is stopped only now, once, by pid",
+      STOPS[_stops_before:], [("executor", _oldpid_ex)])
+note("what was stopped, and when", STOPS[_stops_before:])
 
 print("\n    the replacement starts clean, the old session keeps its trail")
 check("no compactions inherited",
@@ -728,6 +946,77 @@ check("its plan is handover",
 check("the executor is fine and stays fine",
       daemon.plan_for(sess_of("executor"), PROJ)["do"], "working")
 
+print("\nB1a. the wall asks the PLANNER for its handoff too")
+print("     2026-09-04, the owner: the five-compaction wall works for the")
+print("     planner as well. It always did - plan_for reads the role off")
+print("     the session and assess() has its own planner branch - but")
+print("     nobody ASKED the planner for a handoff before replacing it.")
+print("     It is asked on its own Stop hook, the same way X1 asks the")
+print("     executor, with one difference that is the owner's: a planner")
+print("     that has not written one by the ceiling is replaced anyway,")
+print("     because it can rebuild itself from the logs and an executor")
+print("     cannot.")
+_pl_demand = hook("Stop", "planner", PL1,
+                  last_assistant_message="Report accepted; next piece sent.")
+_pl_ctx = (((_pl_demand.get("hook_output") or {})
+            .get("hookSpecificOutput") or {}).get("additionalContext") or "")
+check("the demand rides back on the planner's own Stop hook",
+      "HANDOFF" in _pl_ctx.upper(), True)
+check("and it names the file to write, in the numbered handoff namespace",
+      "-planner.md" in _pl_ctx, True)
+note("what the planner was asked", _pl_ctx.replace("\n", " ")[:170])
+check("a demand is on record for the planner",
+      bool(daemon.handover_pending_for(PROJ, "planner")), True)
+check("and it is NOT the executor's - that one is untouched",
+      bool(daemon.handover_pending_for(PROJ, "executor")), False)
+
+print("     while it is unwritten and under the ceiling, assess waits")
+backdate("executor")
+backdate("planner")
+_before_hold = len(launches())
+_res_hold = daemon.assess(PROJ)
+settled()
+check("assess says what it is waiting for",
+      _res_hold.get("did"), "waiting for its own handoff first")
+check("and opens nothing", len(launches()) - _before_hold, 0)
+
+print("     the planner writes it - and now it may be replaced")
+_plf = daemon.project_handoff_file(PROJ, "planner")[0]
+try:
+    os.makedirs(os.path.dirname(_plf), exist_ok=True)
+except OSError:
+    pass
+io.open(_plf, "w", encoding="utf-8").write(
+    u"# the planner's own handoff\n\nwhat this review thread was about\n")
+_pl_written = hook("Stop", "planner", PL1,
+                   last_assistant_message="%s %s\n\nthread closed"
+                   % (_MARK, _plf))
+# CHANGED DELIBERATELY 2026-09-12. The record used to be CLEARED here, so
+# the planner's very next Stop found no demand and asked again - 186 demands
+# over 247 turns on one pair that day, and the planner never replaced. A
+# written handoff is a STATE the record keeps (file, time, sid) until a
+# different session takes the stool; what "spent" means now is that nothing
+# holds the replacement any more. -> DECISIONS.md 8.18
+_pend_w = daemon.handover_pending_for(PROJ, "planner")
+check("the record is kept, marked written, by this session",
+      ((_pend_w.get("written") or {}).get("sid")), PL1)
+check("and it names the file it accepted",
+      (_pend_w.get("written") or {}).get("file"), _plf)
+check("so nothing holds the replacement any more",
+      daemon.planner_wall_holds(PROJ), False)
+print("     and the planner's NEXT Stop is not asked again - one demand per")
+print("     session, nothing on its hook return")
+_pl_again = hook("Stop", "planner", PL1,
+                 last_assistant_message="another review, nothing to do with "
+                 "the wall")
+_ctx_again = (((_pl_again.get("hook_output") or {})
+               .get("hookSpecificOutput") or {}).get("additionalContext")
+              or "")
+check("no demand rides on it", _MARK in _ctx_again, False)
+check("and the journal did not say 'at the wall' a second time",
+      len([r for r in daemon.store.recent_events(300, project=PROJ)
+           if "The planner is at the wall" in (r.get("text") or "")]), 1)
+
 print("\nB2. assess replaces the planner alone")
 # A8 above left a pending window that never registers, on purpose, and the
 # expiry blocks before it counted failed handovers - also on purpose. Both
@@ -754,16 +1043,23 @@ for _ in range(200):
         break
     time.sleep(0.1)
 check("one window", len(launches()) - before, 1)
-lr = launches()[-1]
+# GUARDED, exactly as A4b is, and for the same reason: with no new
+# launch, launches()[-1] hands back an OLDER window whose argv has no
+# --model, and every check below reads it. Found by a sabotage, not by
+# a run - the unguarded form raised at --disallowedTools and took
+# scenarios C and D with it, in silence.
+_lrs2 = launches()
+lr = (_lrs2[-1] if len(_lrs2) > before
+      else {"argv": [], "role": "", "cwd": "", "autocompact": "?"})
 note("the stub's argv", " ".join(lr["argv"]))
 check("it is the planner", lr["role"], "planner")
 check("started in plan mode",
-      lr["argv"][lr["argv"].index("--permission-mode") + 1], "plan")
+      argof(lr, "--permission-mode"), "plan")
 check("with the first model of the planner chain",
-      lr["argv"][lr["argv"].index("--model") + 1], "fable")
+      argof(lr, "--model"), "fable")
 check("and the editing tools denied outright",
       "--disallowedTools" in lr["argv"], True)
-denied = lr["argv"][lr["argv"].index("--disallowedTools") + 1]
+denied = argof(lr, "--disallowedTools")
 for tool in ("Edit", "Write", "Bash"):
     check("  %s denied to the reviewer" % tool, tool in denied, True)
 
@@ -789,6 +1085,30 @@ check("that it is continuing a handover", "continuing a handover" in body,
       True)
 check("and that the executor was NOT replaced",
       "Only you were replaced" in body, True)
+# V2, 2026-09-04. What a replaced planner is given is NOT a handoff and
+# NOT an /init: it is the pointers, and the instruction to rebuild its own
+# thread from them and check no task was lost. The owner's words: "the
+# planner comes back without questions and without init - a planner does
+# not need init - and reads the logs, makes itself a handoff as it were".
+check("it is told NOT to run /init, in those words",
+      "DO NOT RUN /init" in body, True)
+# EVERY POINTER IS LOOKED FOR INSIDE THE SEED, not anywhere in the body.
+# The sabotage `no-v2-seed` is what showed why: with the whole seed
+# removed, "and the index" stayed GREEN, because INDEX.md appears in the
+# daemon's own handoff table further up. A check that passes with the
+# thing it is about deleted is not a check (rule 19), so the search starts
+# where the seed starts.
+_v2 = body.split("DO NOT RUN /init", 1)[-1]
+check("and given the day's dialogue to rebuild the thread from",
+      "dialogue.md" in _v2, True)
+check("and the index", "INDEX.md" in _v2, True)
+check("and the executor's open tasks", "open tasks" in _v2, True)
+check("and told to check that no task was lost",
+      "not one task has been lost" in _v2.lower(), True)
+check("and that its first act is a verdict or a task, not a question",
+      "not a question" in _v2, True)
+note("the V2 seed, first line",
+     [l for l in body.splitlines() if "relaunched" in l][:1])
 DELIVERED["planner"] = []
 post("/channel/register", {"project": PROJ, "role": "planner",
                            "port": PL_PORT, "pid": 4444,
@@ -853,6 +1173,252 @@ check("assess did not decide on a handover",
       "runway" in json.dumps(_res_strange), False)
 note("anything assess started, waited for", settled())
 check("no window was opened for it", len(launches()) - before, 0)
+
+# ---------------------------------------------------------------------------
+print("\n" + "=" * 68)
+print("SCENARIO D - a point measured under a threshold this window has not")
+print("=" * 68)
+print("    2026-09-02 16:37:08, this bridge's own executor, and the whole")
+print("    incident is in DECISIONS.md 5.45. The pair's calibration held ten")
+print("    samples at 469k-475k, every one of them taken between 08-28 and")
+print("    09-01 12:23 while the window ran on autoCompactWindow 700000 x")
+print("    70%. That regime was removed on 09-01 at 11:24:53. The session")
+print("    that came after it ran to 637k on a 1M window without compacting")
+print("    once - which is what this client does when nobody sets a")
+print("    threshold - and the bridge read its own stale point as a fact")
+print("    about today and replaced it mid-task.")
+print("    Real order, real endpoints: an old session compacts twice, ends,")
+print("    a fresh one climbs past the point it inherits, and the real")
+print("    assess() tick decides.")
+
+POISON = os.path.join(TMP, "poisoned")
+os.makedirs(POISON, exist_ok=True)
+daemon.CFG["projects"][POISON] = {}
+
+print("\nD1. the old regime: two real compactions at 469k and 475k")
+print("    driven through the real hooks, so the sample, the point and the")
+print("    floor are all written by the code that writes them live")
+OLD = "poison-old-1"
+hook("SessionStart", "executor", OLD, proj=POISON, transcript_path="")
+statusline("executor", OLD, 300000, proj=POISON)
+hook("Stop", "executor", OLD, proj=POISON, last_assistant_message="ok")
+for fired, floor in ((469955, 86687), (475887, 129076)):
+    statusline("executor", OLD, fired, proj=POISON)
+    hook("PreCompact", "executor", OLD, proj=POISON)
+    statusline("executor", OLD, floor, proj=POISON)
+    hook("Stop", "executor", OLD, proj=POISON, last_assistant_message="ok")
+_cal = store.calib_get(MODEL.lower(), POISON, WINDOW)
+check("both compactions were recorded as samples",
+      _cal.get("compact_samples"), [469955, 475887])
+check("and the point is the smaller one - every sample is an overshoot",
+      _cal.get("compact_at_tokens"), 469955)
+check("both left a floor, which is the proof they went through",
+      [r.get("after") for r in
+       (daemon.STATE.get("compactions") or {}).get(
+           "%s|executor" % daemon.norm(POISON), [])][-2:], [86687, 129076])
+check("so the largest compaction this pair has SURVIVED is the 475k one",
+      daemon.compaction_survivable(POISON, "executor"), 475887)
+check("and nothing has ever failed to compact here",
+      daemon.compaction_failed_at(POISON, "executor"), None)
+hook("SessionEnd", "executor", OLD, proj=POISON)
+
+print("\n    this pair's turns, as note_turn_cost records them live.")
+print("    The two figures below are what decide the case, so they are the")
+print("    real pair's: widest 129 799 and ordinary (p90) 83 586, off the")
+print("    44 turns STATE['turns'] held at 16:37")
+for _c in (20000, 25000, 28000, 30000, 32000, 35000, 38000, 40000, 46592,
+           83586, 129799):
+    daemon.note_turn_cost(POISON, "executor", _c, OLD)
+check("widest, measured for this pair",
+      daemon.turn_widest(POISON, "executor"), (129799, "measured"))
+check("ordinary, measured for this pair",
+      daemon.turn_ordinary(POISON, "executor"), (83586, "measured"))
+
+print("\nD2. a fresh session inherits the point and runs past it")
+print("    it has compacted nothing itself, so wall_view falls back to the")
+print("    calibration entry - which is the stale one")
+NEW = "poison-new-1"
+_srv_d, _port_d = channel_for_role("executor")
+post("/session", {"action": "launch", "project": POISON, "role": "executor"})
+hook("SessionStart", "executor", NEW, proj=POISON, transcript_path="")
+post("/channel/register", {"project": POISON, "role": "executor",
+                           "port": _port_d, "pid": 4242,
+                           "session_id": NEW}, secret=True)
+statusline("executor", NEW, 637053, proj=POISON)
+_s = sess_of("executor", POISON)
+check("the fresh session carries 637k of a 1M window",
+      (_s.get("context_tokens"), _s.get("window")), (637053, WINDOW))
+_wv = daemon.wall_view(_s, POISON)
+check("it has compacted nothing itself",
+      daemon.compaction_sizes(POISON, "executor"), [])
+check("and it is 167k past the point it inherited",
+      _wv["used"] - (_wv["compact"] or 0), 167098)
+check("which is further than any one turn of this pair has ever been",
+      _wv["used"] - (_wv["compact"] or 0) > 129799, True)
+
+print("\n    THE CEILING. A proven compaction is evidence that a session")
+print("    SURVIVES that size, so it may raise the line above the reserve")
+print("    model - it may not lower it. 475 887 + 83 586 = 559 473 was")
+print("    being used as the wall for a 1M window whose reserve line is")
+print("    967 000: a success at 475k made the bridge 400k more timid than")
+print("    knowing nothing at all would have")
+check("the ceiling is at least the reserve line, never below it",
+      daemon.compaction_too_big(POISON, "executor", WINDOW),
+      WINDOW - daemon.RESERVED_TOKENS)
+_why = daemon.compaction_too_big_why(POISON, "executor", WINDOW)
+check("and it says where that number came from",
+      "reserve" in (_why.get("source") or ""), True)
+check("carrying the evidence it did NOT use, so the choice is readable",
+      (_why.get("proven"), _why.get("failed_at")), (475887, None))
+
+print("\nD3. the tick: the point is refuted, and the session is left alone")
+print("    rule 33 turned on the measurement itself. A session more than one")
+print("    of its own widest turns past a measured point, with no compaction")
+print("    of its own and no recorded failure, is not a session in trouble -")
+print("    it is a point that no longer describes this window")
+backdate("executor", proj=POISON)
+_before = len(launches())
+_res = daemon.assess(POISON)
+note("what the tick saw and did", _res)
+# THE WORD MATTERS. Written as `"handover" in json.dumps(_res)` this was
+# green while the tick was answering "handing over the executor to a fresh
+# session" - assess() never uses the noun. A negative check that cannot
+# fail is worse than none, so this is the word the branch actually writes,
+# the same one scenario C tests on.
+check("assess did not decide the runway had ended",
+      "runway" in json.dumps(_res), False)
+# And the effect, joined rather than waited for: settled() returns what it
+# joined, so an empty list is a fact about the threads, not about how long
+# this line was prepared to wait. The launch count is the weaker companion
+# - a handover can be refused after the thread starts - so the thread is
+# the primary and both are kept.
+check("and started no handover", settled(), [])
+check("and opened no window", len(launches()) - _before, 0)
+check("the refutation was recorded for the pair",
+      bool((daemon.STATE.get("point_refuted") or {}).get(
+          "%s|executor" % daemon.norm(POISON))), True)
+# Guarded, because a check that has already spoken must not be able to
+# un-speak itself: the FAIL above is the answer, and an unguarded [] here
+# would raise and take every block below it in silence.
+_ref = (daemon.STATE.get("point_refuted") or {}).get(
+    "%s|executor" % daemon.norm(POISON)) or {}
+check("with what was refuted, and at what size",
+      (_ref.get("point"), _ref.get("used")), (469955, 637053))
+check("and it is in the journal at warn",
+      bool([r for r in journal_has("no longer describes this window")
+            if r.get("level") == "warn"]), True)
+note("the journal line", ([r.get("text") for r in
+                           journal_has("no longer describes this window")]
+                          or [""])[0][:200])
+
+print("\n    from here the pair reads like one that never measured a point")
+print("    at all - which is the honest answer, and the one the pair next")
+print("    door has been running on all along")
+_wv2 = daemon.wall_view(_s, POISON)
+check("the point is no longer offered as a number", _wv2["compact"], None)
+check("it says it was refuted and why",
+      "refuted" in (_wv2.get("compact_source") or "")
+      and "may not have" in (_wv2.get("compact_source") or ""), True)
+check("and it is no longer a measured point", _wv2["compact_measured"], False)
+_plan = daemon.plan_for(_s, POISON)
+check("so the plan is working, not handover", _plan["do"], "working")
+check("naming what it lacks",
+      "compaction point not known" in _plan["why"], True)
+
+print("\n    a second tick changes nothing and says nothing twice")
+_n_before = len([r for r in journal_has("no longer describes this window")])
+_before = len(launches())
+_res2 = daemon.assess(POISON)
+check("still no handover", "runway" in json.dumps(_res2), False)
+check("and still no handover thread", settled(), [])
+check("still no window", len(launches()) - _before, 0)
+check("and the journal was not written twice",
+      len(journal_has("no longer describes this window")), _n_before)
+
+print("\nD4. a new sample clears the refutation - the point can come back")
+print("    the refutation is about evidence going stale, not about the pair")
+print("    being exempt. ONE real compaction of this window and the")
+print("    measurement is current again - and it does not merely un-refute")
+print("    the old number, it REPLACES it: compaction_point anchors on the")
+print("    newest sample, so the ten dead ones fall outside one turn of it")
+print("    and are dropped. That is 5.29's anchor doing the job it was")
+print("    written for, which it cannot do while no new samples arrive")
+statusline("executor", NEW, 900000, proj=POISON)
+hook("PreCompact", "executor", NEW, proj=POISON)
+check("the refutation is gone",
+      (daemon.STATE.get("point_refuted") or {}).get(
+          "%s|executor" % daemon.norm(POISON)), None)
+check("and the journal says the point is back in use",
+      bool(journal_has("refuted compaction point is back in use")), True)
+_cal4 = store.calib_get(MODEL.lower(), POISON, WINDOW)
+check("the old regime's samples are still on file",
+      _cal4.get("compact_samples"), [469955, 475887, 900000])
+check("but the point is the new one - the old two are further from it "
+      "than one turn of this pair, so they cannot describe it",
+      _cal4.get("compact_at_tokens"), 900000)
+statusline("executor", NEW, 140000, proj=POISON)
+_s2 = sess_of("executor", POISON)
+_wv3 = daemon.wall_view(_s2, POISON)
+check("and the point is a number again, this session's own",
+      _wv3["compact_measured"], True)
+check("the number itself", _wv3["compact"], 900000)
+print("\n    and rule 1a now reckons from the higher line, so a stale low")
+print("    'proven' can no longer make it fire: 469k > 559k was true and")
+print("    469k > 967k is not")
+check("1a does not call this session unable to compact",
+      _wv3["compact"] > daemon.compaction_too_big(POISON, "executor", WINDOW),
+      False)
+
+print("\n    900 000 is the real number now: autoCompactWindow 1000000 x 90 %")
+print("    (DECISIONS 8.2, the owner's decision of 2026-09-02). So the walk")
+print("    that matters is UP TO it - nothing may be handed over below a")
+print("    point the pair is going to compact at, which is the whole of what")
+print("    a threshold is for")
+_walk = []
+for _used in (200000, 400000, 600000, 700000, 800000, 880000):
+    statusline("executor", NEW, _used, proj=POISON)
+    _sx = sess_of("executor", POISON)
+    _walk.append((_used // 1000, daemon.plan_for(_sx, POISON)["do"]))
+check("no handover anywhere below the point",
+      sorted({p for _, p in _walk}), ["compacting", "working"])
+note("the walk", _walk)
+print("    'compacting' from 810k is rule 2's own 90 % branch - 'short of")
+print("    its point, it will compact and carry on' - and is the routine")
+print("    answer, not a decision. The claim under test is the absence of")
+print("    HANDOVER, which is what 1a and 1b would produce")
+check("neither 1a nor 1b fired at any size below the point",
+      [u for u, p in _walk if p == "handover"], [])
+print("    and AT the point it is 'compacting' - the bridge stands aside")
+print("    and says nothing, which is the routine case")
+statusline("executor", NEW, 900000, proj=POISON)
+check("at the point, the bridge stands aside",
+      daemon.plan_for(sess_of("executor", POISON), POISON)["do"], "compacting")
+
+print("\nD5. the control: a pair whose point is honest is untouched")
+print("    the same tick, one ordinary turn past a point it really does")
+print("    compact at - case 22's shape, and it must stay routine")
+HONEST = os.path.join(TMP, "honest")
+os.makedirs(HONEST, exist_ok=True)
+daemon.CFG["projects"][HONEST] = {}
+H = "honest-1"
+hook("SessionStart", "executor", H, proj=HONEST, transcript_path="")
+for _c in (30000, 40000, 50000, 60000):
+    daemon.note_turn_cost(HONEST, "executor", _c, H)
+statusline("executor", H, 470000, proj=HONEST)
+hook("PreCompact", "executor", H, proj=HONEST)
+statusline("executor", H, 120000, proj=HONEST)
+hook("Stop", "executor", H, proj=HONEST, last_assistant_message="ok")
+statusline("executor", H, 500000, proj=HONEST)
+_hs = sess_of("executor", HONEST)
+_hwv = daemon.wall_view(_hs, HONEST)
+check("it is past its own point, by less than one of its turns",
+      0 < _hwv["used"] - (_hwv["compact"] or 0) <= 60000, True)
+check("the point is still a measured number", _hwv["compact_measured"], True)
+check("nothing was refuted for it",
+      (daemon.STATE.get("point_refuted") or {}).get(
+          "%s|executor" % daemon.norm(HONEST)), None)
+check("and the bridge says it is compacting, as it always did",
+      daemon.plan_for(_hs, HONEST)["do"], "compacting")
 
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 68)

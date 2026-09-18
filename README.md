@@ -485,10 +485,17 @@ figures say.
 
 ### One trap worth an hour of your evening: the two compaction settings multiply
 
-The bridge tells each session where to compact by passing
-`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` — a **percent**, `autocompact_pct`, 70 by
-default. Claude Code also has its own `autoCompactWindow` setting in a
-project's `.claude/settings.json`, in **tokens**.
+**The bridge sets a compaction threshold again, per project, and it is the
+composition of two settings** — see below for what it composes with. It hands
+out `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` only for a project that has both halves,
+and strips an inherited one, so there is exactly one source for it. Between
+2026-09-01 and 2026-09-02 it set none at all, and this paragraph said so; the
+reasoning for setting one again is at the end of this section. The trap is
+unchanged, and it cost a fortnight to find.
+
+`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is a **percent**. Claude Code also has its own
+`autoCompactWindow` setting in a project's `.claude/settings.json`, in
+**tokens**.
 
 They do not override one another. They **compose**: `autoCompactWindow` becomes
 the window the percent is taken of. Set it to 700000 believing you have asked
@@ -501,24 +508,29 @@ be**, each replacement paying for a fresh context, and no obvious reason why.
 Measured here over nine compactions: 476,221–482,049 tokens, against a control
 project with no `autoCompactWindow` that ran to the full million.
 
-**So set `autoCompactWindow` to the real window size (or leave it alone) and
-control the threshold with `autocompact_pct`.** If you want to know where your
-sessions actually compact rather than where you asked them to, the client
-writes it down itself: search a transcript under `~/.claude/projects/` for
-`compact_boundary` and read `preTokens`. That is the client's own number, not
-the bridge's, which is why it settles the question.
+**So set `autoCompactWindow` to the real window size, or leave it out
+entirely.** If you want to know where your sessions actually compact rather
+than where you asked them to, the client writes it down itself: search a
+transcript under `~/.claude/projects/` for `compact_boundary` and read
+`preTokens`. That is the client's own number, not the bridge's, which is why it
+settles the question.
 
-**This project's own configuration does not set the key at all**, and the
-reasoning is worth having before you set it yourself. A threshold below the
-ceiling only earns its place if working near the ceiling costs something.
-Measured on a project here that has never had the key: it compacts at
-999,213–1,000,933, the client calls those `auto`, and about 10k of context
-survives each time. Its api-error records are **all** rate limits; a genuine
-*prompt is too long* appears twice in its entire history, both in one old
-session. Meanwhile the threshold decides how much work a session gets through
-before it is replaced — roughly 2.3M tokens at a 477k point, 3.4M at 700k, 5M
-at the ceiling — and each replacement pays for a fresh context and, if a
-dialog is involved, some of your evening. Lower is not safer for free.
+**What this project sets, and why.** `autoCompactWindow` is the real window
+size, 1,000,000, in each watched project's own `.claude/settings.json`, and
+`autocompact_pct` is 90 in the bridge's config — so the threshold is 900,000.
+Both halves or neither: the bridge sends no percentage to a project without the
+key, because that would record a threshold the window is not actually running
+under. The reasoning is worth having before you copy it. Reaching the ceiling
+is survivable — the API answers *prompt is too long*, the client summarises
+from there, and measured here about 10k of context survives each time — but it
+looks like a death every time, and anything watching a session is capable of
+interfering with the recovery. A threshold a little below the ceiling ends the
+cycle deliberately instead. It is not free: the threshold decides how much work
+a session gets through before it is replaced — roughly 2.3M tokens at a 477k
+point, 3.4M at 700k, 5M at the ceiling — and each replacement pays for a fresh
+context. About 4% of cycles still end at the ceiling anyway, on the measured
+width of a last turn; buying that down to zero would cost another 100k of
+threshold. Lower is not safer for free, and neither is higher.
 
 Environment variables:
 
@@ -532,7 +544,7 @@ Environment variables:
 
 ## The rules
 
-`HONESTY.md` holds thirty-four rules both halves are handed at every session
+`HONESTY.md` holds thirty-five rules both halves are handed at every session
 start, and which are put in front of every task and every report. They are not
 advice: each one came from something that actually went wrong, and several of
 them are the gates described above rather than text — a rule nothing refuses
@@ -545,9 +557,9 @@ file reaches the next delivery without a restart.
 
 ## Running the tests
 
-Six suites, no runner, no dependencies. Each is a flat script that exits 1 on
-failure, and each puts its own state in a temp folder, so none of them touch
-anything real.
+Seven suites, no runner, no dependencies. Each is a flat script that exits 1
+on failure, and each puts its own state in a temp folder, so none of them
+touch anything real.
 
 ```
 python test_handover.py         # the main suite
@@ -556,6 +568,7 @@ python test_search.py           # the search agent, against a stub
 python test_wall_handover.py    # a handover simulated end to end
 python test_multipair.py        # three pairs on one throwaway daemon
 python test_wake_sim.py         # seeded runs of a pair through faults
+python test_recovery_sim.py     # seeded runs of the whole recovery block
 python -m py_compile bridgecore/*.py
 ```
 
@@ -563,6 +576,12 @@ python -m py_compile bridgecore/*.py
 shuffled by a seed, so a fix that only works when things go wrong in one
 particular order is caught. It also carries sabotage modes: switch one on and
 the run must go red, which is how a test that cannot fail gets found.
+
+`test_recovery_sim.py` does the same for the repairs themselves - a dead turn,
+a silent window, a handover that never arrives - ten seeds, every situation in
+each. It takes over ten minutes on its own, which is why it was argued about
+before being made part of the acceptance run rather than an extra somebody
+remembers.
 
 A run leaves `__pycache__` behind, and a `.pyc` carries `co_filename` - the
 absolute path of the source on the machine that compiled it. `.gitignore`
@@ -602,7 +621,7 @@ Written down because finding out afterwards is worse than reading it here.
   stops being unattended.
 - **English only.** The panel, the messages and the rules are English. There
   is no localisation and no plan stated for one.
-- **No tests over the panel itself.** The six suites cover the daemon, the
+- **No tests over the panel itself.** The seven suites cover the daemon, the
   loop, the archive and the handover arithmetic. `panel.html` is checked only
   by a handful of assertions about its structure — nothing drives it in a
   browser.
@@ -632,6 +651,98 @@ running has to be available to them. It cannot be closed up and resold.
 ## Changes
 
 Newest first. Short on purpose — what changed, not why in detail.
+
+**2026-09-18 — what is new since the release of 2026-09-01**
+
+Almost all of it is one kind of repair: the bridge was making claims about
+windows, processes and work in hand from its own records, and the records were
+not the thing they described. Each of these now asks the side that would know.
+
+- **A compaction is the cure starting, not a session dying.** The bridge stands
+  aside while a summary is being made and calls the compaction failed only when
+  the time it allowed really runs out. A compaction the bridge itself
+  interfered with is not admissible as evidence, and a size a session has
+  survived may raise its ceiling but never lower it — one success at 475k used
+  to set a 559k ceiling on a million-token window and replace healthy sessions.
+- **A compaction threshold again, per project, at 900,000** — the composition
+  of the two settings described under *Configuration*, sent only where both
+  halves are present.
+- **Only a compaction that LANDED counts.** A session is replaced at its fifth,
+  and the client can announce one every few minutes under a rate limit without
+  any of them landing; a count of announcements sent a fresh session to be
+  replaced eight minutes after it started. What counts now is a floor recorded
+  after the summary, and an announcement that did not land says so in the log.
+- **A window that takes a report and opens no turn is noticed.** The witness is
+  that window's own transcript, not the channel's acknowledgement; after two
+  such reports the pair is held, and the window's screen is read and given one
+  keystroke before a person is rung — into a bare prompt only, never into a
+  dialog.
+- **The consent dialog a new window can stop on is answered.** The bridge finds
+  the prompt box from the bottom of the screen up, tells a working window from
+  an idle one by the spinner above the box, and writes down what it saw either
+  way.
+- **Frozen windows were a console selection.** A console with quick-edit on
+  blocks the application it belongs to as soon as anything is selected in it,
+  and the earlier reading that excluded this could not see the flag at all. The
+  bridge now switches quick-edit off for its own windows at every session
+  start, and records the mode before and after.
+- **The replacement comes up before the window it replaces is stopped**, and
+  the old one is closed only once the new one has reported for duty; a
+  replacement that has not come up is never vouched for by the channel of the
+  window it is replacing; a replacement that would not close blocks the next
+  one instead of letting two run; and a swap that never completed is undone,
+  leaving the working window alone.
+- **A half that died is raised without asking**, with a new session rebuilt
+  from the log rather than resumed into whatever killed it.
+- **The wall asks for a handoff and waits for the file.** For the reviewing
+  half the demand is made once per session — asked at every turn end it
+  produced hundreds of demands and hundreds of handoff files in one day — and
+  the replacement happens on that half's own facts instead of being held by
+  whatever the working half is doing.
+- **A background command is not over when its call returns.** Its record
+  survives, and it ends on the client's own notification of completion. The id
+  that notification carries now comes from the hook's payload; the transcript
+  is only a fallback, read around the mark rather than after it, because the
+  client writes the line a few kilobytes BEFORE the hook runs — a forward-only
+  read left records alive for hours and made the bridge call an idle half busy.
+  A notification older than the tail it used to read is swept for once.
+- **A pair parked on a person rings.** A reviewer answering "wait" while
+  nothing is actually running means the pair is waiting for a human, and that
+  is now the difference between a quiet log line and a notification.
+- **The live data folder has one writer.** Any process that is not the daemon
+  serving the port is refused the state file and the log while its data folder
+  is the live one, and the refusal names the way out. A measurement had
+  overwritten the daemon's own state with a copy fourteen minutes old.
+- **The channel serves each call on its own thread.** Running the acceptance
+  through the reviewer's own tool takes minutes, and every other call it made
+  used to queue behind it — a verdict once reached the daemon the same second a
+  check returned, ten minutes after it was issued, with the other half blocked
+  the whole time.
+- **Work the other half did not take comes first, by that half's own
+  transcript.** A task delivered while a turn was running may be missed by it,
+  so it is kept and handed back at the next acceptance — but a task delivered
+  to a half that has finished its turn is read by the next one, and a record is
+  now dropped when the transcript shows the task was taken up, in either of the
+  two shapes the client writes.
+- **A restart asks the daemon before stopping it**, in one call rather than two
+  with a gap, and a shutdown that lost nothing is no longer reported as a
+  crash.
+- **The interpreter is part of a hook's mark.** A project carried from another
+  machine used to pass as fully installed with every hook naming a Python that
+  is not there, and ran for an hour with every report going nowhere.
+- **A suite may not open a real client window.** Seventeen of them were once
+  left open by a fixture; the refusal is now at the one place a process is
+  started, not a flag each suite must remember.
+- **The bridge runs its own acceptance only where it is relevant**, so a pair
+  working on something unrelated is not blocked on evidence that can never
+  apply to it.
+- **The acceptance run is eleven commands**, the new one being the recovery
+  simulation above.
+- **Two more rules, and gates under them.** No claim about the state of
+  anything without a witness opened in the same turn — with a check that reads
+  what a turn actually opened — and the round-trip rule: an acknowledgement
+  that asks for nothing is carried with the next message instead of spending a
+  wake of its own.
 
 **2026-08-30**
 - A tracked process finishing no longer wakes the planner; it leaves a line in

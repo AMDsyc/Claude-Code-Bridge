@@ -609,17 +609,22 @@ if not h:
 if mine and int(h) == mine:
     print('that is my own console window - refusing to close it')
     raise SystemExit(4)
+# LET GO OF IT BEFORE CLOSING IT, not after. Every process attached to a
+# console gets CTRL_CLOSE_EVENT when its window closes, and the default
+# handler ends the process - so a helper still attached is killed by the
+# close it asked for, with nothing printed and exit code 0xC000013A. The
+# window handle needs no attachment to be posted to. Twice wrong: with no
+# FreeConsole here at all the helper died on every run and stop_daemon said
+# 'no console window' beside 'closed console window 3802802'; with it AFTER
+# the post it merely raced the event, and on 2026-09-26 23:14, a loaded
+# machine, the event won - the planner's check read "no answer from the
+# helper; taskkill instead" of a close that had worked. Held one second
+# after the post, the old order died 3 times in 3 (DECISIONS 8.39).
+k.FreeConsole()
 if not u.PostMessageW(ctypes.c_void_p(h), 0x0010, None, None):
     print('WM_CLOSE would not post to window %d (error %d)'
           % (int(h), ctypes.get_last_error()))
     raise SystemExit(5)
-# LET GO OF IT BEFORE IT GOES. This process is attached to the console it
-# has just closed, and Windows takes every attached process down with the
-# window - so without this line the helper is killed on the way out, its
-# exit code is not 0, and the caller reads a success as a failure. Measured:
-# stop_daemon then said 'no console window' in the same breath as 'closed
-# console window 3802802', and ran the taskkill fallback for nothing.
-k.FreeConsole()
 print('closed console window %d of pid %d' % (int(h), pid))
 """
 
@@ -677,8 +682,12 @@ def close_console(pid, timeout=20):
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.SubprocessError) as exc:
         return False, "could not ask: %s" % exc
+    # The exit code goes into the answer when nothing else does: "no answer"
+    # alone could not tell a helper that crashed from one that was ended by
+    # a console event, and that difference was the whole diagnosis once.
     why = ((r.stdout or "").strip() or (r.stderr or "").strip()
-           or "no answer from the helper")
+           or "no answer from the helper (exit code 0x%08X)"
+           % (r.returncode & 0xFFFFFFFF))
     return r.returncode == 0, why
 
 
@@ -717,20 +726,32 @@ def stop_daemon(port=None, timeout=90):
     # the sessions outlive the daemon and simply stop being carried while it
     # is away, which is what makes a restart cheap.
     closed, why_close = close_console(pid)
+    tk_rc = None
     if not closed:
         # Nothing to close - a daemon started some other way, or a console
         # with no window. Fall back to what this used to do on its own: it
         # is harmless where it does not apply, and it IS right for a
         # process that genuinely owns a window of its own.
-        subprocess.run(["taskkill", "/PID", str(pid)],
-                       capture_output=True, text=True, errors="replace")
+        tk_rc = subprocess.run(["taskkill", "/PID", str(pid)],
+                               capture_output=True, text=True,
+                               errors="replace").returncode
     polite = min(timeout, 45)
     end = time.time() + polite
     while time.time() < end:
         if not process_alive(pid) and not port_open(port):
-            return True, "stopped cleanly (pid %d, %s)" % (
-                pid, why_close if closed else "no console window: " +
-                why_close + "; taskkill instead")
+            if closed:
+                return True, "stopped cleanly (pid %d, %s)" % (pid, why_close)
+            # Only what is known. This used to say "no console window ...;
+            # taskkill instead" - both unestablished, and on 2026-09-26 both
+            # false: the close had landed, the helper had been killed by it,
+            # and taskkill /PID cannot stop a console application at all.
+            return True, (
+                "stopped without force (pid %d); the console close did not "
+                "confirm itself (%s), and taskkill /PID was tried as well "
+                "and %s" % (pid, why_close,
+                            "succeeded" if tk_rc == 0 else
+                            "did not succeed (exit %s), so it was not what "
+                            "stopped it" % tk_rc))
         time.sleep(1.5)
     # It did not take the hint. A bridge that will not stop is worse than a
     # 'recovered' banner, so escalate - and say plainly what it cost.
@@ -794,12 +815,22 @@ def restore(base, kept, out=say):
     """Put everything back exactly as the backup found it."""
     base = base or BASE
     old = os.path.join(base, "bridge")
+    whole = True
     if os.path.isdir(old):
-        shutil.rmtree(old, ignore_errors=True)
+        # remove_tree, not rmtree(ignore_errors=True): that one skipped every
+        # read-only file - git's objects - in silence, and the backup was
+        # then unpacked over a tree that was not gone. -> DECISIONS 8.46
+        gone, why = remove_tree(old, out=out)
+        if not gone:
+            whole = False
+            out("   the folder in the way could NOT be removed whole: %s - "
+                "the backup is unpacked over what is left, and files of the "
+                "new layout may remain there" % why)
     with zipfile.ZipFile(kept) as z:
         z.extractall(base)
-    out("   restored from %s" % os.path.basename(kept))
-    return True
+    out("   restored from %s%s" % (os.path.basename(kept),
+                                   "" if whole else " - NOT cleanly"))
+    return whole
 
 
 def wait_port_free(port=None, timeout=120):
@@ -1026,12 +1057,12 @@ def run_now(base=None, port=None, start_wait=180, out=say, stop=True,
 
     out("   the new layout did not come up: %s" % why)
     out("   putting everything back")
-    restore(base, result["backup"], out=out)
+    restored = restore(base, result["backup"], out=out)
     back, why2 = start_daemon(base, start_wait, port)
     out("   the old bridge is %s" % ("running again" if back else
                                      "NOT running: %s" % why2))
     return {"ok": False, "stage": "rolled back", "why": why,
-            "restored": True, "old_running": back}
+            "restored": restored, "old_running": back}
 
 
 def main(argv=None):

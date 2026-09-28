@@ -33,6 +33,67 @@ PORT = int(os.environ.get("BRIDGE_PORT", "8765"))
 URL = "http://127.0.0.1:%d/event" % PORT
 
 
+def client_pid(prefix="claude", start=None, depth=8):
+    """The nearest ancestor whose executable starts with `prefix` - the
+    window this hook belongs to - or 0.
+
+    NOT os.getppid(). A headless `claude -p` runs a hook directly under the
+    client, and the first measurement (15.1 step 0) saw only that; a live
+    window runs it through a shell, so the parent is a transient bash that
+    is gone a second later - measured the day it shipped, one session of a
+    watched project reporting four different parents, none of them its
+    window. So the walk starts at the parent and goes up to the client;
+    finding none answers 0 and the daemon links nothing, which is the
+    direction the deaf hold fails in anyway. -> DECISIONS.md 8.29
+
+    Windows reads a toolhelp snapshot - names and parents, nothing
+    attached. Elsewhere the parent is the only answer there is.
+    """
+    try:
+        if os.name != "nt":
+            return os.getppid()
+        import ctypes
+        import ctypes.wintypes as W
+
+        class PE(ctypes.Structure):
+            _fields_ = [("dwSize", W.DWORD), ("cntUsage", W.DWORD),
+                        ("th32ProcessID", W.DWORD),
+                        ("th32DefaultHeapID", ctypes.c_void_p),
+                        ("th32ModuleID", W.DWORD), ("cntThreads", W.DWORD),
+                        ("th32ParentProcessID", W.DWORD),
+                        ("pcPriClassBase", ctypes.c_long),
+                        ("dwFlags", W.DWORD),
+                        ("szExeFile", ctypes.c_char * 260)]
+        k = ctypes.windll.kernel32
+        k.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        h = k.CreateToolhelp32Snapshot(2, 0)
+        if not h or h == ctypes.c_void_p(-1).value:
+            return 0
+        table = {}
+        try:
+            e = PE()
+            e.dwSize = ctypes.sizeof(PE)
+            ok = k.Process32First(ctypes.c_void_p(h), ctypes.byref(e))
+            while ok:
+                table[e.th32ProcessID] = (
+                    e.th32ParentProcessID,
+                    e.szExeFile.decode("mbcs", "replace").lower())
+                ok = k.Process32Next(ctypes.c_void_p(h), ctypes.byref(e))
+        finally:
+            k.CloseHandle(ctypes.c_void_p(h))
+        pid = (table.get(start or os.getpid()) or (0, ""))[0]
+        for _ in range(depth):
+            row = table.get(pid)
+            if not row:
+                return 0
+            if row[1].startswith(prefix):
+                return pid
+            pid = row[0]
+    except Exception:
+        return 0
+    return 0
+
+
 def post(payload):
     # A Stop event may block while the planner reviews the report, so it
     # gets a long timeout. Everything else stays snappy.
@@ -67,6 +128,11 @@ def main():
 
     event["project_dir"] = os.environ.get("CLAUDE_PROJECT_DIR", event.get("cwd", ""))
     event["role"] = (os.environ.get("BRIDGE_ROLE") or "").strip().lower()
+    # The window this session lives in - the client process above this
+    # hook, found by name (client_pid says why not the parent).
+    wp = client_pid()
+    if wp:
+        event["window_pid"] = wp
 
     try:
         reply = post(event)

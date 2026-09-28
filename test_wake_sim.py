@@ -59,6 +59,7 @@ import json
 import os
 import random
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -67,12 +68,19 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-TMP = tempfile.mkdtemp(prefix="bridge-wakesim-")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# first: it reads nothing from the package, and the folder it makes
+# is the only one this run may remove (DECISIONS.md 8.43, 8.45)
+from bridgecore import owntemp                 # noqa: E402
+TMP = owntemp.make("bridge-wakesim-")
 os.environ["BRIDGE_DATA"] = os.path.join(TMP, "data")
 # The client's own config is isolated too: install() marks a project trusted
 # there, and without this a suite would merge its throwaway temp projects into
 # the real ~/.claude.json on this machine.
 os.environ["BRIDGE_CLAUDE_JSON"] = os.path.join(TMP, ".claude.json")
+# and the user-level settings approve_channel merges into - never the
+# real one (DECISIONS.md 8.35)
+os.environ["BRIDGE_CLAUDE_SETTINGS"] = os.path.join(TMP, "user-settings.json")
 os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(TMP, "claude-home")
 os.environ["BRIDGE_NO_HOOKS"] = "1"
 os.environ["PYTHONUTF8"] = "1"
@@ -242,6 +250,30 @@ def post(path, payload, secret=False, timeout=30):
         return {"ok": False, "error": "server gone"}
 
 
+WINDOWS = []
+
+
+def stand_in(key, role):
+    """A live window for one half, and the record the bridge keeps of it -
+    as a pair the bridge launched has. Stopped for real by a handover, or
+    at the end of the run."""
+    p = subprocess.Popen([sys.executable, "-c",
+                          "import time" + chr(10) + "time.sleep(600)"],
+                         creationflags=getattr(subprocess,
+                                               "CREATE_NO_WINDOW", 0))
+    WINDOWS.append(p)
+    with daemon._lock:
+        # written NOW, for the process born now: an hour back was a launch
+        # record older than the process it names, which no writer makes and
+        # the one definition reads as a number passed to somebody else
+        # (daemon.record_alive, DECISIONS 8.46)
+        daemon.STATE.setdefault("pids", {})["%s|%s" % (key, role)] = {
+            "pid": p.pid, "at": time.time(), "registered": True,
+            "registered_via": "session"}
+        daemon.save_state()
+    return p.pid
+
+
 def hook(project, name, role, sid, **extra):
     ev = {"hook_event_name": name, "role": role, "session_id": sid,
           "project_dir": project, "cwd": project}
@@ -344,13 +376,18 @@ def run_seed(seed):
         daemon.CFG.setdefault("projects", {})[key] = {}
         daemon.save_state()
 
-    # both halves come up and register a channel
+    # both halves come up and register a channel - FROM A WINDOW. The
+    # channel used to name this suite's own parent as its window: a
+    # process the bridge never opened, which since 8.36 a handover refuses
+    # to replace - and which a real stop, with the record pointing at it,
+    # would have ended.
     for role, sid in (("executor", ex_sid), ("planner", pl_sid)):
+        win = stand_in(key, role)
         hook(proj, "SessionStart", role, sid)
         port = open_channel(proj, role)
         post("/channel/register",
              {"project": proj, "role": role, "port": port,
-              "pid": os.getpid(), "ppid": os.getppid(), "session_id": sid},
+              "pid": os.getpid(), "ppid": win, "session_id": sid},
              secret=True)
 
     # The executor's session id is not constant for the whole run: a
@@ -528,9 +565,9 @@ def run_seed(seed):
             # so a session with no status line of its own was calibrated
             # from its neighbour's number:
             #
-            #   03:43:05  PreCompact from session 77520958, carrying
+            #   03:43:05  PreCompact from one planner session, carrying
             #             999,870, which compacted down to 65,517.
-            #   recorded  709,646 - session 179bb1bd's size at 03:37,
+            #   recorded  709,646 - the other planner session's size at 03:37,
             #             exactly, to the token.
             #
             # WHAT A FAILURE LOOKS LIKE: a sample appears carrying the
@@ -624,9 +661,11 @@ def run_seed(seed):
             hook(proj, "SessionStart", "executor", cur["ex"],
                  transcript_path="")
             port2 = open_channel(proj, "executor")
+            # the replacement's channel names the replacement's window
             post("/channel/register",
                  {"project": proj, "role": "executor", "port": port2,
-                  "pid": os.getpid(), "ppid": os.getppid(),
+                  "pid": os.getpid(),
+                  "ppid": daemon.pid_of(proj, "executor") or os.getppid(),
                   "session_id": cur["ex"]}, secret=True)
             with daemon._lock:
                 (daemon.STATE.get("handover") or {}).pop(key, None)
@@ -887,10 +926,23 @@ say("removal took a deliver() out of PostToolUse and touched neither")
 say("PROCTRACK, nor check_processes, nor stuck_limit.")
 say()
 
+for _w in WINDOWS:
+    try:
+        if _w.poll() is None:
+            _w.kill()
+    except Exception:
+        pass
 SRV.shutdown()
 SRV.server_close()
 
 say("=" * 66)
+# The last seed's stub windows sleep 30 s with their working folder in
+# the seed's project, and a folder that is a live process's working
+# directory cannot be removed: this run's OWN children are stopped
+# first, waited on, and nothing else is touched. -> DECISIONS.md 8.45
+for _kid in sessions.child_pids(os.getpid(), names=()) or []:
+    sessions.terminate_and_wait(_kid)
+owntemp.finish(TMP, bool(FAILED))
 if FAILED:
     say("FAILED: %d" % len(FAILED))
     for f in FAILED:

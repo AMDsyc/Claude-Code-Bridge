@@ -68,9 +68,16 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-TMP = tempfile.mkdtemp(prefix="bridge-recovery-")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# first: it reads nothing from the package, and the folder it makes
+# is the only one this run may remove (DECISIONS.md 8.43, 8.45)
+from bridgecore import owntemp                 # noqa: E402
+TMP = owntemp.make("bridge-recovery-")
 os.environ["BRIDGE_DATA"] = os.path.join(TMP, "data")
 os.environ["BRIDGE_CLAUDE_JSON"] = os.path.join(TMP, ".claude.json")
+# and the user-level settings approve_channel merges into - never the
+# real one (DECISIONS.md 8.35)
+os.environ["BRIDGE_CLAUDE_SETTINGS"] = os.path.join(TMP, "user-settings.json")
 os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(TMP, "claude-home")
 os.environ["BRIDGE_NO_HOOKS"] = "1"
 os.environ["PYTHONUTF8"] = "1"
@@ -125,14 +132,25 @@ STOPS = []
 _real_stop = sessions.stop
 
 
-def _watched_stop(project, role, pid=None, wait=None):
+def _watched_stop(project, role, pid=None, wait=None, tree=True):
     STOPS.append({"project": daemon.norm(project), "role": role, "pid": pid,
                   "at": time.time()})
+    _STOPPED.add(int(pid or 0))
     return True
 
 
+# WHICH WINDOWS ARE ALIVE is the situation's to say, and a window is alive
+# until it is stopped. Everything answered dead until 2026-09-26, and the
+# situations that assert "the old window is still working" or "ONLY THEN is
+# the old window stopped" were telling the daemon it was dead. Since 8.36 a
+# handover names the window it replaces - a dead record and a seat whose
+# window is dead is a half with nothing to stop - so the fixture has to say
+# what the situation asserts. -> DECISIONS.md 8.36
+_LIVE_WIN = set()
+_STOPPED = set()
 sessions.stop = _watched_stop
-sessions.pid_alive = lambda pid: False
+sessions.pid_alive = (lambda pid: int(pid or 0) in _LIVE_WIN
+                      and int(pid or 0) not in _STOPPED)
 
 
 def launches():
@@ -226,8 +244,11 @@ def post(path, payload, secret=False, timeout=30):
 
 
 def hook(project, name, role, sid, **extra):
+    # window_pid as hook.py sends it - its parent, the window (15.1); the
+    # channels here register with the same parent, so a half's session and
+    # its seat are linked the way a real window's are.
     ev = {"hook_event_name": name, "role": role, "session_id": sid,
-          "project_dir": project, "cwd": project}
+          "project_dir": project, "cwd": project, "window_pid": os.getppid()}
     ev.update(extra)
     return post("/event", ev)
 
@@ -503,9 +524,13 @@ def reset(ctx):
         # Marked `registered`, because launch_guard refuses only an
         # UNregistered entry - which is the state never_came_up builds for
         # itself.
+        # A WINDOW PID OF ITS OWN, not this process's: a record naming the
+        # suite itself is one real stop away from ending the run.
+        _LIVE_WIN.clear()
+        _STOPPED.clear()
         for r in ("executor", "planner"):
             daemon.STATE.setdefault("pids", {})["%s|%s" % (ctx.key, r)] = {
-                "pid": os.getpid(), "at": time.time(), "registered": True,
+                "pid": win_pid(ctx, r), "at": time.time(), "registered": True,
                 "registered_via": "session"}
         daemon.STATE.pop("acted:planner_handover:%s" % ctx.key, None)
         daemon.STATE.pop("hoheld:%s" % ctx.key, None)
@@ -678,9 +703,16 @@ def sit_deaf_planner(ctx):
 SUMMARY_FRACTION = 0.19
 
 
+def win_pid(ctx, role):
+    """The window a situation's half runs in - invented, and odd, so never
+    a real Windows pid (those are multiples of four)."""
+    return 700001 + ctx.seed * 10 + (0 if role == "executor" else 2)
+
+
 def sit_wall_executor(ctx):
     """Five compactions: the handoff is demanded, and only then replaced."""
     reset(ctx)
+    _LIVE_WIN.add(win_pid(ctx, "executor"))    # alive until it is stopped
     ctx.clear("planner")
     # the size carried INTO each compaction, and what it leaves
     carried = ctx.plan["floor"]
@@ -825,6 +857,7 @@ def sit_never_came_up(ctx):
     """The replacement never registers: the old window is not touched."""
     reset(ctx)
     old_pid = 900000 + ctx.seed
+    _LIVE_WIN.add(old_pid)            # "is still working", as asserted below
     with daemon._lock:
         daemon.STATE.setdefault("pids", {})["%s|executor" % ctx.key] = {
             "pid": old_pid, "at": time.time() - 3600, "registered": True,
@@ -837,10 +870,17 @@ def sit_never_came_up(ctx):
             [s for s in STOPS[stops_before:] if s["pid"] == old_pid], [])
     new_pid = ((daemon.STATE.get("pids") or {})
                .get("%s|executor" % ctx.key) or {}).get("pid")
-    with daemon._lock:
-        daemon.STATE["pids"]["%s|executor" % ctx.key]["at"] = (
-            time.time() - 600)
-        daemon.save_state()
+    # A WINDOW THAT NEVER CAME UP IS SITTING ON ITS DIALOG - ALIVE, until
+    # it is closed. It answered dead here, and its record was put 600 s
+    # back over a process born a moment ago: a launch record older than
+    # the process it names, which the one definition reads as a number
+    # passed to somebody else (8.46). Declared alive; its own time stands,
+    # and this simulation's startup_grace (2 s) passes for real.
+    _LIVE_WIN.add(int(new_pid or 0))
+    _at6 = float(((daemon.STATE.get("pids") or {})
+                  .get("%s|executor" % ctx.key) or {}).get("at") or 0)
+    grace = float(daemon.CFG["thresholds"].get("startup_grace", 600))
+    until(lambda: time.time() - _at6 > grace + 0.05, grace + 5)
     daemon.check_sessions(0)
     ctx.chk("the newcomer that never came up is the one closed",
             [s["pid"] for s in STOPS[stops_before:]], [new_pid])
@@ -1136,6 +1176,13 @@ if OUTDIR:
         fh.write("\n".join(LOG))
         fh.write("\nEXIT=%d\n" % (1 if _failed_runs else 0))
 
+# The last seed's stub windows sleep 30 s with their working folder in
+# the seed's project, and a folder that is a live process's working
+# directory cannot be removed: this run's OWN children are stopped
+# first, waited on, and nothing else is touched. -> DECISIONS.md 8.45
+for _kid in sessions.child_pids(os.getpid(), names=()) or []:
+    sessions.terminate_and_wait(_kid)
+owntemp.finish(TMP, bool(_failed_runs))
 say("=" * 70)
 if _failed_runs:
     say("NOT TEN OF TEN: %d run(s) failed - %s"

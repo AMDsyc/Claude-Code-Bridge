@@ -40,12 +40,19 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-TMP = tempfile.mkdtemp(prefix="bridge-wall-test-")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# first: it reads nothing from the package, and the folder it makes
+# is the only one this run may remove (DECISIONS.md 8.43, 8.45)
+from bridgecore import owntemp                 # noqa: E402
+TMP = owntemp.make("bridge-wall-test-")
 os.environ["BRIDGE_DATA"] = os.path.join(TMP, "data")
 # The client's own config is isolated too: install() marks a project trusted
 # there, and without this a suite would merge its throwaway temp projects into
 # the real ~/.claude.json on this machine.
 os.environ["BRIDGE_CLAUDE_JSON"] = os.path.join(TMP, ".claude.json")
+# and the user-level settings approve_channel merges into - never the
+# real one (DECISIONS.md 8.35)
+os.environ["BRIDGE_CLAUDE_SETTINGS"] = os.path.join(TMP, "user-settings.json")
 os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(TMP, "claude-home")
 os.environ["PYTHONUTF8"] = "1"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -129,12 +136,17 @@ sessions.CREATE_NEW_CONSOLE = 0        # no console windows for a test
 # killed and the assertion would be about a recorder rather than about
 # the bridge.
 STOPS = []
+STOP_TREE = {}     # pid -> whether its tree was stopped with it (8.31)
 _real_stop = sessions.stop
 
 
-def _watched_stop(project, role, pid=None, wait=None):
+def _watched_stop(project, role, pid=None, wait=None, tree=True):
     STOPS.append((role, pid))
-    return _real_stop(project, role, pid=pid, wait=wait)
+    STOP_TREE[pid] = tree
+    # Passed only when False, the one value a caller sends on purpose - so
+    # the red run against a sessions.stop that has no `tree` still runs.
+    return _real_stop(project, role, pid=pid, wait=wait,
+                      **({} if tree else {"tree": False}))
 
 
 sessions.stop = _watched_stop
@@ -337,6 +349,29 @@ def backdate(role, minutes=15, proj=PROJ):
     daemon.save_state()
 
 
+def launch_from_panel(project, role, model=None):
+    """POST /session launch - and wait for the stub window's OWN record.
+
+    The record in launches() is written by the child process the launch
+    starts, after Popen has already returned, so the POST coming back says
+    nothing about when it lands. A launch not waited for here lands inside
+    whatever check counts launches next: on 2026-09-25 D2's start of the
+    poisoned executor was counted by D3's "still no window", a negative
+    check about a tick that had opened nothing. The wait is on the fact the
+    later checks read - the record - never on a number of seconds.
+    -> DECISIONS.md 8.30
+    """
+    n = len(launches())
+    r = post("/session", {"action": "launch", "project": project,
+                          "role": role, "model": model})
+    end = time.time() + 30
+    while len(launches()) <= n and time.time() < end:
+        time.sleep(0.05)
+    check("the %s window it opened has recorded itself" % role,
+          len(launches()) > n, True)
+    return r
+
+
 def bring_up(role, sid, port, tokens, model=None):
     """Start a session the way the panel does, then let it introduce itself.
 
@@ -345,8 +380,7 @@ def bring_up(role, sid, port, tokens, model=None):
     at launch, and without it the session has no compaction point and every
     later number is unknown for the wrong reason.
     """
-    post("/session", {"action": "launch", "project": PROJ, "role": role,
-                      "model": model})
+    launch_from_panel(PROJ, role, model)
     hook("SessionStart", role, sid, transcript_path="")
     post("/channel/register", {"project": PROJ, "role": role, "port": port,
                                "pid": 4242, "session_id": sid}, secret=True)
@@ -590,15 +624,64 @@ _own = os.path.join(PROJ, "bridge-logs", time.strftime("%Y-%m-%d"),
                     "handoff", "191-shift.md")
 io.open(_own, "w", encoding="utf-8").write(
     u"# the shift handoff\n\nMARK-OWN-HANDOFF-A4B - the thread itself\n")
+# 8.31, THE FORM OF 2026-09-23. The old window is ALIVE and has a
+# background job running, as a real one would: the stub windows of this
+# suite exit as soon as they have recorded themselves, so the pid record is
+# pointed at a stand-in that starts a shell the way a window starts one,
+# and a real PreToolUse registers the job. On that day the wall cut the
+# turn before its report was made, and `taskkill /T` took ten background
+# jobs down with the window. -> DECISIONS.md 8.31
+import subprocess as _sp31                                 # noqa: E402
+_WIN31 = ("import subprocess, sys, time\n"
+          "c = subprocess.Popen(['cmd.exe', '/c', 'ping -n 600 127.0.0.1 "
+          ">nul'], creationflags=0x08000000)\n"
+          "print(c.pid, flush=True)\n"
+          "time.sleep(600)\n")
+_win31, _job31 = None, 0
+if os.name == "nt":
+    _win31 = _sp31.Popen([sys.executable, "-c", _WIN31], stdout=_sp31.PIPE,
+                         text=True, creationflags=0x08000000)
+    _job31 = int(_win31.stdout.readline().strip() or 0)
+    with daemon._lock:
+        daemon.STATE.setdefault("pids", {}).setdefault(
+            "%s|executor" % daemon.norm(PROJ), {})["pid"] = _win31.pid
+        daemon.save_state()
+_BGCMD31 = "py tools/night_chain.py --wall31"
+hook("PreToolUse", "executor", EX1, tool_name="Bash",
+     tool_use_id="toolu_wall31bg",
+     tool_input={"command": _BGCMD31, "run_in_background": True})
+# LONGER THAN 600 CHARACTERS, WITH THE MARK PAST THEM. The bridge's own
+# table already carries the first 600 of the last feedback (last_feedback,
+# under "still open"), so a short verdict would reach the replacement
+# without the seed doing anything - the sabotage that removed the seed's
+# block stayed green on exactly that. What the seed adds is the WHOLE
+# verdict, and that is what is asked here.
+_WALLFB31 = ("Checked: run.log\n" + ("The first map is accepted as it stands; "
+             "the corridor rule holds on every seed that was run. ") * 8
+             + "MARK-WALL-VERDICT-A4B - the second map next, from the "
+             "handoff.")
 DELIVERED["planner"] = []
+DELIVERED["executor"] = []
 before = len(launches())
 _stops_before = len(STOPS)
 _oldpid_ex = daemon.pid_of(PROJ, "executor")
 out = finish_turn("executor", EX1,
                   "%s %s\n\nthe fifth cycle is spent"
-                  % (_MARK, _own))
+                  % (_MARK, _own), verdict="continue", feedback=_WALLFB31)
 ho = (out.get("hook_output") or {})
 check("NOW the turn is cut", ho.get("continue"), False)
+print("    8.31: the last turn is a turn - its report went to the planner,")
+print("    and its verdict is kept for the replacement")
+check("the turn that wrote the handoff was reported to the planner",
+      any((d.get("meta") or {}).get("kind") == "report"
+          and "the fifth cycle is spent" in (d.get("content") or "")
+          for d in DELIVERED["planner"]), True)
+check("the cut came after the verdict: the hook says the report was reviewed",
+      "last report was reviewed" in (ho.get("stopReason") or ""), True)
+check("the verdict was not handed to the window about to go "
+      "(nothing is waiting for it to pick up)",
+      bool((daemon.STATE.get("awaiting") or {}).get(daemon.norm(PROJ))),
+      False)
 check("and the session is told its handoff is what goes across",
       "handoff is written" in (ho.get("stopReason") or ""), True)
 note("stopReason", ho.get("stopReason"))
@@ -623,6 +706,12 @@ check("and the session being replaced was NOT stopped to make room",
 check("and the seed carries the session's OWN handoff, not only the table",
       ((daemon.STATE.get("seed") or {}).get(daemon.norm(PROJ)) or {})
       .get("own_handoff"), _own)
+_seed31 = (daemon.STATE.get("seed") or {}).get(daemon.norm(PROJ)) or {}
+check("and the planner's verdict on the last report, for the replacement",
+      "MARK-WALL-VERDICT-A4B" in (_seed31.get("verdict_words") or ""), True)
+check("and the background job the old window leaves running",
+      any("night_chain" in c for c in (_seed31.get("bg_inherited") or [])),
+      True)
 _wrote = [r.get("text") or ""
           for r in daemon.store.recent_events(300, project=PROJ)
           if "wrote its handoff" in (r.get("text") or "")]
@@ -729,7 +818,16 @@ note("seed title", seed.get("title"))
 print("\nA5. while it is under way, nothing starts a second one")
 before = len(launches())
 res2 = daemon.assess(PROJ)
-check("assess says so plainly", res2["saw"], "a handover is under way")
+# CHANGED DELIBERATELY 2026-09-25 (8.31): since A4b the old window has a
+# background job running, as the 23.09 one did, and assess() asks about
+# running work BEFORE it asks about a handover - so it stands down one tier
+# earlier, on the job. Both reasons are true; the claim of this block is
+# that it stands down and starts nothing, and that the handover is known.
+check("assess stands down, on the job still running or on the handover",
+      res2["saw"] in ("a handover is under way",
+                      "something is still running for the executor"), True)
+check("and the handover is known to be under way",
+      bool(daemon.handover_awaits(PROJ, "executor")), True)
 check("and does nothing", res2["did"], "nothing")
 check("no second window", len(launches()) - before, 0)
 print("    nor does the next turn boundary - the decision is a property of")
@@ -809,6 +907,57 @@ for _ in range(200):
 check("and the window it replaced is stopped only now, once, by pid",
       STOPS[_stops_before:], [("executor", _oldpid_ex)])
 note("what was stopped, and when", STOPS[_stops_before:])
+
+print("\n    8.31: the replacement was TOLD the verdict and the job; the old")
+print("    client went without its tree, the job outlived it, and its record")
+print("    is the new session's until the shell it left is gone")
+check("the replacement's task carries the verdict on the last report",
+      any("MARK-WALL-VERDICT-A4B" in (d.get("content") or "")
+          for d in DELIVERED["executor"]), True)
+check("and names the background job it inherits",
+      any("night_chain" in (d.get("content") or "")
+          for d in DELIVERED["executor"]), True)
+_rec31 = {}
+for _ in range(100):
+    _rec31 = next((m for m in ((daemon.STATE.get("inflight") or {})
+                              .get(daemon.norm(PROJ)) or {}).values()
+                   if isinstance(m, dict) and m.get("bg")
+                   and "night_chain" in (m.get("cmd") or "")), {})
+    if _rec31.get("session") == EX2:
+        break
+    time.sleep(0.1)
+check("the job's record was handed to the new session, not dropped",
+      (_rec31.get("session"), _rec31.get("from_session")), (EX2, EX1))
+if _win31 is not None:
+    check("the old client was stopped WITHOUT its tree",
+          STOP_TREE.get(_oldpid_ex), False)
+    try:
+        _win31.wait(20)
+    except Exception:
+        pass
+    check("the old client is gone", _win31.poll() is not None, True)
+    check("and the job it started is ALIVE after it",
+          bool(daemon.sessions.pid_alive(_job31)), True)
+    # read AGAIN: the shells are written onto it by stop_the_replaced,
+    # which runs after the SessionStart the loop above waited for
+    _rec31 = next((m for m in ((daemon.STATE.get("inflight") or {})
+                              .get(daemon.norm(PROJ)) or {}).values()
+                   if isinstance(m, dict) and m.get("bg")
+                   and "night_chain" in (m.get("cmd") or "")), {})
+    check("the record knows the shell that says when the job ends",
+          _job31 in (_rec31.get("orphans") or []), True)
+    _sp31.run(["taskkill", "/PID", str(_job31), "/T", "/F"],
+              capture_output=True)
+    daemon.sessions.terminate_and_wait(_job31)
+    daemon.check_processes()
+    check("the job ends: its record goes once the shell is gone",
+          any("night_chain" in (m.get("cmd") or "") for m in
+              ((daemon.STATE.get("inflight") or {}).get(daemon.norm(PROJ))
+               or {}).values() if isinstance(m, dict)), False)
+    check("and the journal says so, naming the window it came from",
+          bool(journal_has("Background job ended")), True)
+else:
+    print("  ..   not asked: the process checks - Windows only")
 
 print("\n    the replacement starts clean, the old session keeps its trail")
 check("no compactions inherited",
@@ -1033,6 +1182,18 @@ ex_sid_before = sess_of("executor").get("session_id")
 ex_compactions_before = daemon.compactions_done(PROJ, "executor")
 backdate("executor")
 backdate("planner")
+# THE PLANNER'S WINDOW IS ALIVE, as A4b's executor is: the stub windows exit
+# as soon as they have recorded themselves, and since 8.36 a handover names
+# the window it replaces before it opens one - a dead record and a channel
+# that names no window is a half that cannot be named, and it is refused.
+# The stand-in is what stop_the_replaced stops at the new SessionStart.
+_win36 = _sp31.Popen([sys.executable, "-c",
+                      "import time" + chr(10) + "time.sleep(600)"],
+                     creationflags=0x08000000 if os.name == "nt" else 0)
+with daemon._lock:
+    daemon.STATE.setdefault("pids", {}).setdefault(
+        "%s|planner" % daemon.norm(PROJ), {})["pid"] = _win36.pid
+    daemon.save_state()
 before = len(launches())
 res = daemon.assess(PROJ)
 note("assess", res)
@@ -1239,7 +1400,7 @@ print("    it has compacted nothing itself, so wall_view falls back to the")
 print("    calibration entry - which is the stale one")
 NEW = "poison-new-1"
 _srv_d, _port_d = channel_for_role("executor")
-post("/session", {"action": "launch", "project": POISON, "role": "executor"})
+launch_from_panel(POISON, "executor")
 hook("SessionStart", "executor", NEW, proj=POISON, transcript_path="")
 post("/channel/register", {"project": POISON, "role": "executor",
                            "port": _port_d, "pid": 4242,
@@ -1423,12 +1584,21 @@ check("and the bridge says it is compacting, as it always did",
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 68)
 SRV.shutdown()
+check("CONTROL: every other window this simulation stopped went whole, tree "
+      "and all - only the one with a job left running was spared its tree",
+      (len(STOP_TREE) > 1,
+       [p for p, t in STOP_TREE.items() if p != _oldpid_ex and not t]),
+      (True, []))
+if _win31 is not None and _win31.poll() is None:
+    _win31.kill()
+if _win36.poll() is None:
+    _win36.kill()
 print("windows opened in the whole simulation: %d" % len(launches()))
 for i, r in enumerate(launches(), 1):
     print("  %d. %-9s %s" % (i, r["role"],
                              " ".join(r["argv"])[:150]))
 print("=" * 68)
-shutil.rmtree(TMP, ignore_errors=True)
+owntemp.finish(TMP, bool(FAILED))
 if FAILED:
     print("FAILED: %d" % len(FAILED))
     for f in FAILED:

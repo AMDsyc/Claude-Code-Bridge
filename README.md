@@ -652,6 +652,116 @@ running has to be available to them. It cannot be closed up and resold.
 
 Newest first. Short on purpose — what changed, not why in detail.
 
+**2026-09-28 — what is new since the state of 2026-09-13**
+
+More of the same kind of repair: a record standing in for a fact it did not
+hold, replaced by asking the side that would know. And one incident of our
+own, at the end, with what changed because of it.
+
+- **A spent allowance is told apart from a passing rate limit.** Both arrive
+  as the same error category, and the sentence is what tells them apart. When
+  a model's allowance runs out, its pair is held until a turn finishes or a
+  status line shows another model. When the account's allowance runs out, the
+  whole bridge holds until the reset time the client names, or until any
+  window finishes a turn. Either is said once, and nothing is re-sent into a
+  window that cannot answer — one exhausted weekly allowance used to mean
+  thirty hours of revivals into dead windows and 456 messages in a day.
+- **A command's record ends with its own call.** A call that fails sends only
+  a failure event, and a call another hook refused sends no after-event at
+  all; both used to leave the pair counted as busy for up to an hour. The
+  record now ends on the failure event, at the turn's end, when its session is
+  gone, or when that call's own result appears in the transcript.
+- **A window that is asking a person says so, and says what it asks.** A
+  permission dialog, or a question put to the person, used to be reported as
+  "the model is not answering". What is asked is now read from the half's own
+  open call — a question, or a permission for a named tool — and said in one
+  message. The message is closed by that window's own record when the question
+  is answered or the call refused, never by another window's.
+- **The panel does what it shows.** A model picked in a list is the model that
+  is launched — it used to be replaced, silently, by the head of the chain;
+  "start both" is one start rather than two; and the panel's state is built
+  from a copy, so a window registering in the middle of a read no longer
+  leaves the panel without an answer.
+- **The log loses no lines.** Appends went without a lock, and on Windows an
+  append is a seek followed by a write: eight threads writing at once lost
+  3–4 % of their lines. Every append now goes through one writer, under its
+  own lock.
+- **The bridge knows which window holds which session.** In a live window the
+  client runs hooks through a shell, so a hook's parent is not the window; the
+  hook now finds the client process above it by name, and the bridge keeps a
+  book of which session each window holds. A pair held because a window took a
+  report and opened no turn is released only by a turn in that same window,
+  and a turn-end hook the client itself cancelled is let go at once and
+  counted as no silence.
+- **The installer leaves alone what works.** A merge that changes nothing
+  writes nothing: the file keeps every byte.
+- **The last turn before a replacement is reviewed**, and its verdict goes to
+  the replacement. A replaced window's background jobs are handed to the
+  replacement instead of dying with the old window.
+- **The rules no longer tell the reviewing half it cannot run anything.** It
+  may watch with a monitor, which measures and accepts nothing; its own
+  acceptance run is still the only thing that accepts.
+- **The reviewing half's own acceptance run stops the review clock**, so a run
+  that takes longer than a review is not read as the reviewer going silent.
+  The run writes straight into its own file, so a timeout keeps the output,
+  and a process it leaves behind holds nothing open.
+- **No wake-up nudge goes into a window that its own monitor is about to
+  wake.** A gate that would have held idle reports back was measured and
+  rejected: "something is still running" does not tell an interim report from
+  a final one.
+- **A reviewer's replacement names the window it replaces before it launches**,
+  and opens nothing while the half is alive and no window can be named as
+  the one it replaces. A window left over
+  after a replacement is closed only once its own turn is over; one stuck
+  mid-turn for more than an hour rings a person, once. The half being
+  replaced is replaced only between its own turns.
+- **"The task was taken" is read from every session of the working half since
+  the task was written**, so a task already taken in a window that has since
+  been replaced is not handed over a second time. The task is recognised
+  however its envelope is written.
+- **The test suites no longer read and write the user's own client
+  settings**; each one points the client at a settings file it owns.
+- **A test run removes only what it made itself.** A test that broke the
+  deletion safeguard on purpose was run against the real temporary folder and
+  deleted folders there that were not its own; that can no longer happen.
+  There is no automatic clean-up of the temporary folder any more. A run
+  deletes only the folder it created, by its exact path, and only when it
+  passed — a failing run keeps it and prints where it is. A test that weakens
+  code which deletes things runs only in a disposable copy, and before it
+  runs, it is proven that nothing in it can delete outside that copy.
+- **Everything else that deletes was made to reach only what its own code
+  wrote.** Building the public tree keeps a witness file of what it wrote,
+  removes only the files listed there, names anything else it finds and leaves
+  it, and refuses a folder that holds files it does not write. Log archiving
+  touches only the day folders the bridge writes, never writes over an
+  archive that exists, and removes a day folder only after its archive has
+  been read back whole — a folder that could not be removed whole used to
+  have its archive rewritten from what was left, losing the files that had
+  already gone. A restore that cannot remove
+  the folder in its way says so instead of carrying on in silence. A second
+  repair of a hook's interpreter keeps the first backup.
+- **A window's record vouches only for the process it was written about.** A
+  process number passes to another program as soon as its process ends, and
+  the bridge asked only whether the number was alive: a start was refused
+  with "a window is already up" fifteen seconds after that window had been
+  stopped, and the same number handed to a stop could have ended whichever
+  program held it by then. Every place that decides or acts on a recorded
+  window now asks one question — is the number alive, and was its process
+  born no later than the record was written — and a stop marks the record
+  it stopped. The stop that follows a replacement asks again just before it
+  acts.
+- **The privacy scan refuses a folder it read nothing in.** Over a folder
+  that did not exist it said "no personal data found" and passed.
+- **The English rules say what the original says.** A verdict that passes
+  judgement — done, stop or continue — needs its Checked block, and only
+  wait is free; the English text still named two of the three. It is also
+  shorter again, back under the size the suite allows for a text that is
+  sent in front of every task.
+- **The published suite passes in the published tree.** Checks that need
+  files only the working repository has — the tool that builds this tree,
+  its sources, the private suite — now say they are not counted there,
+  instead of failing.
+
 **2026-09-18 — what is new since the release of 2026-09-01**
 
 Almost all of it is one kind of repair: the bridge was making claims about

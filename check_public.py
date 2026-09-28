@@ -39,6 +39,7 @@ Three named exceptions, named rather than general on purpose - a blanket
 Usage:  python check_public.py <folder> [report.txt]
 Exit 0 only when nothing was found.
 """
+import glob
 import io
 import os
 import re
@@ -66,11 +67,14 @@ AUTHOR_LINE = '"Claude Code Bridge" is made by AMDsyc and Claude, 2026'
 SKIP_DIRS = {".git", ".idea", ".vscode"}
 
 PUBLISHABLE_SUFFIX = (".md", ".py", ".bat", ".html", ".txt", ".gitignore")
-# Extensionless files the build really does produce. Listed one by one
-# rather than allowed by a pattern: the whole point of this check is
-# that a file nobody meant to publish is refused for being there, and
-# a pattern would quietly let in the next thing that matched it.
-PUBLISHABLE_NAMES = ("LICENSE", ".gitignore", "Makefile")
+# Files the build really does produce that the suffix list does not cover.
+# Listed one by one rather than allowed by a pattern: the whole point of
+# this check is that a file nobody meant to publish is refused for being
+# there, and a pattern would quietly let in the next thing that matched it.
+# .make_public.json is the build's own witness - its name and the files it
+# wrote - and is READ like any text file, not waved through unread; this
+# gate refused it the first time the build wrote one (DECISIONS 8.46).
+PUBLISHABLE_NAMES = ("LICENSE", ".gitignore", "Makefile", ".make_public.json")
 
 # The generic forms the documentation and the fixtures are SUPPOSED to use.
 # Named and narrow: every segment has to be a placeholder word, so
@@ -162,8 +166,40 @@ def placeholder(kind, hit):
     return False
 
 
+# A SESSION'S FIRST EIGHT HEX, WHICH NO PATTERN CAN KNOW. A whole session id
+# is caught above; the eight-character prefix a person writes into a comment
+# or a test print ("session 1a2b3c4d") is an ordinary hex word to a pattern,
+# and real ones reached the published tree four times (DECISIONS 8.48). So
+# the scan asks THIS machine which sessions exist - the names of the
+# transcripts in the client's projects folder, read at every run - and
+# nothing about any of them is written here. CLAUDE_CONFIG_DIR is the
+# client's own way to move that folder, so it is honoured the same way.
+HEX8 = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{8})(?![0-9a-fA-F])")
+SESSION_PREFIXES = None
+
+
+def known_session_prefixes():
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(
+        os.path.expanduser("~"), ".claude")
+    out = set()
+    for p in glob.glob(os.path.join(base, "projects", "*", "*.jsonl")):
+        stem = os.path.splitext(os.path.basename(p))[0].lower()
+        if re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-", stem):
+            out.add(stem[:8])
+    return out
+
+
 def scan_text(rel, text, found):
+    global SESSION_PREFIXES
+    if SESSION_PREFIXES is None:
+        SESSION_PREFIXES = known_session_prefixes()
     for n, line in enumerate(text.split("\n"), 1):
+        for m in HEX8.finditer(line):
+            h = m.group(1).lower()
+            if h in SESSION_PREFIXES and \
+                    not exempt(line, "session id prefix", rel):
+                found.append((rel, n, "session id prefix", h,
+                              line.strip()[:90]))
         for kind, pat in RULES:
             m = pat.search(line)
             if m and not exempt(line, kind, rel) \
@@ -214,6 +250,10 @@ def duplicates(folder):
 
 
 def scan(folder):
+    global SESSION_PREFIXES
+    # read once, before any file: the count is printed whatever
+    # the folder holds, and a count never taken must not read 0
+    SESSION_PREFIXES = known_session_prefixes()
     found, files = [], 0
     for name, places in duplicates(folder):
         found.append((", ".join(places), 0, "duplicate file name", name,
@@ -257,12 +297,24 @@ def main():
     folder = sys.argv[1]
     found, files = scan(folder)
     out = ["privacy scan of %s" % os.path.abspath(folder),
-           "files read: %d" % files, ""]
-    if not found:
+           "files read: %d" % files,
+           "sessions known on this machine, by their transcripts: %d"
+           % len(SESSION_PREFIXES or ()), ""]
+    # A SCAN THAT READ NOTHING HAS CHECKED NOTHING. Over a folder that did
+    # not exist this said "no personal data found" and exited 0 - a gate
+    # green over nothing, which a build that failed would pass straight
+    # through (DECISIONS 8.46). It is a refusal now, and says why.
+    empty = files == 0
+    if empty:
+        out.append("read 0 files - %s - NOT publishable: a scan that read "
+                   "nothing has checked nothing"
+                   % ("there is no such folder" if not os.path.isdir(folder)
+                      else "the folder holds no file"))
+    elif not found:
         out.append("личных данных не найдено / no personal data found")
         out.append("")
         out.append("checked for: " + ", ".join(k for k, _ in RULES)
-                   + ", cyrillic, duplicate file name")
+                   + ", session id prefix, cyrillic, duplicate file name")
         out.append("exceptions used: the authorship and copyright lines, "
                    "this scanner's own source, and the documented "
                    "placeholder forms (C:\\path\\to\\..., session_XXXX)")
@@ -288,7 +340,7 @@ def main():
     if len(sys.argv) > 2:
         with open(sys.argv[2], "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
-    return 1 if found else 0
+    return 1 if found or empty else 0
 
 
 if __name__ == "__main__":

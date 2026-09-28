@@ -260,7 +260,7 @@ details .inner{padding:4px 14px 14px;color:var(--label);line-height:1.6}
       <label class="row" style="margin-top:10px"><input type="checkbox" id="adminPlan"> <span>run as administrator (UAC will ask once)</span></label>
       <label class="row" style="margin-top:6px"><input type="checkbox" id="roPlan"> <span>never let the reviewer touch the project - denies its edit tools, its shell and the way out of plan mode, so work can only happen through the executor</span></label>
       <div class="danger" id="dangerPlan"></div>
-      <div class="dim" style="margin-top:10px;line-height:1.5">plan keeps the reviewer unable to write, which is the point of having one - but the choice is yours. The verdict tool is pre-approved in every mode, so no mode makes the loop stop for a permission question.</div>
+      <div class="dim" style="margin-top:10px;line-height:1.5">plan keeps the reviewer unable to write, which is the point of having one - but the choice is yours. In plan mode the client can still stop and ask a person before the verdict tool runs: on 2026-09-23 a planner stood 62 minutes on that question with reports queued behind it. The bridge recognises such a dialog when the client reports it and calls you at once; it never presses anything in it.</div>
     </div>
   </div>
   <div class="card">
@@ -1178,7 +1178,9 @@ function renderLaunch(){
      The latch is what the config may not overwrite. It was only set on
      "input", and add/x are clicks, so it never covered the one case it
      was needed for. */
-  if(CUR!==window._launchProj){window._launchProj=CUR;window._launchTouched=false}
+  /* _picked is per project for the same reason as the latch: a choice left
+     in the drop-down for one project must not refuse the start of another. */
+  if(CUR!==window._launchProj){window._launchProj=CUR;window._launchTouched=false;window._picked={}}
   var pc=projConf(); if(pc.chains&&!window._launchTouched)CHAINS=JSON.parse(JSON.stringify(pc.chains));
   $("#autoRestart").checked=!!pc.auto_restart_dead_sessions;
   if(pc.modes){
@@ -1202,13 +1204,21 @@ function renderLaunch(){
       var head=(i===0)?' <span class="amber">· starts here</span>':'';
       c.innerHTML=esc(m)+tail+head+' <b data-r="'+role+'" data-i="'+i+'">x</b>';host.appendChild(c)});
     var sel=$(role==="executor"?"#addModelExec":"#addModelPlan");
-    /* Keep what the person picked across the rebuild. Without this the
-       select silently snapped back to the first option on every render
-       (2.5s), so the control never held the choice long enough to be
-       acted on - the same class as the chain edit of §5.8. */
-    var was=sel.value;
-    sel.innerHTML=(D.models||[]).map(function(m){var lb=mlabel(m);return '<option value="'+esc(m)+'">'+esc(m)+(lb?" — "+esc(lb):"")+'</option>'}).join("");
-    if(was&&(D.models||[]).indexOf(was)>=0)sel.value=was;
+    /* What the drop-down shows is what starts, unless a person chose
+       otherwise. It used to keep whatever value it had, and with nobody's
+       choice that was the FIRST model on the list - so the executor's
+       drop-down read fable while its chain started opus (2026-09-23). Now: the
+       person's pick if there is one (_picked, which still refuses a start
+       it was not applied to), else the head of this role's own chain.
+       Kept across the 2.5 s rebuild either way - the class of the chain
+       edit of §5.8. A head the list does not offer is added to it, so
+       the one thing the control must show is always there to show. */
+    var models=(D.models||[]).slice(),head=(CHAINS[role]||[])[0];
+    var pick=(window._picked||{})[role];
+    if(head&&models.indexOf(head)<0)models.unshift(head);
+    sel.innerHTML=models.map(function(m){var lb=mlabel(m);return '<option value="'+esc(m)+'">'+esc(m)+(lb?" — "+esc(lb):"")+'</option>'}).join("");
+    if(pick&&models.indexOf(pick)>=0)sel.value=pick;
+    else if(head)sel.value=head;
   });
   $$("#w-launch .chip b").forEach(function(b){b.onclick=function(){
     window._launchTouched=true;
@@ -1225,8 +1235,19 @@ function renderLaunch(){
   ps.innerHTML=Object.keys(profs).map(function(n){return '<option>'+esc(n)+'</option>'}).join("");
   preview();
 }
+/* A choice made in the drop-down and applied by neither button. The start
+   sends the chain's head, not the drop-down, so a pick left standing is the
+   2026-08-30 report waiting to happen again: opus chosen, a fable planner
+   started. The start carries this as `picked` and the daemon refuses it,
+   naming both models. Set on "change" only - renderLaunch restores the
+   select's value by assignment, which fires no event and is not a choice.
+   Cleared by either button (the pick is applied) and by a start that went. */
+["executor","planner"].forEach(function(role){
+  $(role==="executor"?"#addModelExec":"#addModelPlan").addEventListener("change",function(){
+    window._picked=window._picked||{};window._picked[role]=this.value})});
 $$("[data-add]").forEach(function(b){b.onclick=function(){
   var role=b.dataset.add,sel=$(role==="executor"?"#addModelExec":"#addModelPlan");
+  if(window._picked)delete window._picked[role];
   if(sel.value&&CHAINS[role].indexOf(sel.value)<0){window._launchTouched=true;
     CHAINS[role].push(sel.value)}renderLaunch()}});
 /* "start with" - the gesture this window did not have, and the whole of the
@@ -1243,6 +1264,7 @@ $$("[data-add]").forEach(function(b){b.onclick=function(){
 $$("[data-first]").forEach(function(b){b.onclick=function(){
   var role=b.dataset.first,sel=$(role==="executor"?"#addModelExec":"#addModelPlan");
   if(!sel.value)return;
+  if(window._picked)delete window._picked[role];
   window._launchTouched=true;
   var rest=(CHAINS[role]||[]).filter(function(m){return m!==sel.value});
   rest.unshift(sel.value);CHAINS[role]=rest;renderLaunch()}});
@@ -1288,14 +1310,39 @@ function saveChains(){var pr=((D.config||{}).projects||{});pr[CUR]=pr[CUR]||{};p
      against every later change made anywhere else. */
   return post("/config",{projects:pr}).then(function(r){
     window._launchTouched=false;return r})}
-function launchRole(role){
+/* The daemon asks before a second window of a role (15.4): r.ask carries
+   the question, and the button sends the same request with confirm. */
+function askAgain(r,again){
+  $("#launchMsg").innerHTML='<div class="msgerr">'+esc(r.error)+' <button id="askAgain">start another</button></div>';
+  $("#askAgain").onclick=again}
+function launchRole(role,confirm){
   if(!CUR){$("#launchMsg").innerHTML='<div class="msgerr">Pick a project first (projects window).</div>';return}
-  saveChains().then(function(){return post("/session",{action:"launch",project:CUR,role:role,model:(CHAINS[role]||[])[0]||null,mode:role==="executor"?MODE.executor:MODE.planner})})
-  .then(function(r){$("#launchMsg").innerHTML=r.ok?'<div class="msgok">'+role+' window is up (pid '+r.pid+'), minimised on your taskbar.</div>':'<div class="msgerr">'+esc(r.error)+'</div>'});
+  var picked=(window._picked||{})[role]||null;
+  saveChains().then(function(){return post("/session",{action:"launch",project:CUR,role:role,model:(CHAINS[role]||[])[0]||null,mode:role==="executor"?MODE.executor:MODE.planner,picked:picked,confirm:!!confirm})})
+  .then(function(r){if(r.ask)return askAgain(r,function(){launchRole(role,true)});
+    if(r.ok&&window._picked)delete window._picked[role];
+    $("#launchMsg").innerHTML=r.ok?'<div class="msgok">'+role+' window is up (pid '+r.pid+'), minimised on your taskbar.</div>':'<div class="msgerr">'+esc(r.error)+'</div>'});
 }
 $("#launchExec").onclick=function(){launchRole("executor")};
 $("#launchPlan").onclick=function(){launchRole("planner")};
-$("#launchBoth").onclick=function(){launchRole("executor");setTimeout(function(){launchRole("planner")},1200)};
+/* ONE request, everything read at the click. This was launchRole("executor")
+   and, 1.2 s later, launchRole("planner") - each saving the chains and
+   reading its own head, while the 2.5 s tick re-rendered from a /state that
+   could predate the first save; the second start then read the old head and
+   saved it back. The daemon now gets the project, both chains, both modes
+   and both picks at once, checks both picks, writes the config once and
+   starts each half on the head of the chain it was sent. */
+function launchBoth(confirm){
+  if(!CUR){$("#launchMsg").innerHTML='<div class="msgerr">Pick a project first (projects window).</div>';return}
+  var pk=window._picked||{};
+  post("/session",{action:"launch_both",project:CUR,chains:JSON.parse(JSON.stringify(CHAINS)),
+    modes:{executor:MODE.executor,planner:MODE.planner},readonly_planner:MODE.roPlan!==false,
+    picked:{executor:pk.executor||null,planner:pk.planner||null},confirm:!!confirm})
+  .then(function(r){if(r.ask)return askAgain(r,function(){launchBoth(true)});
+    if(r.ok){window._launchTouched=false;window._picked={}}
+    $("#launchMsg").innerHTML=r.ok?'<div class="msgok">both windows are up (pids '+r.pids.executor+', '+r.pids.planner+'), minimised on your taskbar.</div>':'<div class="msgerr">'+esc(r.error)+'</div>'});
+}
+$("#launchBoth").onclick=function(){launchBoth(false)};
 $("#loopStart").onclick=function(){
   if(!CUR){$("#launchMsg").innerHTML='<div class="msgerr">Pick a project first.</div>';return}
   post("/loop",{action:"start",project:CUR,reset:true}).then(function(){

@@ -37,12 +37,19 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 
-TMP = tempfile.mkdtemp(prefix="bridge-search-test-")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# first: it reads nothing from the package, and the folder it makes
+# is the only one this run may remove (DECISIONS.md 8.43, 8.45)
+from bridgecore import owntemp                 # noqa: E402
+TMP = owntemp.make("bridge-search-test-")
 os.environ["BRIDGE_DATA"] = os.path.join(TMP, "data")
 # The client's own config is isolated too: install() marks a project trusted
 # there, and without this a suite would merge its throwaway temp projects into
 # the real ~/.claude.json on this machine.
 os.environ["BRIDGE_CLAUDE_JSON"] = os.path.join(TMP, ".claude.json")
+# and the user-level settings approve_channel merges into - never the
+# real one (DECISIONS.md 8.35)
+os.environ["BRIDGE_CLAUDE_SETTINGS"] = os.path.join(TMP, "user-settings.json")
 os.environ["PYTHONUTF8"] = "1"
 # BRIDGE_DATA isolates the bridge's own files and nothing else. The thing
 # being tested spawns a client, and a client writes its transcript into its
@@ -345,7 +352,7 @@ check("and a project merely containing the word is not caught",
       discover._ours(r"C:\path\to\my-bridge-logs-viewer"), False)
 
 print("\n" + ("-" * 60))
-shutil.rmtree(TMP, ignore_errors=True)
+owntemp.finish(TMP, bool(FAILED))
 if FAILED:
     print("FAILED: %d" % len(FAILED))
     for f in FAILED:

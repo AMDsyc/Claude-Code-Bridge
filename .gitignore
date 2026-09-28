@@ -24,3 +24,7 @@ __pycache__/
 .venv/
 .idea/
 .vscode/
+
+# make_public's own witness: which files it wrote here, so that a rebuild
+# removes those and nothing else. Not part of the repository.
+.make_public.json

@@ -27,6 +27,7 @@ Two rules here matter more than anything else in this file:
 import hashlib
 import json
 import os
+import re
 import tempfile
 import time
 import threading
@@ -635,6 +636,46 @@ def secret():
     return val
 
 
+# THE STORE APPENDS IN ONE PLACE, UNDER A LOCK OF ITS OWN. The journal's
+# two files, the dialogue, the iteration index and a carried day brought
+# in all go through _append and nowhere else. 2026-09-23: case 12 of
+# test_multipair lost a quiet pair's journal line outright - no row had
+# landed while it read, the row was simply not in the file. These files
+# were appended with open(p, "a") and no lock, and on Windows an append is
+# "seek to the end, then write", two steps: two threads that reach the same
+# end write over each other and a line is gone. Measured through journal()
+# itself, 8 threads x 1 000 lines lost 269 to 330 lines in EACH of its two
+# files. Every thread of the daemon journals, and the journal is the
+# witness most of the rules read: "there is no line" is read as "it did not
+# happen".
+#
+# Not _lock: that one is the state's, held across a state save and its
+# retries, and a journal line waiting behind that is one slow disk made
+# everybody's problem (save_state journals OUTSIDE it for that reason).
+# This one is held for one open, one write and one close, and nothing is
+# taken under it, so it cannot be half of a deadlock. A thread lock is
+# enough because nothing outside the daemon appends to these files: the
+# hooks, the channel and the status line post to the daemon over HTTP and
+# import nothing from this module.
+_JOURNAL_LOCK = threading.Lock()
+
+
+def _append(path, text, head=""):
+    """Append text to path - the one place the store appends to a file.
+
+    `head` goes in first when the file does not exist yet, decided under the
+    same lock: the index used to look for its file and then write a header
+    with "w" as two steps, and a second thread between them would have
+    truncated the first one's header and line. Raises as open() does - every
+    caller is an edge path and catches.
+    """
+    with _JOURNAL_LOCK:
+        if head and not os.path.exists(path):
+            text = head + text
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(text)
+
+
 def journal(kind, text, project="", session="", level="log", extra=None,
             project_dir=None):
     """Append one line to today's journal. Never raises - IN THE DAEMON.
@@ -673,9 +714,7 @@ def journal(kind, text, project="", session="", level="log", extra=None,
         if not base:
             continue
         try:
-            with open(os.path.join(base, "events.jsonl"), "a",
-                      encoding="utf-8") as fh:
-                fh.write(line)
+            _append(os.path.join(base, "events.jsonl"), line)
         except Exception:
             pass
     return row
@@ -688,9 +727,7 @@ def dialogue(project_dir, heading, body):
         if not base:
             continue
         try:
-            with open(os.path.join(base, "dialogue.md"), "a",
-                      encoding="utf-8") as fh:
-                fh.write(text)
+            _append(os.path.join(base, "dialogue.md"), text)
         except Exception:
             pass
 
@@ -923,10 +960,11 @@ def merge_day(project, day):
             return out
         # Append-only, and the directory is made here rather than through
         # day_dir(), which always builds TODAY and would create the wrong
-        # folder for an imported older day.
+        # folder for an imported older day. Through _append, because when
+        # the day is today this is the very file journal() is appending to
+        # from every other thread.
         os.makedirs(target_dir, exist_ok=True)
-        with open(target, "a", encoding="utf-8") as fh:
-            fh.write("\n".join(fresh) + "\n")
+        _append(target, "\n".join(fresh) + "\n")
         out["added"] = len(fresh)
     except Exception as exc:
         out["error"] = "%s: %s" % (type(exc).__name__, exc)
@@ -1236,12 +1274,8 @@ def index_append(project_dir, iteration, what, verdict):
         iteration, time.strftime("%m-%d %H:%M"),
         (what or "").replace("|", "/")[:90], verdict)
     try:
-        if not os.path.exists(path):
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write("| iteration | time | what happened | verdict |\n"
-                         "|---|---|---|---|\n")
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(line)
+        _append(path, line, head="| iteration | time | what happened | "
+                                 "verdict |\n|---|---|---|---|\n")
     except Exception:
         pass
 
@@ -1325,36 +1359,129 @@ def logs_disk_by_project(projects):
     return rows
 
 
-def archive_old(project_dir, days=7, size_gb=2):
-    """Zip day folders older than `days`, or oldest-first past the size cap."""
+# The name of a day folder the bridge writes in bridge-logs: YYYY-MM-DD.
+_DAY_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _day_zip_name(root, name):
+    """The first archive name of this day that does not exist yet: the
+    day's own `<day>.zip`, then `<day>.2.zip`, `<day>.3.zip` ..."""
+    zpath = os.path.join(root, name + ".zip")
+    n = 2
+    while os.path.exists(zpath):
+        zpath = os.path.join(root, "%s.%d.zip" % (name, n))
+        n += 1
+    return zpath
+
+
+def _zip_short_of(zpath, full, root):
+    """None when every file under `full` is in the archive at `zpath`
+    whole - under its name, at its size, with a CRC that reads back.
+    Otherwise a sentence naming the first thing that is not."""
     import zipfile
+    want = {}
+    for dp, _dn, fn in os.walk(full):
+        for f in fn:
+            p = os.path.join(dp, f)
+            want[os.path.relpath(p, root).replace(os.sep, "/")] = \
+                os.path.getsize(p)
+    with zipfile.ZipFile(zpath) as z:
+        have = {i.filename: i.file_size for i in z.infolist()}
+        bad = z.testzip()
+    if bad:
+        return "%s does not read back (CRC)" % bad
+    for rel, size in sorted(want.items()):
+        if rel not in have:
+            return "%s is not in it" % rel
+        if have[rel] != size:
+            return "%s is %d bytes in it and %d on disk" % (rel, have[rel],
+                                                             size)
+    return None
+
+
+def archive_old(project_dir, days=7, size_gb=2):
+    """Zip day folders older than `days`, or oldest-first past the size cap.
+
+    A FOLDER IS REMOVED ONLY AFTER ITS ARCHIVE HAS BEEN READ BACK, AND AN
+    ARCHIVE IS NEVER WRITTEN OVER. This used to zip with mode "w" to
+    `<day>.zip` and then rmtree the folder under a bare except: a read-only
+    or held file stopped the rmtree half way, in silence, and when the half
+    folder aged again the next pass rewrote `<day>.zip` from what was left
+    - the files removed the first time were then in neither place
+    (DECISIONS 8.46, archive-rezip-loss.txt). Now:
+      - a day whose archive exists gets a NEW one, `<day>.2.zip` and on,
+        opened with mode "x", so the OS itself refuses to write over
+        anything. Appending ("a") was the other choice and is refused: it
+        rewrites the old archive's central directory when it closes, so
+        a failure half way through damages the archive that was whole;
+      - the folder goes only when `_zip_short_of` finds every file in the
+        new archive by name and size, and its CRCs read back; an archive
+        that falls short is this call's own and is removed by its exact
+        path, and the folder stays;
+      - the folder is removed by relayout.remove_tree, which clears
+        read-only, and a removal that stops half way is a warn line.
+    """
+    import zipfile
+    from . import relayout
     root = os.path.join(project_dir, "bridge-logs")
     if not os.path.isdir(root):
         return 0
     packed = 0
     today = time.strftime("%Y-%m-%d")
+    # ONLY the day folders the bridge writes itself, by their name. This
+    # took any folder in bridge-logs but today's - extracts/ among them -
+    # and removed it after the zip; since 2026-09-28 a removal reaches only
+    # what its own code made (DECISIONS 8.43, 8.46).
     entries = sorted(x for x in os.listdir(root)
-                     if os.path.isdir(os.path.join(root, x)) and x != today)
+                     if _DAY_NAME.match(x) and x != today
+                     and os.path.isdir(os.path.join(root, x)))
     cutoff = time.time() - days * 86400
     oversize = _dir_size(root) > size_gb * (1024 ** 3)
+
+    def say(text):
+        journal("archive", text, os.path.basename(project_dir), "archive",
+                "warn", project_dir=project_dir)
+
     for name in entries:
         full = os.path.join(root, name)
         old = os.path.getmtime(full) < cutoff
         if not (old or oversize):
             continue
+        zpath = _day_zip_name(root, name)
+        made = False
         try:
-            zpath = full + ".zip"
-            with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
-                for dp, dn, fn in os.walk(full):
+            with zipfile.ZipFile(zpath, "x", zipfile.ZIP_DEFLATED) as z:
+                made = True
+                for dp, _dn, fn in os.walk(full):
                     for f in fn:
                         p = os.path.join(dp, f)
                         z.write(p, os.path.relpath(p, root))
-            import shutil
-            shutil.rmtree(full)
-            packed += 1
-            oversize = _dir_size(root) > size_gb * (1024 ** 3)
-        except Exception:
-            pass
+            short = _zip_short_of(zpath, full, root)
+        except Exception as exc:
+            short = "%s: %s" % (exc.__class__.__name__, exc)
+        if short:
+            if made and os.path.isfile(zpath):
+                try:
+                    os.remove(zpath)
+                except OSError:
+                    pass
+            say("%s was NOT archived and is kept as it is: the archive %s "
+                "fell short - %s%s" % (
+                    name, os.path.basename(zpath), short,
+                    "" if not os.path.exists(zpath)
+                    else "; that archive could not be removed either"))
+            continue
+        gone, why = relayout.remove_tree(full, out=lambda _s: None,
+                                         tries=3, wait=1.0)
+        if not gone:
+            say("%s is archived whole in %s, but the folder could NOT be "
+                "removed whole: %s. What is left is archived into a new "
+                "file next time; %s is never written again"
+                % (name, os.path.basename(zpath), why,
+                   os.path.basename(zpath)))
+            continue
+        packed += 1
+        oversize = _dir_size(root) > size_gb * (1024 ** 3)
     return packed
 
 

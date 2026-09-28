@@ -31,12 +31,19 @@ import shutil
 import sys
 import tempfile
 
-TMP = tempfile.mkdtemp(prefix="bridge-archive-test-")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# first: it reads nothing from the package, and the folder it makes
+# is the only one this run may remove (DECISIONS.md 8.43, 8.45)
+from bridgecore import owntemp                 # noqa: E402
+TMP = owntemp.make("bridge-archive-test-")
 os.environ["BRIDGE_DATA"] = os.path.join(TMP, "data")
 # The client's own config is isolated too: install() marks a project trusted
 # there, and without this a suite would merge its throwaway temp projects into
 # the real ~/.claude.json on this machine.
 os.environ["BRIDGE_CLAUDE_JSON"] = os.path.join(TMP, ".claude.json")
+# and the user-level settings approve_channel merges into - never the
+# real one (DECISIONS.md 8.35)
+os.environ["BRIDGE_CLAUDE_SETTINGS"] = os.path.join(TMP, "user-settings.json")
 os.environ["PYTHONUTF8"] = "1"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -256,8 +263,29 @@ check("with every file of that day", idx["count"], len(m["files"]))
 
 print("\n9. a rebuild never runs twice at once, and never loses a request")
 seen = []
-t = archive.rebuild_async(PROJ, known, done=lambda mm: seen.append(mm))
-second_call = archive.rebuild_async(PROJ, known)
+# THE FIRST BUILD IS HELD UNTIL THE SECOND CALL HAS BEEN MADE - the fact
+# this check is about, owned rather than assumed. A small fixture builds in
+# milliseconds, and a build that has finished rightly lets the next call
+# start its own: on 2026-09-28, under seven suites at once, the worker ran
+# to the end before this thread made its second call, and the check went
+# red on correct code (DECISIONS 8.48)
+import threading as _th9                                  # noqa: E402
+_gate9 = _th9.Event()
+_build9 = archive.build_now
+
+
+def _held9(project_dir, known=None):
+    _gate9.wait(30)
+    return _build9(project_dir, known)
+
+
+archive.build_now = _held9
+try:
+    t = archive.rebuild_async(PROJ, known, done=lambda mm: seen.append(mm))
+    second_call = archive.rebuild_async(PROJ, known)
+finally:
+    archive.build_now = _build9
+    _gate9.set()
 if t:
     t.join(30)
 check("the second call did not start its own build", second_call, None)
@@ -351,7 +379,7 @@ check("the carried file added to the count",
       m12["totals"]["files"] > 0 and len(_c12) == 1, True)
 
 print("\n" + ("-" * 60))
-shutil.rmtree(TMP, ignore_errors=True)
+owntemp.finish(TMP, bool(FAILED))
 if FAILED:
     print("FAILED: %d" % len(FAILED))
     for f in FAILED:

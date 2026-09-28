@@ -361,8 +361,17 @@ def launch(project, role, resume_id=None, permission_mode=None, model=None,
 STOP_WAIT_SEC = 20
 
 
-def stop(project, role, pid=None, wait=None):
+def stop(project, role, pid=None, wait=None, tree=True):
     """End a session process (and its children), and WAIT for it to go.
+
+    `tree=False` ends the CLIENT ALONE. A window's background jobs are its
+    children, and `taskkill /T` took them down with it: on 2026-09-23 a
+    watched project's executor was replaced at the wall and ten background
+    records were dropped a second later - night runs and waits killed as a
+    side effect of changing hands. The owner's decision (8.31, variant a):
+    the old client goes, its jobs finish. Measured before this was written:
+    a child of a process stopped with `/F` and no `/T` lives on, and a
+    toolhelp snapshot still names the dead parent as its parent.
 
     It used to issue the kill and return True on the strength of having
     issued it, swallowing taskkill's exit code on the way. Both halves of
@@ -393,7 +402,8 @@ def stop(project, role, pid=None, wait=None):
         return True                     # already gone; nothing to wait for
     try:
         if os.name == "nt":
-            r = subprocess.run(["taskkill", "/PID", str(target), "/T", "/F"],
+            r = subprocess.run(["taskkill", "/PID", str(target)]
+                               + (["/T"] if tree else []) + ["/F"],
                                capture_output=True, timeout=15)
             # A non-zero code here is a refusal - access denied, or a pid
             # that has already gone. It was swallowed, so "stopped" came
@@ -404,10 +414,13 @@ def stop(project, role, pid=None, wait=None):
             if r.returncode and not pid_alive(target):
                 return True
         else:
-            try:
-                os.killpg(os.getpgid(target), signal.SIGTERM)
-            except Exception:
+            if not tree:
                 os.kill(target, signal.SIGTERM)
+            else:
+                try:
+                    os.killpg(os.getpgid(target), signal.SIGTERM)
+                except Exception:
+                    os.kill(target, signal.SIGTERM)
     except Exception:
         return not pid_alive(target)
     end = time.time() + (STOP_WAIT_SEC if wait is None else max(0.0, wait))
@@ -416,6 +429,60 @@ def stop(project, role, pid=None, wait=None):
             return True
         time.sleep(0.1)
     return not pid_alive(target)
+
+
+SHELLS = ("bash", "sh.exe", "zsh", "cmd.exe", "powershell", "pwsh")
+
+
+def child_pids(pid, names=SHELLS):
+    """Live processes whose parent is `pid` - by name prefix, lowercase.
+
+    The witness for a background job whose window was stopped without its
+    tree (8.31). Its record carries no pid of its own - the client hands
+    back only a task id - but the job runs in a shell the window started,
+    and on Windows a snapshot keeps naming a dead parent's pid as the
+    parent of what it left behind. Shells only: the window's MCP servers
+    are its children too, and they end themselves when their stdin does.
+
+    None when it cannot be established (not Windows, or the snapshot
+    failed): a record without this witness ends at BG_MAX_SEC, as before.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        import ctypes.wintypes as W
+
+        class PE(ctypes.Structure):
+            _fields_ = [("dwSize", W.DWORD), ("cntUsage", W.DWORD),
+                        ("th32ProcessID", W.DWORD),
+                        ("th32DefaultHeapID", ctypes.c_void_p),
+                        ("th32ModuleID", W.DWORD), ("cntThreads", W.DWORD),
+                        ("th32ParentProcessID", W.DWORD),
+                        ("pcPriClassBase", ctypes.c_long),
+                        ("dwFlags", W.DWORD),
+                        ("szExeFile", ctypes.c_char * 260)]
+        k = ctypes.windll.kernel32
+        k.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        h = k.CreateToolhelp32Snapshot(2, 0)
+        if not h or h == ctypes.c_void_p(-1).value:
+            return None
+        out = []
+        try:
+            e = PE()
+            e.dwSize = ctypes.sizeof(PE)
+            ok = k.Process32First(ctypes.c_void_p(h), ctypes.byref(e))
+            while ok:
+                name = e.szExeFile.decode("mbcs", "replace").lower()
+                if e.th32ParentProcessID == int(pid) and (
+                        not names or name.startswith(tuple(names))):
+                    out.append(int(e.th32ProcessID))
+                ok = k.Process32Next(ctypes.c_void_p(h), ctypes.byref(e))
+        finally:
+            k.CloseHandle(ctypes.c_void_p(h))
+        return out
+    except Exception:
+        return None
 
 
 def terminate_and_wait(pid, timeout=30.0):

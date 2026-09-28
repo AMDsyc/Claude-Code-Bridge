@@ -29,12 +29,102 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
+# PostToolUseFailure since 2026-09-23: a call that fails ends with that
+# event ONLY, never PostToolUse (measured on client 2.1.280), so without it
+# a failed tracked command stayed "running" in the bridge. -> DECISIONS.md
+# 8.24
 EVENTS = ["SessionStart", "SessionEnd", "Stop", "StopFailure",
-          "Notification", "PreCompact", "PreToolUse", "PostToolUse"]
+          "Notification", "PreCompact", "PreToolUse", "PostToolUse",
+          "PostToolUseFailure"]
+
+
+def save_json(path, data):
+    """The ONE way install writes a JSON file. Returns whether it wrote.
+
+    INSTALL MERGES, AND A MERGE THAT CHANGES NOTHING WRITES NOTHING. Every
+    writer here used to `json.dump` the whole file back, always: a working
+    `.mcp.json` lost its closing newline, a PYTHONPATH that differed from
+    ours only in capitalisation was spelled again, and on 2026-09-25 install
+    run on copies of three live projects changed 6 of their 14 files while
+    adding nothing. So the text on disk is read first, and if it already
+    parses to `data` the file is not opened for writing at all - byte for
+    byte what it was. When it is written: indent 2, the line ending and the
+    closing newline the old file had (a new file gets one), atomically.
+    `test_handover` case 109 holds the census: no `json.dump` into a file
+    outside this function. -> DECISIONS.md 8.30
+    """
+    old = None
+    try:
+        with open(path, "r", encoding="utf-8", newline="") as fh:
+            old = fh.read()
+    except OSError:
+        old = None
+    if old is not None:
+        try:
+            if json.loads(old) == data:
+                return False
+        except ValueError:
+            pass
+    text = json.dumps(data, ensure_ascii=False, indent=2)
+    if old is None or old.endswith("\n"):
+        text += "\n"
+    if old is not None and "\r\n" in old:
+        text = text.replace("\n", "\r\n")
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    tmp = path + ".bridge-tmp"
+    with open(tmp, "w", encoding="utf-8", newline="") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+    return True
+
+
+def same_root(value):
+    """Is this PYTHONPATH our package's folder, spelled any way Windows
+    allows? The comparison marks_missing already makes (8.10's normcase)."""
+    return os.path.normcase(value or "") == os.path.normcase(ROOT)
+
+
+def line_interp(command):
+    """The interpreter a status-line command names: the quoted first word,
+    or the bare one."""
+    c = (command or "").strip()
+    if c.startswith('"'):
+        return c[1:].split('"', 1)[0]
+    return c.split(None, 1)[0] if c else ""
+
+
+def status_line_ok(line):
+    """Is this the bridge's status line, and does it run here?
+
+    `py -m bridgecore.statusline` is a working line on this machine (py is
+    on PATH and imports the package) and it is the owner's spelling - the
+    same thing `already_there` says about a hook written with `py`. It is
+    kept. Only a line naming the old module, or an interpreter that is not
+    here or cannot import bridgecore, is the bridge's to rewrite.
+    """
+    command = (line or {}).get("command") if isinstance(line, dict) else ""
+    if "bridgecore.statusline" not in (command or ""):
+        return False
+    return interp_ok(line_interp(command))[0]
+
+
+def channel_entry_ok(entry):
+    """Is this `bridge` entry in .mcp.json ours, current and runnable?"""
+    if not isinstance(entry, dict):
+        return False
+    env = entry.get("env") or {}
+    return (list(entry.get("args") or []) == ["-m", "bridgecore.channel"]
+            and same_root(env.get("PYTHONPATH"))
+            and str(env.get("BRIDGE_PORT") or "")
+            == os.environ.get("BRIDGE_PORT", "8765")
+            and interp_ok(entry.get("command") or "")[0])
 
 
 def hook_entry(python, event=""):
@@ -61,16 +151,18 @@ def write_mcp_json(project, python):
             print("    the planner channel will not load until it is fixed")
             return False
     servers = data.setdefault("mcpServers", {})
-    servers["bridge"] = {
-        "command": python,
-        "args": ["-m", "bridgecore.channel"],
-        "env": {
-            "PYTHONPATH": ROOT,
-            "BRIDGE_PORT": os.environ.get("BRIDGE_PORT", "8765"),
-        },
-    }
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False, indent=2)
+    # A working entry is left exactly as it is - its interpreter spelled
+    # its own way, its PYTHONPATH in its own capitalisation (8.30).
+    if not channel_entry_ok(servers.get("bridge")):
+        servers["bridge"] = {
+            "command": python,
+            "args": ["-m", "bridgecore.channel"],
+            "env": {
+                "PYTHONPATH": ROOT,
+                "BRIDGE_PORT": os.environ.get("BRIDGE_PORT", "8765"),
+            },
+        }
+    save_json(path, data)
     return True
 
 
@@ -94,9 +186,7 @@ def _merge_approval(path, backup=False):
     if "bridge" not in names:
         names.append("bridge")
     data["enabledMcpjsonServers"] = names
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False, indent=2)
+    save_json(path, data)
     return True
 
 
@@ -123,9 +213,7 @@ def allow_verdict_tool(project):
         if name not in allow:
             allow.append(name)
     perms["allow"] = allow
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False, indent=2)
+    save_json(path, data)
     return True
 
 
@@ -158,9 +246,7 @@ def keep_autocompact_on(project):
     if data.get("autoCompactEnabled") is True:
         return False
     data["autoCompactEnabled"] = True
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False, indent=2)
+    save_json(path, data)
     return True
 
 
@@ -174,7 +260,14 @@ def approve_channel(project):
     the user-level file applies right away, trusted or not.
     """
     done = []
-    user = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+    # BRIDGE_CLAUDE_SETTINGS is a TEST SEAM, never a setting - the same
+    # arrangement BRIDGE_CLAUDE_JSON has: without it every suite that
+    # installs into a throwaway project reads, and on the day it lacks the
+    # approval WRITES, the user's own ~/.claude/settings.json. -> DECISIONS.md
+    # 8.35
+    user = (os.environ.get("BRIDGE_CLAUDE_SETTINGS")
+            or os.path.join(os.path.expanduser("~"), ".claude",
+                            "settings.json"))
     if _merge_approval(user, backup=True):
         done.append("user settings")
     local = os.path.join(project, ".claude", "settings.local.json")
@@ -247,10 +340,7 @@ def trust_folder(project, config=None):
         if not os.path.exists(bak):
             shutil.copyfile(path, bak)
         entry["hasTrustDialogAccepted"] = True
-        tmp = path + ".bridge-tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(cfg, fh, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)
+        save_json(path, cfg)                    # atomic, as it always was
         return key
     except (OSError, ValueError):
         return ""
@@ -401,8 +491,16 @@ def repair_hook_python(project, python):
     dead = [c for c in hook_commands(cfg) if not interp_ok(c)[0]]
     if not dead:
         return None, ""
+    # The FIRST backup is never written over: a second repair used to copy
+    # the once-repaired file onto it, and the settings as they were before
+    # the bridge touched them were gone. Later ones carry the time in their
+    # name. -> DECISIONS 8.46
+    bak = s_path + ".before-bridge-python"
+    if os.path.exists(bak):
+        bak = "%s.%s" % (bak, time.strftime("%Y%m%d-%H%M%S"))
     try:
-        shutil.copyfile(s_path, s_path + ".before-bridge-python")
+        if not os.path.exists(bak):
+            shutil.copyfile(s_path, bak)
     except Exception:
         pass
     n = 0
@@ -423,8 +521,7 @@ def repair_hook_python(project, python):
             n += 1
             break
     try:
-        with open(s_path, "w", encoding="utf-8") as fh:
-            json.dump(cfg, fh, indent=2, ensure_ascii=False)
+        save_json(s_path, cfg)
     except Exception:
         return None, ""
     return (dead[0], s_path) if n else (None, "")
@@ -609,7 +706,13 @@ def install(project, role=None, python=None, statusline=True):
 
     if statusline:
         existing = json.dumps(cfg.get("statusLine", ""))
-        if "statusLine" not in cfg or "bridge" in existing:
+        # Somebody else's line is theirs; OURS is rewritten only when it
+        # does not work here. `py -m bridgecore.statusline` works and was
+        # rewritten anyway, to an absolute path, on every install - found
+        # on a watched project 2026-09-25. -> DECISIONS.md 8.30
+        if "statusLine" not in cfg or ("bridge" in existing and
+                                       not status_line_ok(
+                                           cfg.get("statusLine"))):
             cfg["statusLine"] = {
                 "type": "command",
                 "command": '"%s" -m bridgecore.statusline' % python,
@@ -623,7 +726,9 @@ def install(project, role=None, python=None, statusline=True):
     # passed per window at launch instead - and an older install that put
     # it here gets it removed.
     env.pop("BRIDGE_ROLE", None)
-    env["PYTHONPATH"] = ROOT
+    # Ours, in any capitalisation Windows allows, stays as it is written.
+    if not same_root(env.get("PYTHONPATH")):
+        env["PYTHONPATH"] = ROOT
     # And keep the CURRENT DIRECTORY off sys.path.
     #
     # The hooks are spawned as `python -m bridgecore.hook`, and with -m Python
@@ -643,8 +748,7 @@ def install(project, role=None, python=None, statusline=True):
     # exactly today's behaviour rather than breaking anything.
     env["PYTHONSAFEPATH"] = "1"
 
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(cfg, fh, ensure_ascii=False, indent=2)
+    save_json(path, cfg)
 
     allow_verdict_tool(project)
     trusted = trust_folder(project)
@@ -745,8 +849,7 @@ def uninstall(project):
             else:
                 cfg.pop("enabledMcpjsonServers", None)
 
-            with open(path, "w", encoding="utf-8") as fh:
-                json.dump(cfg, fh, ensure_ascii=False, indent=2)
+            save_json(path, cfg)
 
     local = os.path.join(project, ".claude", "settings.local.json")
     if os.path.exists(local):
@@ -760,8 +863,7 @@ def uninstall(project):
             else:
                 data.pop("enabledMcpjsonServers", None)
             if data:
-                with open(local, "w", encoding="utf-8") as fh:
-                    json.dump(data, fh, ensure_ascii=False, indent=2)
+                save_json(local, data)
             else:
                 os.remove(local)
             removed.append("channel approval")
@@ -781,8 +883,7 @@ def uninstall(project):
             else:
                 data.pop("mcpServers", None)
             if data:
-                with open(mcp, "w", encoding="utf-8") as fh:
-                    json.dump(data, fh, ensure_ascii=False, indent=2)
+                save_json(mcp, data)
             else:
                 os.remove(mcp)
         except Exception:

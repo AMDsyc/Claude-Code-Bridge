@@ -32,12 +32,19 @@ import sys
 import tempfile
 import time
 
-TMP = tempfile.mkdtemp(prefix="bridge-test-")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# first: it reads nothing from the package, and the folder it makes
+# is the only one this run may remove (DECISIONS.md 8.43, 8.45)
+from bridgecore import owntemp                 # noqa: E402
+TMP = owntemp.make("bridge-test-")
 os.environ["BRIDGE_DATA"] = os.path.join(TMP, "data")
 # The client's own config is isolated too: install() marks a project trusted
 # there, and without this a suite would merge its throwaway temp projects into
 # the real ~/.claude.json on this machine.
 os.environ["BRIDGE_CLAUDE_JSON"] = os.path.join(TMP, ".claude.json")
+# and the user-level settings approve_channel merges into - never the
+# real one (DECISIONS.md 8.35)
+os.environ["BRIDGE_CLAUDE_SETTINGS"] = os.path.join(TMP, "user-settings.json")
 os.environ["PYTHONUTF8"] = "1"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -914,8 +921,11 @@ daemon.STATE["mode"] = "paused"
 check("a bridge-wide pause covers both",
       (daemon.paused_for(PATH), daemon.paused_for(PATH_B)), (True, True))
 lsrc = inspect.getsource(daemon.handle_status)
+# The flag became a record with its kind in piece 11-bis, so the
+# account's own limits can hold the bridge through the same pause and the
+# percentage lift can tell the five-hour one from theirs (DECISIONS 8.28).
 check("the limit sets the bridge-wide one, not a project's",
-      'STATE["paused_by_limit"] = True' in lsrc
+      'STATE["paused_by_limit"] = {"kind": "five_hour",' in lsrc
       and "pause_project" not in lsrc, True)
 print("   resume with nothing named is the everything-back-to-normal button")
 daemon.STATE["mode"] = "running"
@@ -1356,9 +1366,14 @@ check("running it again changes nothing", daemon.migrate_executor_mode(), [])
 print("   every launch path asks the same question, so a handover moves a")
 print("   live pair onto the new mode without restarting the daemon")
 dsrc46 = inspect.getsource(daemon)
+# Since 2026-09-23 the mode is asked into a variable first, and the SAME
+# value goes to note_launch's line and to sessions.launch - so the line
+# cannot name one mode while the window starts in another (DECISIONS.md
+# 8.25). The claim here is unchanged: the handover asks mode_for at launch.
+_ho46 = inspect.getsource(daemon.handover)
 check("the handover launches with it",
-      "permission_mode=mode_for(path, role)" in
-      inspect.getsource(daemon.handover), True)
+      "use_mode = mode_for(path, role)" in _ho46
+      and "permission_mode=use_mode" in _ho46, True)
 check("and so does the panel's button, which lands in handle_session",
       'body.get("mode") or' in inspect.getsource(daemon.handle_session), True)
 check("as do the restart and the silence-driven launch",
@@ -3193,9 +3208,11 @@ check("removing a chip counts as an edit too - it is a click, not an input",
       and "CHAINS[b.dataset.r].splice" in _panel, True)
 print("   the latch is per project. Carrying it across a switch would show -")
 print("   and launch - the previous project's models")
+# The same branch drops the unapplied drop-down picks too since 2026-09-23
+# (DECISIONS.md 8.25), so the latch is matched up to its own statement.
 check("renderLaunch drops the latch when the project changes",
-      "if(CUR!==window._launchProj){window._launchProj=CUR;"
-      "window._launchTouched=false}" in _panel, True)
+      bool(re.search(r"if\(CUR!==window\._launchProj\)\{window\._launchProj="
+                     r"CUR;window\._launchTouched=false[;}]", _panel)), True)
 check("and a switch re-renders even mid-edit, or the old chain would stay",
       "(!window._launchTouched||CUR!==window._launchProj)" in _panel, True)
 print("   once saved, the config agrees with the screen, so the panel may")
@@ -3453,9 +3470,10 @@ check("the five-hour limit is still sent, still without a pair",
       True)
 check("the context-percentage line is journalled, not notified",
       'store.journal("limit_low",' in _src, True)
+# By the tokens, not the wrapping: a re-wrap is not a change of claim.
 check("and the chain running out carries its pair",
-      'the chain. Waiting for the reset." % project,\n                       path=path)'
-      in _src, True)
+      bool(_re.search(r'left in the chain\. Waiting for the reset\."'
+                      r'\s*% project, path=path\)', _src)), True)
 print("   (C) the same fact twice is not twice the information. The window")
 print("   is measured: 1275 repeats of one (project, kind) in the journals,")
 print("   4% inside a minute, 37% inside five, median gap 555s")
@@ -3664,8 +3682,10 @@ print("   and it refuses on the right question. stop() answers False for")
 print("   'there was no pid to stop' as well, which is not a failure - it")
 print("   is nothing in the way. Conflating them blocked every handover the")
 print("   suite drives, where no real process exists at all")
+print("   - and since 8.46 it asks by the one definition, record_alive: the")
+print("   bare pid was answered by whatever process held the number next")
 check("the rotation asks whether a KNOWN process is still alive",
-      "_pid and sessions.pid_alive(_pid)" in _rot, True)
+      "_pid and record_alive(_rec)" in _rot, True)
 check("a handover that refuses still answers in its own shape, a dict",
       '"ok": False, "error":' in _hand, True)
 check("and returns before launching anything",
@@ -3685,12 +3705,22 @@ check("and returns before launching anything",
 # prevent. The refusal is kept (it still journals at warn and rings a
 # person) and the swap completes. -> DECISIONS.md 8.7
 _stop = inspect.getsource(daemon.stop_the_replaced)
-check("the handover's refusal moved with the stop, into stop_the_replaced",
-      'refuse_replacement(path, role, pid, "handover")' in _stop, True)
+# AND ONE MOVE FURTHER on 2026-09-26: the stop itself - background jobs,
+# the refusal - is stop_window now, because finishing an orphaned swap
+# stops the old window the same way and two copies of a stop is how they
+# come to differ. stop_the_replaced calls it before it retires anything.
+# find(), not index(): a missing name must fail this line, not kill the
+# suite below it. -> DECISIONS.md 8.36
+_sw = (inspect.getsource(daemon.stop_window)
+       if hasattr(daemon, "stop_window") else "")
+check("the handover's refusal moved with the stop, into stop_window, which "
+      "stop_the_replaced calls",
+      ('refuse_replacement(path, role, pid, "handover")' in _sw,
+       "stop_window(path, role, pid)" in _stop), (True, True))
 check("and it still asks the process, not the request",
-      "sessions.pid_alive(pid)" in _stop, True)
+      "sessions.pid_alive(pid)" in _sw, True)
 check("but it is no longer an abort - the swap finishes after it",
-      _stop.index("refuse_replacement") < _stop.index("retire_sessions"),
+      -1 < _stop.find("stop_window(") < _stop.find("retire_sessions"),
       True)
 check("and handover() stops nothing itself any more",
       "sessions.stop(" in _hand, False)
@@ -4727,6 +4757,11 @@ _reald90, daemon.deliver = daemon.deliver, \
 
 try:
     print("   a genuinely slow command is still reported, exactly as before")
+    # ITS SESSION IS ONE THE BRIDGE KNOWS, as every live one is: the
+    # PreToolUse that makes a record also puts its session in the books.
+    # Since 8.35 a record of a session no book knows is closed as gone by
+    # the very sweep this calls, and this fixture had wiped the books.
+    daemon.remember_session(PATH, "executor", "s")
     daemon.PROCTRACK[_k90] = {"godot": {
         "cmd": "godot --headless --export", "session": "s",
         "started": time.time() - 1000}}
@@ -5800,14 +5835,99 @@ else:
     # one sentence and ran the taskkill fallback for nothing. Every check
     # above passed through that, because the stop DID happen - so the
     # reason it gives is pinned too, or the same contradiction comes back
-    # silently.
+    # silently. It came back once anyway, from a race rather than a missing
+    # line, on a loaded machine (2026-09-26) - the held run below is the
+    # gate for that one. "taskkill" at all, not one wording of it.
     check("and the reason names the console close, not the fallback",
           ("closed console window" in _why103,
-           "taskkill instead" in _why103), (True, False))
+           "taskkill" in _why103), (True, False))
     check("nor did it sit out the polite wait", _took103 < 15, True)
     check("the stub is gone", _rl103.process_alive(_pid103), False)
     check("and so is the cmd.exe that owned the window (rule 9)",
           _rl103.process_alive(_proc103.pid), False)
+
+    def _handler_ran103(mark):
+        for _ in range(40):
+            if os.path.exists(mark):
+                break
+            time.sleep(0.25)
+        if not os.path.exists(mark):
+            return ""
+        with open(mark) as _fh:
+            return _fh.read()
+
+    print("   THE RACE, FORCED (2026-09-26). Every process attached to a")
+    print("   console is ended by the close event when its window closes,")
+    print("   and the helper posted the close while still attached. On a")
+    print("   loaded machine the event won: the planner's check read 'no")
+    print("   answer from the helper; taskkill instead' of a close that had")
+    print("   worked. Load is not a fixture, so the REAL helper is held one")
+    print("   second after its post - then only the order of its lines")
+    print("   decides whether it lives to answer.")
+    _src103 = _rl103._CLOSE_CONSOLE_SRC
+    _anchor103 = "    raise SystemExit(5)\n"
+    check("the post has its one failure exit to hold the helper after",
+          _src103.count(_anchor103), 1)
+    _port103h = _freeport103()
+    _mark103h = os.path.join(_d103, "closed-held.txt")
+    _proc103h = _launch103(_mark103h, _port103h)
+    _pid103h = _rl103.pid_on_port(_port103h)
+    _rl103._CLOSE_CONSOLE_SRC = _src103.replace(
+        _anchor103, _anchor103 + "import time\ntime.sleep(1.0)\n")
+    try:
+        _okh103, _whyh103 = (_rl103.close_console(_pid103h) if _pid103h
+                             else (None, "the stub never came up"))
+    finally:
+        _rl103._CLOSE_CONSOLE_SRC = _src103
+    print("   held after the post, the helper said: %s" % _whyh103)
+    check("the helper outlives the close it asked for, and says so",
+          (_okh103, "closed console window" in _whyh103), (True, True))
+    check("and the close it reports is real - the stub's handler ran",
+          _handler_ran103(_mark103h), "handler ran on event 2")
+
+    print("   and a close that does NOT confirm itself is reported as")
+    print("   exactly that. The helper here is the old order, held: it posts")
+    print("   while attached and is ended by its own close - the planner's")
+    print("   run, made certain. stop_daemon used to call that 'no console")
+    print("   window ...; taskkill instead', and both halves were false.")
+    _OLD103 = (
+        "import ctypes, sys, time\n"
+        "pid = int(sys.argv[1])\n"
+        "k = ctypes.WinDLL('kernel32', use_last_error=True)\n"
+        "u = ctypes.WinDLL('user32', use_last_error=True)\n"
+        "k.GetConsoleWindow.restype = ctypes.c_void_p\n"
+        "u.PostMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint,\n"
+        "                           ctypes.c_void_p, ctypes.c_void_p]\n"
+        "k.FreeConsole()\n"
+        "k.AttachConsole(pid)\n"
+        "u.PostMessageW(ctypes.c_void_p(k.GetConsoleWindow()), 0x0010,\n"
+        "               None, None)\n"
+        "time.sleep(5)\n"
+        "print('closed console window of pid %d' % pid)\n")
+    _port103o = _freeport103()
+    _mark103o = os.path.join(_d103, "closed-old.txt")
+    _proc103o = _launch103(_mark103o, _port103o)
+    _pid103o = _rl103.pid_on_port(_port103o)
+    _rl103._CLOSE_CONSOLE_SRC = _OLD103
+    try:
+        _oko103, _whyo103 = (_rl103.stop_daemon(_port103o, timeout=20)
+                             if _pid103o else (None, "the stub never came up"))
+    finally:
+        _rl103._CLOSE_CONSOLE_SRC = _src103
+    print("   stop_daemon said: %s" % _whyo103)
+    check("the stop is reported - it happened",
+          _oko103, True)
+    check("the close really landed - the stub's handler ran",
+          _handler_ran103(_mark103o), "handler ran on event 2")
+    check("the answer carries the helper's exit code, the close event's own",
+          "exit code 0xC000013A" in _whyo103, True)
+    check("it says the close did not confirm itself",
+          "did not confirm itself" in _whyo103, True)
+    check("it claims no missing window and no taskkill stop",
+          ("no console window" in _whyo103, "taskkill instead" in _whyo103),
+          (False, False))
+    check("and says taskkill was not what stopped it",
+          "so it was not what stopped it" in _whyo103, True)
 
     print("   close_console refuses what it cannot reach, rather than")
     print("   reporting a stop that did not happen")
@@ -5815,13 +5935,14 @@ else:
     check("a pid that is gone gets a refusal, not a success", _okx103, False)
     check("and the refusal says which pid", str(_pid103) in _whyx103, True)
 
-    for _leftover in (_proc103.pid, _pid103):
+    _all103 = [x for x in (_proc103.pid, _pid103, _proc103h.pid, _pid103h,
+                           _proc103o.pid, _pid103o) if x]
+    for _leftover in _all103:
         if _rl103.process_alive(_leftover):
             subprocess.run(["taskkill", "/PID", str(_leftover), "/F"],
                            capture_output=True, text=True, errors="replace")
     check("nothing from this case is left running",
-          [x for x in (_proc103.pid, _pid103) if _rl103.process_alive(x)],
-          [])
+          [x for x in _all103 if _rl103.process_alive(x)], [])
 
 print("\n103b. the restart asks the daemon before it stops it")
 print("     2026-09-02: the pair may restart the bridge itself now, and the")
@@ -6504,7 +6625,1275 @@ finally:
     _srv107.shutdown()
     _srv107.server_close()
 
+print("\n108. the journal keeps every line when threads write at once - the")
+print("     central day file and the project's own mirror")
+print("    2026-09-23: case 12 of test_multipair lost a quiet pair's line")
+print("    outright - no row had landed while the window was read, the row")
+print("    was simply not in the file. store.journal appended with")
+print("    open(p, 'a') and no lock, and on Windows an append is 'seek to")
+print("    the end, then write': two threads that reach the same end write")
+print("    over each other. Measured through store.journal itself, 8 threads")
+print("    x 1 000 lines lost 269 to 330 lines in EACH of the two files, run")
+print("    after run. The live journal is written by every thread the daemon")
+print("    has, and it is the witness half the rules in CLAUDE.md read.")
+print("    -> DECISIONS.md 8.27")
+import ast as _ast108                                      # noqa: E402
+import threading as _th108                                 # noqa: E402
+import json as _json108                                   # noqa: E402
+_proj108 = os.path.join(TMP, "journal-threads")
+os.makedirs(_proj108, exist_ok=True)
+_T108, _N108 = 8, 1000
+_tag108 = "j108-%d" % int(time.time())
+_days108 = {store.day_dir()}
+
+
+def _w108(t):
+    for i in range(_N108):
+        store.journal("probe", "%s %d %d" % (_tag108, t, i),
+                      "journal-threads", "executor", "log",
+                      project_dir=_proj108)
+
+
+_ths108 = [_th108.Thread(target=_w108, args=(t,)) for t in range(_T108)]
+for _t in _ths108:
+    _t.start()
+for _t in _ths108:
+    _t.join()
+_days108.add(store.day_dir())      # a run across midnight writes two days
+
+
+def _count108(paths):
+    """(lines of this run that read back whole, lines that did not)."""
+    good = bad = 0
+    for path in paths:
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    row = _json108.loads(line)
+                except Exception:
+                    bad += 1           # two lines written over each other
+                    continue
+                if _tag108 in (row.get("text") or ""):
+                    good += 1
+    return good, bad
+
+
+_c108 = _count108([os.path.join(d, "events.jsonl") for d in _days108])
+_mirror108 = store.project_log_dir(_proj108) or os.path.join(
+    _proj108, "bridge-logs", "none")
+_m108 = _count108([os.path.join(os.path.dirname(_mirror108),
+                                os.path.basename(d), "events.jsonl")
+                   for d in _days108])
+_all108 = _T108 * _N108
+print("   written: %d threads x %d lines = %d" % (_T108, _N108, _all108))
+print("   central day file: kept %d, LOST %d, unreadable %d"
+      % (_c108[0], _all108 - _c108[0], _c108[1]))
+print("   the project's mirror: kept %d, LOST %d, unreadable %d"
+      % (_m108[0], _all108 - _m108[0], _m108[1]))
+check("the central journal keeps every line eight threads wrote at once",
+      _c108, (_all108, 0))
+check("and so does the project's own mirror in its bridge-logs",
+      _m108, (_all108, 0))
+
+print("   census: the store appends in ONE place, and that place holds a")
+print("   lock of the journal's own - not _lock, the state's")
+_src108 = read_or_fail(store.__file__, "store.py")
+try:
+    _tree108 = _ast108.parse(_src108)
+except SyntaxError:
+    _tree108 = _ast108.parse("")
+_par108 = {}
+for _n in _ast108.walk(_tree108):
+    for _ch in _ast108.iter_child_nodes(_n):
+        _par108[_ch] = _n
+
+
+def _is_open108(c):
+    f = c.func
+    if isinstance(f, _ast108.Name):
+        return f.id == "open"
+    return (isinstance(f, _ast108.Attribute) and f.attr == "open"
+            and getattr(f.value, "id", "") in ("io", "codecs"))
+
+
+def _appends_at108(c):
+    """An open() that appends - or whose mode cannot be read, which is
+    counted too: a mode in a variable is how a bypass would hide."""
+    if not (isinstance(c, _ast108.Call) and _is_open108(c)):
+        return False
+    mode = c.args[1] if len(c.args) > 1 else next(
+        (k.value for k in c.keywords if k.arg == "mode"), None)
+    if mode is None:
+        return False
+    if isinstance(mode, _ast108.Constant) and isinstance(mode.value, str):
+        return mode.value.startswith("a")
+    return True
+
+
+def _owner108(node):
+    p = _par108.get(node)
+    while p is not None and not isinstance(p, _ast108.FunctionDef):
+        p = _par108.get(p)
+    return p.name if p is not None else "<module>"
+
+
+def _under_lock108(node):
+    p = _par108.get(node)
+    while p is not None and not isinstance(p, _ast108.FunctionDef):
+        if isinstance(p, _ast108.With) and any(
+                getattr(i.context_expr, "id", "") == "_JOURNAL_LOCK"
+                for i in p.items):
+            return True
+        p = _par108.get(p)
+    return False
+
+
+_opens108 = [(_owner108(c), c.lineno, _under_lock108(c))
+             for c in _ast108.walk(_tree108) if _appends_at108(c)]
+_fns108 = {n.name: n for n in _ast108.walk(_tree108)
+           if isinstance(n, _ast108.FunctionDef)}
+_WRITERS108 = ("journal", "dialogue", "index_append", "merge_day")
+
+
+def _calls108(name, callee):
+    fn = _fns108.get(name)
+    return fn is not None and any(
+        isinstance(c, _ast108.Call) and getattr(c.func, "id", "") == callee
+        for c in _ast108.walk(fn))
+
+
+print("   every appending open() in store.py: %s" % (_opens108,))
+_ap108 = [o for o in _opens108 if o[0] == "_append"]
+check("store has one place that appends, _append, and every append in it "
+      "is inside 'with _JOURNAL_LOCK'",
+      (bool(_ap108), all(o[2] for o in _ap108)), (True, True))
+_jl108 = getattr(store, "_JOURNAL_LOCK", None)
+check("_JOURNAL_LOCK is a lock of the journal's own - not store._lock, "
+      "not daemon._lock",
+      (_jl108 is not None and hasattr(_jl108, "acquire"),
+       _jl108 is not getattr(store, "_lock", None),
+       _jl108 is not getattr(daemon, "_lock", None)), (True, True, True))
+for _name108 in _WRITERS108:
+    check("%s appends only through _append" % _name108,
+          ([o[1] for o in _opens108 if o[0] == _name108],
+           _calls108(_name108, "_append")), ([], True))
+check("and nothing else in store.py opens a file to append",
+      [o[:2] for o in _opens108
+       if o[0] not in ("_append",) + _WRITERS108], [])
+
+
+print("\n109. install merges: a file it has nothing to change in keeps every")
+print("     byte, and a mark that works is left as it is written")
+print("    2026-09-25: install run on copies of three live projects added")
+print("    nothing and changed 6 of their 14 files - every .mcp.json and")
+print("    settings.json spelled PYTHONPATH again in another capitalisation, one")
+print("    lost its closing newline, and a watched project's working status")
+print("    line 'py -m bridgecore.statusline' became an absolute path. Here:")
+print("    the same shapes, synthetic, and install run twice over them.")
+print("    -> DECISIONS.md 8.30")
+import ast as _ast109                                      # noqa: E402
+import inspect                                             # noqa: E402,F811
+import json as _json                                       # noqa: E402,F811
+import hashlib as _hl109                                   # noqa: E402
+import shutil as _sh109                                    # noqa: E402
+from bridgecore import install as _in109                   # noqa: E402
+
+_home109 = os.path.join(TMP, "home109")
+os.makedirs(os.path.join(_home109, ".claude"), exist_ok=True)
+_cj109 = os.path.join(TMP, "claude109.json")
+_env109 = {k: os.environ.get(k) for k in ("USERPROFILE", "HOME",
+                                          "BRIDGE_CLAUDE_JSON")}
+os.environ["USERPROFILE"] = os.environ["HOME"] = _home109
+os.environ["BRIDGE_CLAUDE_JSON"] = _cj109
+_SK109 = []
+
+
+def _sha109(p):
+    return (_hl109.sha256(open(p, "rb").read()).hexdigest()
+            if os.path.exists(p) else None)
+
+
+def _put109(p, data, tail="", crlf=False, indent=2):
+    """`tail` is written in LF; `crlf` turns every line ending, the tail's
+    too, into CRLF."""
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    t = _json.dumps(data, ensure_ascii=False, indent=indent) + tail
+    if crlf:
+        t = t.replace("\n", "\r\n")
+    with open(p, "w", encoding="utf-8", newline="") as fh:
+        fh.write(t)
+
+
+def _files109(proj):
+    return [os.path.join(proj, ".claude", "settings.json"),
+            os.path.join(proj, ".claude", "settings.local.json"),
+            os.path.join(proj, ".mcp.json"),
+            os.path.join(proj, ".gitignore"),
+            os.path.join(_home109, ".claude", "settings.json"), _cj109]
+
+
+try:
+    # A working spelling of the interpreter that is NOT sys.executable -
+    # the way a person writes it. `py` here; elsewhere the bare name, if the
+    # PATH has it; otherwise the status-line check cannot be set up.
+    _bare109 = next((n for n in ("py", os.path.basename(sys.executable))
+                     if _sh109.which(n)), None)
+    _root109 = (_in109.ROOT.upper() if os.name == "nt" else _in109.ROOT)
+
+    print("   (a) a project in the shapes found live: install once to lay the")
+    print("   marks, then written back the way a person or the client leaves")
+    print("   them, then install again")
+    _p109 = os.path.join(TMP, "merge109")
+    os.makedirs(_p109, exist_ok=True)
+    _put109(_cj109, {"projects": {}})
+    _put109(os.path.join(_home109, ".claude", "settings.json"),
+            {"theme": "dark", "enabledMcpjsonServers": ["bridge"]}, "\n")
+    _in109.install(_p109, python=sys.executable)
+    _s109 = os.path.join(_p109, ".claude", "settings.json")
+    _cfg109 = _json.load(open(_s109, encoding="utf-8"))
+    _cfg109["env"]["PYTHONPATH"] = _root109
+    if _bare109:
+        _cfg109["statusLine"]["command"] = ("%s -m bridgecore.statusline"
+                                           % _bare109)
+    else:
+        _SK109.append("(a) status line")
+    _put109(_s109, _cfg109)                                   # no newline
+    _l109 = os.path.join(_p109, ".claude", "settings.local.json")
+    _put109(_l109, {"permissions": {"allow": ["Bash(npm test:*)",
+                                              "WebFetch(domain:example.org)"]},
+                    "enabledMcpjsonServers": ["theirs", "bridge"]},
+            "\n", crlf=True, indent=4)             # by hand: CRLF, indent 4
+    _m109 = os.path.join(_p109, ".mcp.json")
+    _mcp109 = _json.load(open(_m109, encoding="utf-8"))
+    _mcp109["mcpServers"]["bridge"]["env"]["PYTHONPATH"] = _root109
+    _mcp109["mcpServers"] = {"theirs": {"command": "node",
+                                        "args": ["server.js"]},
+                             "bridge": _mcp109["mcpServers"]["bridge"]}
+    _put109(_m109, _mcp109, "\n")                             # newline
+    # Every file dated in the past, so a write that puts the same bytes
+    # back is still seen: "not opened for writing at all" is the claim.
+    for _f in _files109(_p109):
+        if os.path.exists(_f):
+            os.utime(_f, (1000000000, 1000000000))
+    _before109 = {p: _sha109(p) for p in _files109(_p109)}
+    _in109.install(_p109, python=sys.executable)
+    for _f in _files109(_p109):
+        check("(a) %s/%s keeps every byte"
+              % (os.path.basename(os.path.dirname(_f)),
+                 os.path.basename(_f)),
+              _sha109(_f) == _before109[_f], True)
+    check("(a) and none of them was even opened for writing",
+          [os.path.basename(_f) for _f in _files109(_p109)
+           if os.path.exists(_f)
+           and int(os.path.getmtime(_f)) != 1000000000], [])
+    _after109 = _json.load(open(_s109, encoding="utf-8"))
+    if _bare109:
+        check("(a) the working status line is still the one written by hand",
+              _after109.get("statusLine", {}).get("command"),
+              "%s -m bridgecore.statusline" % _bare109)
+    if os.name == "nt":
+        check("(a) settings.json keeps PYTHONPATH in its own capitalisation",
+              (_after109.get("env") or {}).get("PYTHONPATH"), _root109)
+        check("(a) .mcp.json keeps the channel entry as it was written",
+              ((_json.load(open(_m109, encoding="utf-8")).get("mcpServers")
+                or {}).get("bridge") or {}).get("env", {}).get("PYTHONPATH"),
+              _root109)
+    else:
+        _SK109.append("(a) capitalisation - Windows only")
+    check("(a) and nothing is missing - the marks read whole",
+          _in109.marks_missing(_p109), [])
+
+    print("   (b) CONTROL: a file that DOES need a change keeps its line ending")
+    print("   and its closing newline, and loses nothing that is not ours")
+    _put109(_l109, {"permissions": {"allow": ["Bash(npm test:*)"]},
+                    "enabledMcpjsonServers": ["theirs"]}, "\n", crlf=True)
+    _in109.install(_p109, python=sys.executable)
+    _raw109 = open(_l109, "rb").read()
+    check("(b) the approval was added and theirs kept",
+          (_json.loads(_raw109.decode("utf-8")).get("enabledMcpjsonServers"),
+           _json.loads(_raw109.decode("utf-8"))["permissions"]["allow"]),
+          (["theirs", "bridge"], ["Bash(npm test:*)"]))
+    check("(b) every line still ends CRLF",
+          (b"\r\n" in _raw109, b"\n" in _raw109.replace(b"\r\n", b"")),
+          (True, False))
+    check("(b) and the closing newline is still there",
+          _raw109.endswith(b"\n"), True)
+
+    print("   (c) CONTROL: a status line whose interpreter is not here, and")
+    print("   hooks naming one, are ours to repair - as 8.10 says")
+    _cfg109 = _json.load(open(_s109, encoding="utf-8"))
+    _gone109 = os.path.join(TMP, "no-such-dir", "python.exe")
+    _cfg109["statusLine"]["command"] = ('"%s" -m bridgecore.statusline'
+                                        % _gone109)
+    for _g in _cfg109["hooks"]["Stop"]:
+        for _h in _g["hooks"]:
+            if _h.get("args") == ["-m", "bridgecore.hook"]:
+                _h["command"] = _gone109
+    _put109(_s109, _cfg109)
+    _in109.install(_p109, python=sys.executable)
+    _cfg109 = _json.load(open(_s109, encoding="utf-8"))
+    check("(c) the dead status line and the dead hook point at a live "
+          "interpreter now",
+          (_gone109 in _cfg109["statusLine"]["command"],
+           any(_h.get("command") == _gone109 for _g in _cfg109["hooks"]["Stop"]
+               for _h in _g["hooks"])), (False, False))
+
+    print("   (d) CONTROL: a project with no marks gets them, and a new file")
+    print("   ends with a newline")
+    _q109 = os.path.join(TMP, "bare109")
+    os.makedirs(_q109, exist_ok=True)
+    _in109.install(_q109, python=sys.executable)
+    check("(d) the bare project is whole after one install",
+          _in109.marks_missing(_q109), [])
+    check("(d) and the files install created end with a newline",
+          [os.path.basename(p) for p in (
+              os.path.join(_q109, ".claude", "settings.json"),
+              os.path.join(_q109, ".claude", "settings.local.json"),
+              os.path.join(_q109, ".mcp.json"))
+           if not open(p, "rb").read().endswith(b"\n")], [])
+
+    print("   (e) the census: install.py puts JSON into a file in ONE place")
+    _tree109 = _ast109.parse(inspect.getsource(_in109))
+    _dumps109 = []
+    for _fn in _ast109.walk(_tree109):
+        if isinstance(_fn, _ast109.FunctionDef):
+            for _n in _ast109.walk(_fn):
+                if isinstance(_n, _ast109.Call) \
+                        and getattr(_n.func, "attr", "") == "dump" \
+                        and _fn.name != "save_json":
+                    _dumps109.append("%s:%d" % (_fn.name, _n.lineno))
+    check("(e) no json.dump into a file outside save_json", _dumps109, [])
+    print("  ..   checks not asked in this run: %d%s" % (
+        len(_SK109), (" - " + ", ".join(_SK109)) if _SK109 else ""))
+finally:
+    for _k, _v in _env109.items():
+        if _v is None:
+            os.environ.pop(_k, None)
+        else:
+            os.environ[_k] = _v
+
+
+print("\n110. what the planner is told it may run is what it may run: edits,")
+print("     Bash and PowerShell are denied, Monitor measures, only check accepts")
+print("    2026-09-23, the owner: Monitor stays allowed, and the canon is to say")
+print("    so. Eight places told the planner it 'cannot run anything' while")
+print("    disallow_for never denied Monitor - a false sentence repeated in")
+print("    every delivery, which no check here could see. The Russian half of")
+print("    the negative lives in test_cases, as case 6's words do.")
+print("    -> DECISIONS.md 8.32")
+import ast as _ast110                                      # noqa: E402
+import inspect as _in110                                   # noqa: E402
+import io as _io110                                        # noqa: E402
+from bridgecore import channel as _ch110                   # noqa: E402
+
+_den110 = list(daemon.disallow_for(PATH, "planner") or [])
+check("the fact every sentence below rests on: Monitor is not denied to the "
+      "planner, and Bash and the edit tools are",
+      ("Monitor" in _den110, all(t in _den110 for t in ("Bash", "Edit"))),
+      (False, True))
+_root110 = os.path.dirname(os.path.dirname(os.path.abspath(daemon.__file__)))
+
+
+def _paras110(name):
+    p = os.path.join(_root110, name)
+    t = _io110.open(p, encoding="utf-8").read() if os.path.isfile(p) else ""
+    return [b for b in t.replace("\r\n", "\n").split("\n\n") if "Bash" in b]
+
+
+for _name110 in ("HONESTY.md", "HONESTY.en.md"):
+    if (_name110 == "HONESTY.en.md"
+            and not os.path.isfile(os.path.join(_root110, _name110))
+            and not os.path.isfile(os.path.join(_root110, "make_public.py"))):
+        # The public tree: its HONESTY.md IS the English canon, checked on
+        # the pass above, and the twin exists only in the repository. This
+        # was the public suite's one new FAIL since 2026-09-13, found by
+        # running it in a copy of the built tree (DECISIONS 8.46). Where
+        # make_public.py stands, a missing twin still fails below.
+        print("   HONESTY.en.md is not beside this suite, and neither is")
+        print("   make_public.py - the public tree: not counted")
+        continue
+    _b110 = _paras110(_name110)
+    check("%s: both places that tell the planner what is denied are found"
+          % _name110, len(_b110) >= 2, True)
+    check("%s: each of them names Monitor as what measures" % _name110,
+          [b.strip()[:60] for b in _b110 if "Monitor" not in b], [])
+
+_lits110 = []
+for _mod110 in (daemon, _ch110):
+    for _n in _ast110.walk(_ast110.parse(_in110.getsource(_mod110))):
+        if isinstance(_n, _ast110.Constant) and isinstance(_n.value, str) \
+                and "I verified" in _n.value:
+            _lits110.append((_mod110.__name__, _n.value))
+check("the four code texts that explain why check exists are found - the "
+      "instructions, the tool, the gate's refusal, the seed",
+      len(_lits110) >= 4, True)
+check("and each says Monitor is what the planner's window runs",
+      [(m, v[:60]) for m, v in _lits110 if "Monitor" not in v], [])
+_old110 = ("cannot run anything", "can run nothing", "run anything yourself")
+_en110 = os.path.join(_root110, "HONESTY.en.md")
+# THE STRINGS AS THE PLANNER GETS THEM, not the source text: a sentence
+# split over two literals ("You cannot run " / "anything in ...") is one
+# string to the reader and two to a text search - the sabotage that put
+# the old refusal back was invisible to this check until it read constants.
+
+
+def _consts110(mod):
+    return chr(10).join(n.value for n in _ast110.walk(
+        _ast110.parse(_in110.getsource(mod)))
+        if isinstance(n, _ast110.Constant) and isinstance(n.value, str))
+
+
+_srcs110 = [("daemon.py", _consts110(daemon)),
+            ("channel.py", _consts110(_ch110)),
+            ("HONESTY.en.md", _io110.open(_en110, encoding="utf-8").read()
+             if os.path.isfile(_en110) else "")]
+check("and nothing in them still says the planner cannot run anything",
+      [(f, w) for f, t in _srcs110 for w in _old110 if w in t], [])
+
+
+print("\n111. no suite reads or writes the user's own ~/.claude/settings.json:")
+print("     approve_channel merges into BRIDGE_CLAUDE_SETTINGS where it is set")
+print("    Every install in a suite ran approve_channel, and approve_channel")
+print("    merged the channel approval into the user-level settings file of")
+print("    the machine running the suite - read every time, and written on")
+print("    the day it lacked the approval. BRIDGE_CLAUDE_JSON already moved")
+print("    the client's .claude.json; this is the same seam for the other")
+print("    file. -> DECISIONS.md 8.35")
+import glob as _gl111                                      # noqa: E402
+import hashlib as _hl111                                   # noqa: E402
+import json as _json                                       # noqa: E402,F811
+from bridgecore import install as _in111                   # noqa: E402
+
+_root111 = os.path.dirname(os.path.dirname(os.path.abspath(daemon.__file__)))
+print("   (a) the census: a suite that moves the client's .claude.json moves")
+print("   the user's settings.json too, before it imports the package")
+_bad111 = []
+for _f111 in sorted(_gl111.glob(os.path.join(_root111, "test_*.py"))):
+    _t111 = open(_f111, encoding="utf-8").read()
+    if 'os.environ["BRIDGE_CLAUDE_JSON"]' not in _t111:
+        continue
+    _i111 = _t111.find('os.environ["BRIDGE_CLAUDE_SETTINGS"]')
+    # owntemp is the one import allowed before it: it makes the folder the
+    # environment is then pointed into, and reads nothing (checked below)
+    _t111x = _t111.replace("\nfrom bridgecore import owntemp", "\n#owntemp")
+    _imp111 = min([i for i in (_t111x.find("\nfrom bridgecore"),
+                               _t111x.find("\nimport bridgecore"))
+                   if i >= 0] or [len(_t111x)])
+    if _i111 < 0 or _i111 > _imp111:
+        _bad111.append(os.path.basename(_f111))
+check("(a) every such suite sets BRIDGE_CLAUDE_SETTINGS before importing "
+      "bridgecore", _bad111, [])
+import ast as _ast111                                      # noqa: E402
+_ot111 = _ast111.parse(read_or_fail(os.path.join(
+    _root111, "bridgecore", "owntemp.py"), "owntemp.py") or "pass")
+check("(a) owntemp, imported first, reads nothing from the package or the "
+      "environment",
+      ([n.module for n in _ast111.walk(_ot111)
+        if isinstance(n, _ast111.ImportFrom)],
+       "environ" in _ast111.dump(_ot111)), ([], False))
+check("(a) and the census saw the suites it is about",
+      len([f for f in _gl111.glob(os.path.join(_root111, "test_*.py"))
+           if 'os.environ["BRIDGE_CLAUDE_JSON"]' in open(
+               f, encoding="utf-8").read()]) >= 7, True)
+
+print("   (b) with the seam set, the user's file keeps every byte and is not")
+print("   even opened for writing; the seam's file takes the approval")
+_home111 = os.path.join(TMP, "home111")
+os.makedirs(os.path.join(_home111, ".claude"), exist_ok=True)
+_user111 = os.path.join(_home111, ".claude", "settings.json")
+with open(_user111, "w", encoding="utf-8") as _f:
+    _f.write('{"theme": "dark"}\n')           # no approval: the old code writes
+os.utime(_user111, (1000000000, 1000000000))
+_sha111 = _hl111.sha256(open(_user111, "rb").read()).hexdigest()
+_env111 = {k: os.environ.get(k) for k in ("USERPROFILE", "HOME",
+                                          "BRIDGE_CLAUDE_SETTINGS")}
+_seam111 = os.path.join(TMP, "seam111-settings.json")
+_p111 = os.path.join(TMP, "seam111-project")
+os.makedirs(_p111, exist_ok=True)
+try:
+    os.environ["USERPROFILE"] = os.environ["HOME"] = _home111
+    os.environ["BRIDGE_CLAUDE_SETTINGS"] = _seam111
+    _in111.approve_channel(_p111)
+    check("(b) the user's file keeps its bytes and its date",
+          (_hl111.sha256(open(_user111, "rb").read()).hexdigest() == _sha111,
+           int(os.path.getmtime(_user111))), (True, 1000000000))
+    # guarded: on the red run the seam's file is never written, and a
+    # raise here would take the summary with it
+    _sj111 = (_json.load(open(_seam111, encoding="utf-8"))
+              if os.path.isfile(_seam111) else {})
+    check("(b) and the seam's file has the approval",
+          "bridge" in (_sj111.get("enabledMcpjsonServers") or []), True)
+    print("   (c) CONTROL: without the seam the same call writes the user's")
+    print("   file - the check above can fail")
+    os.environ.pop("BRIDGE_CLAUDE_SETTINGS", None)
+    _in111.approve_channel(_p111)
+    check("(c) without the seam the user's file is written",
+          "bridge" in (_json.load(open(_user111, encoding="utf-8"))
+                       .get("enabledMcpjsonServers") or []), True)
+finally:
+    for _k, _v in _env111.items():
+        if _v is None:
+            os.environ.pop(_k, None)
+        else:
+            os.environ[_k] = _v
+
+
+print("\n112. a check's command writes straight into its own file: a timeout")
+print("     keeps what came out, and what the command left running holds")
+print("     nothing the check waits on")
+print("     2026-09-26 23:14:49: the planner's check got 'timed out after")
+print("     1200s' for multipair and not one line more - run() raised with")
+print("     the output inside the exception, and it was dropped - and got it")
+print("     429 s past the limit, because a stub the suite had left behind")
+print("     held the pipe the output was read from. -> DECISIONS.md 8.40")
+from bridgecore import sessions                            # noqa: E402,F811
+_d112 = os.path.join(TMP, "run-one")
+os.makedirs(_d112, exist_ok=True)
+# The command, in the real order: it prints (unflushed, as a suite does),
+# starts a process that holds its stdout for 25 s, then waits argv[2]
+# seconds - past the limit for (a), not at all for (b).
+_CMD112 = (
+    "import subprocess, sys, time\n"
+    "print('line one before the hang')\n"
+    "print('line two before the hang')\n"
+    "h = subprocess.Popen([sys.executable, '-c',\n"
+    "                      'import time; time.sleep(25)'],\n"
+    "                     stdout=sys.stdout, stderr=sys.stderr)\n"
+    "open(sys.argv[1], 'w').write(str(h.pid))\n"
+    "print('the holder is up')\n"
+    "time.sleep(float(sys.argv[2]))\n"
+    "print('the command ends')\n")
+# _check_env copies this process's environment, so a runner that exports
+# PYTHONUNBUFFERED itself would make the check below unable to fail.
+_unbuf112 = os.environ.pop("PYTHONUNBUFFERED", None)
+_env112 = daemon._check_env(_d112)
+_limit112 = daemon.CHECK_TIMEOUT
+_holders112 = []
+
+
+def _holder112(pidfile):
+    try:
+        with open(pidfile) as _fh:
+            return int(_fh.read())
+    except (OSError, ValueError):
+        return None
+
+
+try:
+    # The limit is the module's, as run_check uses it - not a parameter
+    # a caller has to remember to pass.
+    daemon.CHECK_TIMEOUT = 4
+    print("   (a) the command hangs past the limit, its holder still up")
+    _pf112 = os.path.join(_d112, "holder-a.pid")
+    _out112 = os.path.join(_d112, "hang.txt")
+    _t112 = time.time()
+    _code112, _tail112 = daemon._run_one(
+        [sys.executable, "-c", _CMD112, _pf112, "60"], _d112, _env112,
+        _out112)
+    _took112 = time.time() - _t112
+    _h112 = _holder112(_pf112)
+    _holders112.append(_h112)
+    print("   returned %.1fs after the start: exit %s, tail %r"
+          % (_took112, _code112, _tail112))
+    check("(a) the timeout is reported as one", _code112, 124)
+    check("(a) and it came back while the holder was still running - it did "
+          "not wait out what the command left behind",
+          bool(_h112) and sessions.pid_alive(_h112), True)
+    _txt112 = read_or_fail(_out112, "the command's own file")
+    check("(a) what the command printed before the limit is in its file",
+          ("line one before the hang" in _txt112,
+           "the holder is up" in _txt112), (True, True))
+    check("(a) and the file says the timeout and the exit, last",
+          _txt112.rstrip().splitlines()[-2:] if _txt112 else [],
+          ["timed out after 4s", "EXIT=124"])
+    check("(a) the answer carries the tail AND the timeout, not the timeout "
+          "alone", _tail112, ["line one before the hang",
+                              "line two before the hang", "the holder is up",
+                              "timed out after 4s"])
+
+    print("   (b) the command ends at once and leaves its holder running -")
+    print("   the shape of case 122's stub: the suite passed, and the row")
+    print("   waited for the stub")
+    _pf112b = os.path.join(_d112, "holder-b.pid")
+    _out112b = os.path.join(_d112, "done.txt")
+    _code112b, _tail112b = daemon._run_one(
+        [sys.executable, "-c", _CMD112, _pf112b, "0"], _d112, _env112,
+        _out112b)
+    _h112b = _holder112(_pf112b)
+    _holders112.append(_h112b)
+    check("(b) the command's own exit code", _code112b, 0)
+    check("(b) returned while the holder was still running",
+          bool(_h112b) and sessions.pid_alive(_h112b), True)
+    check("(b) and the answer is the command's own tail",
+          _tail112b, ["line two before the hang", "the holder is up",
+                      "the command ends"])
+finally:
+    daemon.CHECK_TIMEOUT = _limit112
+    if _unbuf112 is not None:
+        os.environ["PYTHONUNBUFFERED"] = _unbuf112
+    for _h in _holders112:
+        if _h:
+            sessions.terminate_and_wait(_h)
+check("nothing from this case is left running",
+      [h for h in _holders112 if h and sessions.pid_alive(h)], [])
+
+
+print("\n113. a temp folder is removed only by the process that made it, by the")
+print("     exact path it was given - when the run passes; when it fails it")
+print("     stays, and the run says where. Nothing sweeps.")
+print("     2026-09-28: 4 041 folders of ours in the temp folder, 2.2 GB. A")
+print("     sweep of 'our prefixes, older than a day' was tried, and a")
+print("     sabotage that took its prefix check out deleted every folder in")
+print("     the temp folder older than a day for five minutes - every Claude")
+print("     Code session's scratchpad among them. The answer is not a second")
+print("     lock on a sweep: there is none. -> DECISIONS.md 8.43, 8.45")
+import ast as _ast113                                      # noqa: E402
+import stat as _stat113                                    # noqa: E402
+from bridgecore import owntemp as _ot113                   # noqa: E402
+_d113 = os.path.join(TMP, "temp113")
+os.makedirs(_d113, exist_ok=True)
+
+
+def _ro113(folder):
+    """A folder in the shape git leaves: a read-only file two levels down."""
+    sub = os.path.join(folder, ".git", "objects")
+    os.makedirs(sub, exist_ok=True)
+    f = os.path.join(sub, "0f26")
+    with open(f, "w") as _fh:
+        _fh.write("x" * 1000)
+    os.chmod(f, _stat113.S_IREAD)
+    return f
+
+
+# (a) the life of a suite's folder, seen from OUTSIDE: a child makes it the
+# way a suite does, says where, waits for the word, and ends as a suite ends
+_KID113 = (
+    "import os, sys, time\n"
+    "sys.path.insert(0, sys.argv[3])\n"
+    "from bridgecore import owntemp\n"
+    "t = owntemp.make('bridge-test-', dir=sys.argv[1])\n"
+    "os.makedirs(os.path.join(t, '.git', 'objects'))\n"
+    "f = os.path.join(t, '.git', 'objects', 'ab')\n"
+    "open(f, 'w').write('x')\n"
+    "os.chmod(f, 0o444)\n"
+    "open(os.path.join(sys.argv[1], 'where.txt'), 'w').write(t)\n"
+    "while not os.path.exists(os.path.join(sys.argv[1], 'go.txt')):\n"
+    "    time.sleep(0.1)\n"
+    "owntemp.finish(t, sys.argv[2] == 'fail')\n")
+
+
+def _life113(how):
+    base = os.path.join(_d113, how)
+    os.makedirs(base, exist_ok=True)
+    kid = subprocess.Popen([sys.executable, "-c", _KID113, base, how,
+                            os.path.dirname(os.path.abspath(__file__))],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           text=True)
+    where = os.path.join(base, "where.txt")
+    for _ in range(200):
+        if os.path.exists(where):
+            break
+        time.sleep(0.1)
+    t = open(where).read() if os.path.exists(where) else ""
+    during = bool(t) and os.path.isdir(t)
+    open(os.path.join(base, "go.txt"), "w").write("go")
+    out, _ = kid.communicate(timeout=60)
+    return t, during, os.path.isdir(t) if t else None, out or ""
+
+
+_t113, _dur113, _aft113, _o113 = _life113("pass")
+check("(a) a passing run: its folder is there while it runs", _dur113, True)
+check("(a) and gone after, read-only file and all", _aft113, False)
+_t113f, _dur113f, _aft113f, _o113f = _life113("fail")
+check("(a) a failing run: its folder is still there after",
+      (_dur113f, _aft113f), (True, True))
+check("(a) and the run says where it is", bool(_t113f) and _t113f in _o113f,
+      True)
+
+print("   (b) a folder THIS process did not make is refused - even one with")
+print("   our prefix, even one another run of ours left")
+_theirs113 = tempfile.mkdtemp(prefix="bridge-test-", dir=_d113)
+_ro113(_theirs113)
+_r113 = _ot113.remove(_theirs113)
+check("(b) refused, and the refusal names the path",
+      (_r113[0], _theirs113 in _r113[1]), (False, True))
+check("(b) and the folder is untouched, read-only file included",
+      os.path.isfile(os.path.join(_theirs113, ".git", "objects", "0f26")),
+      True)
+check("(b) the failing child's folder too - made by another process",
+      (_ot113.remove(_t113f)[0] if _t113f else None,
+       os.path.isdir(_t113f) if _t113f else None), (False, True))
+_mine113 = _ot113.make("bridge-test-", dir=_d113)
+_ro113(_mine113)
+check("(b) a folder this process made goes, read-only file and all",
+      (_ot113.remove(_mine113), os.path.isdir(_mine113)), ((True, ""), False))
+check("(b) and asking again is refused - it is off the list",
+      _ot113.remove(_mine113)[0], False)
+
+print("   (c) CONTROL: rmtree with ignore_errors leaves a read-only file's")
+print("   folder - the reason owntemp clears the bit")
+_c113 = _ot113.make("bridge-test-", dir=_d113)
+_ro113(_c113)
+import shutil as _sh113                                    # noqa: E402
+_sh113.rmtree(_c113, ignore_errors=True)
+check("(c) rmtree(ignore_errors=True) leaves it", os.path.isdir(_c113),
+      os.name == "nt")
+check("(c) owntemp.remove does not", _ot113.remove(_c113)[0], True)
+
+print("   (d) nothing sweeps: no function of that name, no call to one; every")
+print("   suite makes its folder through owntemp and ends through it;")
+print("   run_check removes only its copy; and rmtree in the package stands")
+print("   only where the census of 8.45 says it may")
+_here113 = os.path.dirname(os.path.abspath(__file__))
+_SUITES113 = ("test_handover.py", "test_archive.py", "test_search.py",
+              "test_wall_handover.py", "test_multipair.py", "test_cases.py",
+              "test_wake_sim.py", "test_recovery_sim.py")
+_trees113 = {}
+for _name in _SUITES113 + tuple(
+        os.path.join("bridgecore", _m) for _m in sorted(
+            os.listdir(os.path.join(_here113, "bridgecore")))
+        if _m.endswith(".py")):
+    _trees113[_name] = _ast113.parse(
+        read_or_fail(os.path.join(_here113, _name), _name) or "pass")
+
+
+def _calls113(tree):
+    out = []
+    for _n in _ast113.walk(tree):
+        if isinstance(_n, _ast113.Call):
+            f = _n.func
+            out.append((f.attr if isinstance(f, _ast113.Attribute)
+                        else getattr(f, "id", ""),
+                        getattr(getattr(f, "value", None), "id", ""),
+                        tuple(k.arg for k in _n.keywords), _n))
+    return out
+
+
+_sweeps113 = sorted(
+    "%s:%s" % (name, getattr(n, "lineno", "?"))
+    for name, tree in _trees113.items() for n in _ast113.walk(tree)
+    if (isinstance(n, _ast113.FunctionDef) and "sweep" in n.name.lower()
+        and "temp" in n.name.lower())
+    or (isinstance(n, _ast113.Call) and "sweep_old_temp" in _ast113.dump(
+        n.func)))
+check("(d) no temp sweep is defined or called, anywhere", _sweeps113, [])
+# test_cases.py is private (make_public.NEVER), so the public tree runs this
+# suite without it - measured on a copy of the built tree, 2026-09-28, where
+# its absence was this check's one FAIL. A suite that is not here is excused
+# only where make_public.py is not either; in the repository and in the
+# check's copy all eight must be here and pass (case 84's idiom, 8.46)
+_repo113 = os.path.isfile(os.path.join(_here113, "make_public.py"))
+_bad113 = []
+for _name in _SUITES113:
+    if not _repo113 and not os.path.isfile(os.path.join(_here113, _name)):
+        print("   %s is not beside this suite, and neither is "
+              "make_public.py - not counted" % _name)
+        continue
+    _cs = [(a, b) for a, b, _k, _n in _calls113(_trees113[_name])]
+    if ("make", "owntemp") not in _cs or ("finish", "owntemp") not in _cs:
+        _bad113.append(_name)
+check("(d) every suite here makes and finishes through owntemp - all eight "
+      "in the repository", _bad113, [])
+_rc113 = _calls113(_ast113.parse(inspect.getsource(daemon.run_check)))
+check("(d) run_check: owntemp.make, owntemp.remove, and no rmtree",
+      (any(a == "make" and b == "owntemp" for a, b, _k, _n in _rc113),
+       any(a == "remove" and b == "owntemp" for a, b, _k, _n in _rc113),
+       any(a == "rmtree" for a, b, _k, _n in _rc113)), (True, True, False))
+# the census of 8.45: where rmtree may stand in the package, and why each
+# cannot reach a folder that is not the bridge's own. store.archive_old
+# and relayout.restore left the list in 8.46: both remove through
+# remove_tree now, which clears read-only and says when it stops
+_ALLOWED113 = {("bridgecore/owntemp.py", "remove"),
+               ("bridgecore/relayout.py", "remove_tree")}
+_rm113 = set()
+for _name, _tree in _trees113.items():
+    if not _name.startswith("bridgecore"):
+        continue
+    for _fn in _ast113.walk(_tree):
+        if isinstance(_fn, _ast113.FunctionDef):
+            for a, b, _k, _n in _calls113(_fn):
+                if a == "rmtree":
+                    _rm113.add((_name.replace(os.sep, "/"), _fn.name))
+check("(d) rmtree in the package only where the census allows",
+      sorted(_rm113 - _ALLOWED113), [])
+
+
+print("\n114. what the census of 8.45 named doubtful: every removal reaches only")
+print("     what its own code wrote")
+print("     (1) make_public emptied its target - everything but .git - before")
+print("     building; (2) archive_old took any folder in bridge-logs but today's;")
+print("     (3) relayout.restore removed with ignore_errors, in silence; (4) a")
+print("     second hook repair wrote over the first backup. -> DECISIONS.md 8.46")
+import json as _js114                                      # noqa: E402
+import stat as _st114                                      # noqa: E402
+import zipfile as _zf114                                   # noqa: E402
+from bridgecore import install as _in114                   # noqa: E402
+from bridgecore import relayout as _rl114                  # noqa: E402
+_d114 = os.path.join(TMP, "case114")
+os.makedirs(_d114, exist_ok=True)
+_here114 = os.path.dirname(os.path.abspath(__file__))
+
+
+def _mp114(target):
+    r = subprocess.run([sys.executable,
+                        os.path.join(_here114, "make_public.py"), target],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace")
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+def _told114(what, rc, out, ok):
+    """The build's own words when it did not do what the check expects.
+    A bare "got 1" names nothing: the planner's check of 2026-09-28
+    03:33:31 had six of those and no way to tell why (DECISIONS 8.46)."""
+    if not ok:
+        print("   %s: make_public exited %s and said:" % (what, rc))
+        for _l in (out or "").strip().splitlines()[-12:]:
+            print("      | " + _l)
+
+
+def _files114(target):
+    out = []
+    for dp, dn, fn in os.walk(target):
+        dn[:] = [d for d in dn if d != ".git"]
+        out += [os.path.relpath(os.path.join(dp, f), target).replace(
+            os.sep, "/") for f in fn]
+    return sorted(out)
+
+
+# make_public.py and its sources in public/ are the REPOSITORY's: neither
+# is in the package, and the public tree ships this suite without them. So
+# part (1) runs where the tool is - and where the tool is and its sources
+# are not, that is said by name, not left to a bare exit code: the
+# planner's check copied the tree without public/ and got six "got 1"
+# (DECISIONS 8.46). Same idiom as case 84's English canon.
+_mp_here114 = os.path.isfile(os.path.join(_here114, "make_public.py"))
+_pub_here114 = [_n for _n in ("README.public.md", "ABOUT.public.md",
+                              "Makefile.public", "gitignore.public")
+                if not os.path.isfile(os.path.join(_here114, "public", _n))]
+check("(1) make_public.py is here, so are its sources in public/",
+      _pub_here114 if _mp_here114 else [], [])
+if not _mp_here114:
+    print("   (1) not counted: no make_public.py beside this suite - an")
+    print("   unpacked package or the public tree, which build nothing")
+else:
+    print("   (1a) a target that does not exist: built, and the witness names")
+    print("   every file written")
+    _t114a = os.path.join(_d114, "pub-new")
+    _rc114, _o114 = _mp114(_t114a)
+    _told114("(1a)", _rc114, _o114, _rc114 == 0)
+    _w114 = {}
+    try:
+        with open(os.path.join(_t114a, ".make_public.json"), encoding="utf-8") \
+                as _fh:
+            _w114 = _js114.load(_fh)
+    except (OSError, ValueError):
+        pass
+    check("(1a) built", _rc114, 0)
+    check("(1a) the witness is make_public's and lists exactly what is there",
+          (_w114.get("tool"), sorted(_w114.get("files") or [])),
+          ("make_public.py", [f for f in _files114(_t114a)
+                              if f != ".make_public.json"]))
+    print("   and the gate that scans the built tree does not refuse the witness")
+    print("   the build itself wrote - it did, the first time one was written.")
+    print("   Asked of check_public's own answer over this tree; anything else it")
+    print("   finds is acceptance command 11's business, not this check's")
+    _cp114 = subprocess.run([sys.executable,
+                             os.path.join(_here114, "check_public.py"), _t114a],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace")
+    _cpo114 = (_cp114.stdout or "") + (_cp114.stderr or "")
+    check("(1a) check_public ran over the built tree, and read the witness "
+          "as a file of the build",
+          ("files read:" in _cpo114,
+           os.path.isfile(os.path.join(_t114a, ".make_public.json")),
+           ".make_public.json" in _cpo114), (True, True, False))
+    print("   (1b) a rebuild: a file somebody else put there stays, and is named")
+    _foreign114 = os.path.join(_t114a, "somebody-elses-notes.txt")
+    os.makedirs(_t114a, exist_ok=True)    # (1a) may have failed: say, not crash
+    with open(_foreign114, "w") as _fh:
+        _fh.write("not the build's")
+    os.makedirs(os.path.join(_t114a, ".git"), exist_ok=True)
+    with open(os.path.join(_t114a, ".git", "HEAD"), "w") as _fh:
+        _fh.write("ref: refs/heads/main")
+    _rc114b, _o114b = _mp114(_t114a)
+    _told114("(1b)", _rc114b, _o114b, _rc114b == 0
+             and "somebody-elses-notes.txt" in _o114b)
+    check("(1b) built", _rc114b, 0)
+    check("(1b) the foreign file is untouched, and .git too",
+          (os.path.isfile(_foreign114),
+           os.path.isfile(os.path.join(_t114a, ".git", "HEAD"))), (True, True))
+    check("(1b) and the build names it",
+          "somebody-elses-notes.txt" in _o114b and "left untouched" in _o114b,
+          True)
+    print("   (1c) the first run into an existing repository: every file there is")
+    print("   one the build writes - no witness yet, and it is built")
+    _t114c = os.path.join(_d114, "pub-first")
+    os.makedirs(_t114c, exist_ok=True)
+    for _f in (_w114.get("files") or [])[:5]:
+        _p = os.path.join(_t114c, *_f.split("/"))
+        os.makedirs(os.path.dirname(_p), exist_ok=True)
+        with open(_p, "w") as _fh:
+            _fh.write("old")
+    _rc114c, _o114c = _mp114(_t114c)
+    _told114("(1c)", _rc114c, _o114c, _rc114c == 0)
+    check("(1c) built over files that are all its own, without a witness",
+          (_rc114c, os.path.isfile(os.path.join(_t114c, ".make_public.json"))),
+          (0, True))
+    print("   (1d) a folder with a file the build does not write, and no witness:")
+    print("   refused, the file named, and NOTHING touched")
+    _t114d = os.path.join(_d114, "pub-refuse")
+    os.makedirs(_t114d, exist_ok=True)
+    for _f in ((_w114.get("files") or [])[:3] + ["my-own-work.txt"]):
+        _p = os.path.join(_t114d, *_f.split("/"))
+        os.makedirs(os.path.dirname(_p), exist_ok=True)
+        with open(_p, "w") as _fh:
+            _fh.write("keep")
+    _before114d = _files114(_t114d)
+    _rc114d, _o114d = _mp114(_t114d)
+    _told114("(1d)", _rc114d, _o114d, _rc114d != 0
+             and "my-own-work.txt" in _o114d)
+    check("(1d) refused, naming the file", (_rc114d != 0,
+                                            "my-own-work.txt" in _o114d),
+          (True, True))
+    def _kept114(f):
+        # a build that removed it must fail this line, not kill the suite
+        p = os.path.join(_t114d, *f.split("/"))
+        return os.path.isfile(p) and open(p).read() == "keep"
+
+
+    check("(1d) and every file is still there, as it was",
+          (_files114(_t114d), all(_kept114(_f) for _f in _before114d)),
+          (_before114d, True))
+
+print("   (2) archive_old: only the day folders the bridge writes")
+_p114 = os.path.join(_d114, "proj-archive")
+_bl114 = os.path.join(_p114, "bridge-logs")
+_old114 = time.time() - 30 * 86400
+for _n in ("2026-01-01", "extracts", "notes"):
+    os.makedirs(os.path.join(_bl114, _n), exist_ok=True)
+    with open(os.path.join(_bl114, _n, "x.txt"), "w") as _fh:
+        _fh.write(_n)
+    os.utime(os.path.join(_bl114, _n), (_old114, _old114))
+_packed114 = store.archive_old(_p114, days=7)
+check("(2) the old day folder is packed and removed",
+      (_packed114, os.path.isdir(os.path.join(_bl114, "2026-01-01")),
+       os.path.isfile(os.path.join(_bl114, "2026-01-01.zip"))),
+      (1, False, True))
+check("(2) extracts/ and a folder of any other name are not touched",
+      (os.path.isdir(os.path.join(_bl114, "extracts")),
+       os.path.isdir(os.path.join(_bl114, "notes"))), (True, True))
+
+print("   (3) relayout.restore: read-only files go, and a failure is said")
+_b114 = os.path.join(_d114, "relayout-base")
+_zip114 = os.path.join(_d114, "backup114.zip")
+with _zf114.ZipFile(_zip114, "w") as _z:
+    _z.writestr("bridge/from-backup.txt", "restored")
+
+
+def _tree114():
+    os.makedirs(os.path.join(_b114, "bridge", ".git", "objects"),
+                exist_ok=True)
+    f = os.path.join(_b114, "bridge", ".git", "objects", "stale")
+    with open(f, "w") as _fh:
+        _fh.write("x")
+    os.chmod(f, _st114.S_IREAD)
+    return f
+
+
+_stale114 = _tree114()
+_said114 = []
+_ok114 = _rl114.restore(_b114, _zip114, out=_said114.append)
+check("(3) restored cleanly - the read-only file is gone, the backup is in",
+      (_ok114, os.path.exists(_stale114),
+       os.path.isfile(os.path.join(_b114, "bridge", "from-backup.txt"))),
+      (True, False, True))
+print("   a file held open cannot be removed: the failure is a line and a")
+print("   False, not silence")
+_held114 = os.path.join(_b114, "bridge", "held.txt")
+with open(_held114, "w") as _fh:
+    _fh.write("held")
+_said114b = []
+_rt114 = _rl114.remove_tree
+# the real removal, fewer retries: the failure is the fact, not its patience
+_rl114.remove_tree = lambda p, out=None, tries=8, wait=2.0: _rt114(
+    p, out=out, tries=2, wait=0.2)
+try:
+    with open(_held114) as _hold:
+        _ok114b = _rl114.restore(_b114, _zip114, out=_said114b.append)
+finally:
+    _rl114.remove_tree = _rt114
+if os.name == "nt":
+    check("(3) with a file held open: restore answers False",
+          _ok114b, False)
+    check("(3) and says so", any("could NOT be removed whole" in _s
+                                 for _s in _said114b), True)
+else:
+    print("   not Windows: an open file does not stop removal - not counted")
+
+print("   (4) a second repair of the hook interpreter keeps the first backup")
+_p114r = os.path.join(_d114, "proj-repair")
+os.makedirs(os.path.join(_p114r, ".claude"), exist_ok=True)
+_s114 = os.path.join(_p114r, ".claude", "settings.json")
+
+
+def _dead114(which):
+    cfg = {"hooks": {"Stop": [{"hooks": [{
+        "type": "command", "command": which,
+        "args": ["-m", "bridgecore.hook"]}]}]}}
+    with open(_s114, "w", encoding="utf-8") as _fh:
+        _js114.dump(cfg, _fh)
+    return open(_s114, encoding="utf-8").read()
+
+
+_first114 = _dead114(os.path.join(_d114, "gone-a", "python.exe"))
+_in114.repair_hook_python(_p114r, sys.executable)
+_second114 = _dead114(os.path.join(_d114, "gone-b", "python.exe"))
+_in114.repair_hook_python(_p114r, sys.executable)
+_baks114 = sorted(_f for _f in os.listdir(os.path.join(_p114r, ".claude"))
+                  if _f.startswith("settings.json.before-bridge-python"))
+check("(4) the first backup still holds the settings as the bridge first "
+      "found them",
+      open(_s114 + ".before-bridge-python", encoding="utf-8").read()
+      if os.path.isfile(_s114 + ".before-bridge-python") else None,
+      _first114)
+check("(4) and the second repair's backup has a name of its own",
+      (len(_baks114), any(open(os.path.join(_p114r, ".claude", _f),
+                               encoding="utf-8").read() == _second114
+                          for _f in _baks114[1:])), (2, True))
+
+
+print("\n115. archive_old: a day folder that could not be removed whole lost the")
+print("     files it DID remove, a week later. The first pass zipped the day and")
+print("     rmtree'd the folder under a bare except; a read-only or held file")
+print("     stopped it half way, in silence. When the half folder aged again the")
+print("     second pass rewrote <day>.zip, mode \"w\", from what was left.")
+print("     Two passes in the real order: nothing may be in neither place, the")
+print("     first archive is never written again, and a folder goes only after")
+print("     its archive reads back whole. -> DECISIONS.md 8.46")
+import hashlib as _hl115                                   # noqa: E402
+import json as _js115                                      # noqa: E402
+import stat as _st115                                      # noqa: E402
+import zipfile as _zf115                                   # noqa: E402
+_d115 = os.path.join(TMP, "case115")
+_p115 = os.path.join(_d115, "proj")
+_bl115 = os.path.join(_p115, "bridge-logs")
+_day115 = os.path.join(_bl115, "2026-01-01")
+os.makedirs(_day115, exist_ok=True)
+for _n in ("a.txt", "b.txt", "zz-held.txt", "z-readonly.txt"):
+    with open(os.path.join(_day115, _n), "w") as _fh:
+        _fh.write(_n * 50)
+os.chmod(os.path.join(_day115, "z-readonly.txt"), _st115.S_IREAD)
+_old115 = time.time() - 30 * 86400
+os.utime(_day115, (_old115, _old115))
+
+
+def _names115(zp):
+    try:
+        with _zf115.ZipFile(zp) as _z:
+            return set(_z.namelist())
+    except (OSError, _zf115.BadZipFile):
+        return set()
+
+
+def _sha115(p):
+    try:
+        with open(p, "rb") as _fh:
+            return _hl115.sha256(_fh.read()).hexdigest()
+    except OSError:
+        return None
+
+
+def _lines115():
+    p = os.path.join(_bl115, time.strftime("%Y-%m-%d"), "events.jsonl")
+    try:
+        with open(p, encoding="utf-8") as _fh:
+            return [_js115.loads(_l).get("text", "") for _l in _fh
+                    if _l.strip()]
+    except (OSError, ValueError):
+        return []
+
+
+_zip1_115 = os.path.join(_bl115, "2026-01-01.zip")
+_zip2_115 = os.path.join(_bl115, "2026-01-01.2.zip")
+_all115 = {"2026-01-01/" + _n for _n in ("a.txt", "b.txt", "zz-held.txt",
+                                          "z-readonly.txt")}
+if os.name == "nt":
+    print("   pass 1: zz-held.txt is held open, so the folder cannot go")
+    print("   whole. Named to sort LAST: rmtree goes in name order and stops")
+    print("   at the held file, so only a read-only file BEFORE it tests the")
+    print("   clearing")
+    with open(os.path.join(_day115, "zz-held.txt")) as _hold115:
+        _pk115a = store.archive_old(_p115, days=7)
+    _left115 = sorted(os.listdir(_day115)) if os.path.isdir(_day115) else []
+    check("(a) pass 1: archived whole, the read-only file removed, only the "
+          "held file left, and not counted as packed",
+          (_pk115a, _names115(_zip1_115) == _all115, _left115),
+          (0, True, ["zz-held.txt"]))
+    check("(a) and it is said, not swallowed",
+          any("could NOT be removed whole" in _t and "2026-01-01" in _t
+              for _t in _lines115()), True)
+    _sha1_115 = _sha115(_zip1_115)
+    print("   a week later: the half folder is old again, the file is free")
+    os.utime(_day115, (_old115, _old115))
+    _pk115b = store.archive_old(_p115, days=7)
+    check("(b) pass 2: the folder is gone and counted",
+          (_pk115b, os.path.isdir(_day115)), (1, False))
+    check("(b) the first archive was never written again",
+          _sha115(_zip1_115) == _sha1_115 and _sha1_115 is not None, True)
+    check("(b) and every file of the day is in an archive of the day",
+          _names115(_zip1_115) | _names115(_zip2_115), _all115)
+else:
+    print("   not Windows: an open file does not stop removal - (a), (b) not "
+          "counted")
+
+print("   (c) an archive that falls short is not trusted: the folder stays,")
+print("   the short archive - this call's own - is removed, and it is said")
+_day115c = os.path.join(_bl115, "2026-01-02")
+os.makedirs(_day115c, exist_ok=True)
+for _n in ("c.txt", "d.txt"):
+    with open(os.path.join(_day115c, _n), "w") as _fh:
+        _fh.write(_n * 50)
+os.utime(_day115c, (_old115, _old115))
+_zw115 = _zf115.ZipFile.write
+
+
+def _lossy115(self, filename, arcname=None, *a, **k):
+    # a writer that loses a file without saying so
+    if str(filename).endswith("d.txt"):
+        return None
+    return _zw115(self, filename, arcname, *a, **k)
+
+
+_zf115.ZipFile.write = _lossy115
+try:
+    _pk115c = store.archive_old(_p115, days=7)
+finally:
+    _zf115.ZipFile.write = _zw115
+check("(c) nothing packed, both files still in the folder, no short archive "
+      "left",
+      (_pk115c, sorted(os.listdir(_day115c)) if os.path.isdir(_day115c)
+       else [], os.path.exists(os.path.join(_bl115, "2026-01-02.zip"))),
+      (0, ["c.txt", "d.txt"], False))
+check("(c) and it is said, naming the missing file",
+      any("NOT archived" in _t and "d.txt" in _t for _t in _lines115()),
+      True)
+
+
+print("\n116. check_public refuses a folder it read nothing in")
+print("     Over a folder that did not exist it printed 'files read: 0', 'no")
+print("     personal data found', and exited 0 - a gate green over nothing,")
+print("     which a build that failed would pass straight through. Found when")
+print("     case 114's check of the witness stayed green over a tree that was")
+print("     never built. -> DECISIONS.md 8.46")
+_here116 = os.path.dirname(os.path.abspath(__file__))
+_cp116 = os.path.join(_here116, "check_public.py")
+
+
+def _scan116(folder):
+    _r = subprocess.run([sys.executable, _cp116, folder],
+                        capture_output=True, text=True, encoding="utf-8",
+                        errors="replace")
+    return _r.returncode, (_r.stdout or "") + (_r.stderr or "")
+
+
+if not os.path.isfile(_cp116):
+    print("   not counted: no check_public.py beside this suite - an unpacked")
+    print("   package, which ships no scanner")
+else:
+    _d116 = os.path.join(TMP, "case116")
+    os.makedirs(os.path.join(_d116, "empty"), exist_ok=True)
+    os.makedirs(os.path.join(_d116, "one-file"), exist_ok=True)
+    with open(os.path.join(_d116, "one-file", "notes.md"), "w",
+              encoding="utf-8") as _fh:
+        _fh.write("# notes\n\nnothing personal in here\n")
+    _rc116a, _o116a = _scan116(os.path.join(_d116, "there-is-no-such-folder"))
+    check("a folder that does not exist: refused, and it says it read 0 files",
+          (_rc116a != 0, "read 0 files" in _o116a,
+           "no such folder" in _o116a), (True, True, True))
+    _rc116b, _o116b = _scan116(os.path.join(_d116, "empty"))
+    check("an empty folder: refused the same way",
+          (_rc116b != 0, "read 0 files" in _o116b,
+           "holds no file" in _o116b), (True, True, True))
+    print("   CONTROL (rule 19): a folder with one clean file passes - so the")
+    print("   refusals above are about reading nothing, not a scanner that")
+    print("   refuses everything")
+    _rc116c, _o116c = _scan116(os.path.join(_d116, "one-file"))
+    check("one clean file: passed, one file read",
+          (_rc116c, "files read: 1" in _o116c, "read 0 files" in _o116c),
+          (0, True, False))
+
+
+print("\n117. check_public refuses the first eight hex of a real session id")
+print("     A whole session id was always refused; its first eight characters,")
+print("     written into a comment or a test print, are an ordinary hex word")
+print("     to a pattern - and real ones reached the published tree four")
+print("     times. The scan now asks the machine which sessions exist: the")
+print("     names of the transcripts in the client's projects folder, read at")
+print("     every run. Here that folder is one of this case's own, holding one")
+print("     transcript with an invented id. -> DECISIONS.md 8.48")
+_here117 = os.path.dirname(os.path.abspath(__file__))
+_cp117 = os.path.join(_here117, "check_public.py")
+if not os.path.isfile(_cp117):
+    print("   not counted: no check_public.py beside this suite - an unpacked")
+    print("   package, which ships no scanner")
+else:
+    _d117 = os.path.join(TMP, "case117")
+    _cfg117 = os.path.join(_d117, "client")
+    os.makedirs(os.path.join(_cfg117, "projects", "some-project"),
+                exist_ok=True)
+    # invented: a real prefix is the very thing this case keeps out
+    # (assembled, so this file holds no whole id either - that would
+    # be the other rule's refusal, over the published tree)
+    _sid117 = "-".join(("c0ffee42", "7e57", "4abc", "8def",
+                        "0123456789ab"))
+    with open(os.path.join(_cfg117, "projects", "some-project",
+                           _sid117 + ".jsonl"), "w") as _fh:
+        _fh.write("{}\n")
+
+    def _scan117(folder):
+        _r = subprocess.run([sys.executable, _cp117, folder],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace",
+                            env=dict(os.environ, CLAUDE_CONFIG_DIR=_cfg117))
+        return _r.returncode, (_r.stdout or "") + (_r.stderr or "")
+
+    for _n, _text in (("leak", "# the turn was in window 1234, session "
+                                "c0ffee42, and it ended there\n"),
+                      ("clean", "# a stand-in: session_XXXXXXXX, a hash "
+                                "deadbeef, and c0ffee4 or c0ffee421 - none "
+                                "is a session's first eight\n")):
+        os.makedirs(os.path.join(_d117, _n), exist_ok=True)
+        with open(os.path.join(_d117, _n, "notes.md"), "w",
+                  encoding="utf-8") as _fh:
+            _fh.write(_text)
+    _rc117a, _o117a = _scan117(os.path.join(_d117, "leak"))
+    # "session id prefix - N" is a FINDING's category line; the kind's bare
+    # name is also in the summary of what was checked for, on every run -
+    # the first form of this case matched that and called a clean pass a
+    # refusal
+    check("a real session's first eight hex: refused, the kind and the id "
+          "named",
+          (_rc117a != 0, "session id prefix - " in _o117a,
+           "c0ffee42" in _o117a), (True, True, True))
+    check("and the scan says how many sessions it knew",
+          "sessions known on this machine, by their transcripts: 1"
+          in _o117a, True)
+    print("   CONTROL (rule 19): a placeholder, an unrelated hex word, and hex")
+    print("   runs of seven and nine characters pass - so the refusal above")
+    print("   is the session, not a scanner that refuses every hex word")
+    _rc117b, _o117b = _scan117(os.path.join(_d117, "clean"))
+    check("the look-alikes pass",
+          (_rc117b, "session id prefix - " in _o117b,
+           "files read: 1" in _o117b), (0, False, True))
+
+
 print("\n" + ("-" * 60))
+owntemp.finish(TMP, bool(FAILED))
 if FAILED:
     print("FAILED: %d" % len(FAILED))
     for f in FAILED:

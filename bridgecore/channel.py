@@ -115,9 +115,9 @@ Four tools:
   times. If the check fails, do not accept: send it back with continue and
   what broke.
 
-  This exists because you cannot run anything. Bash, PowerShell and every
-  edit tool are denied to you by design, so without this tool "I verified
-  the fix" could only ever mean "I read that it was fixed". It takes no
+  Your window runs only Monitor, which measures and accepts nothing; so
+  without this tool "I verified the fix" could only mean "I read that it
+  was fixed". It takes no
   command and never will: only the name of one suite, and an unknown name
   is refused.
 
@@ -510,10 +510,9 @@ TOOLS = [{
                     "nothing to run, and costs nothing. Call it BEFORE "
                     "accepting any report that changed code: 'done' and "
                     "'stop' are refused without a successful run made after "
-                    "the report arrived. You cannot run anything in your own "
-                    "window, which is exactly why this exists - without it "
-                    "'I verified it' can only mean 'I read that it was "
-                    "verified'."),
+                    "the report arrived. Your window runs only Monitor, "
+                    "which measures: without this 'I verified it' can only "
+                    "mean 'I read that it was verified'."),
     "inputSchema": {
         "type": "object",
         "properties": {

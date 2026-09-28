@@ -11321,19 +11321,39 @@ _reason93 = daemon.STATE.get("recovered_reason")
 _quiet93 = getattr(daemon, "QUIET_REASONS", ())
 check("the quiet reason is the one a gated restart produces",
       "shutdown_mid_run" in _quiet93, True)
+# THROUGH THE START THE DAEMON RUNS, AND FOR A WINDOW THE STOP TOUCHED. This
+# set STATE["mode"] by hand and asked a session in a pair with no loop and
+# no window - a restart that touched nobody. Since 8.49 the seed speaks
+# only to a window that was up through the stop, once, so the case makes
+# one: the loop on, a live window on record, the session its hooks named.
+# The wants are unchanged. -> DECISIONS.md 8.49
+_begin93 = need78(daemon, "begin_run", {})
+# EVERY key the start writes goes back afterwards - this daemon did not
+# really restart. `started_at` above all: check_sessions judges nothing for
+# `restart_settle` after it, and the first form of this case left it moved,
+# which silenced case 95 two blocks later.
+_RUN93 = ("clean_shutdown", "last_stop_mid_run", "started_at", "alive_at",
+          "restart_notice")
+with daemon._lock:
+    _pids93 = {k: dict(v or {}) for k, v in
+               (daemon.STATE.get("pids") or {}).items()}
+    _run93 = {k: daemon.STATE.get(k) for k in _RUN93}
+post("/loop", {"action": "start", "project": _p93})
+_w93 = stand_in(_p93, "executor")
+post_rc("/event", {"hook_event_name": "SessionStart", "role": "executor",
+                   "session_id": "s93-w", "project_dir": _p93,
+                   "cwd": _p93, "window_pid": _w93})
 try:
     for _n, (_why, _clean, _crash) in enumerate((
             ("shutdown_mid_run", True, False),
             ("killed", False, True))):
-        with daemon._lock:
-            daemon.STATE["mode"] = "recovered"
-            daemon.STATE["recovered_reason"] = _why
-            daemon.save_state()
+        _begin93(_why)
         _code93, _out93 = post_rc("/event",
                                   {"hook_event_name": "SessionStart",
                                    "role": "executor",
-                                   "session_id": "s93-%d" % _n,
-                                   "project_dir": _p93, "cwd": _p93})
+                                   "session_id": "s93-w",
+                                   "project_dir": _p93, "cwd": _p93,
+                                   "window_pid": _w93})
         # GUARDED. A body that is not a dict - which is what a refusal or a
         # changed endpoint hands back - used to raise here and take every
         # block below it with no FAIL list at all, the shape CLAUDE.md names
@@ -11348,8 +11368,15 @@ try:
               "shut down properly" in _ctx93, _clean)
         check("%s: the seed calls it an unclean stop" % _why,
               "without shutting down cleanly" in _ctx93, _crash)
-        check("%s: either way the tree is to be checked" % _why,
-              "check the working tree" in _ctx93, True)
+        # WANT CHANGED BY 8.49 (32b), deliberately: this said "either way",
+        # which pinned the unconditional "A turn in flight was cut off" -
+        # the sentence 32b takes away where the stop saw no turn in flight.
+        # This stop saw none (nothing waiting, nothing running), so a clean
+        # stop no longer sends the tree to be checked; a crash still does.
+        # The clean stop WITH a turn in flight is case 130.
+        check("%s: the tree is to be checked only after a crash here - "
+              "the stop saw no turn in flight" % _why,
+              "check the working tree" in _ctx93, _crash)
 finally:
     with daemon._lock:
         if _mode93 is None:
@@ -11360,7 +11387,14 @@ finally:
             daemon.STATE.pop("recovered_reason", None)
         else:
             daemon.STATE["recovered_reason"] = _reason93
+        daemon.STATE["pids"] = _pids93
+        for _k93, _v93 in _run93.items():
+            if _v93 is None:
+                daemon.STATE.pop(_k93, None)
+            else:
+                daemon.STATE[_k93] = _v93
         daemon.save_state()
+    post("/loop", {"action": "stop", "project": _p93})
     post("/config", {"projects": {A: {}, B: {}, C: {}}})
 
 print("\n94. the seat goes back to the window that is WORKING - and only")
@@ -16629,6 +16663,83 @@ try:
     check("(f) and the migration runs from main(), at every start",
           "migrate_gone_session_records()" in inspect.getsource(daemon.main),
           True)
+
+    print("   (g) a number the bridge once launched as a window is that window")
+    print("   only for the half and the time its row names. In a published")
+    print("   run of 2026-09-28 the shell of (f) got pid 19892, which minutes")
+    print("   before had been another project's window, and the record was")
+    print("   closed as 'its window is gone'. Real order: the ledger row of")
+    print("   (f), a window_log row, the watch's tick. -> DECISIONS.md 8.57")
+
+    def _row113(path, at):
+        with daemon._lock:
+            daemon.STATE.setdefault("window_log", []).append({
+                "pid": _sh113.pid, "path": path, "role": "executor",
+                "why": "handover", "at": at})
+            daemon.save_state()
+
+    def _pids113(at):
+        with daemon._lock:
+            if at is None:
+                (daemon.STATE.get("pids") or {}).pop(
+                    "%s|executor" % _kf113, None)
+            else:
+                daemon.STATE.setdefault("pids", {})[
+                    "%s|executor" % _kf113] = {
+                        "pid": _sh113.pid, "at": at, "registered": True,
+                        "registered_via": "session"}
+            daemon.save_state()
+
+    def _seat113(on):
+        with daemon._lock:
+            if on:
+                daemon.STATE.setdefault("channels", {})[
+                    "%s|executor" % _kf113] = {
+                        "pid": os.getpid(), "ppid": _sh113.pid,
+                        "port": 0, "at": time.time()}
+            else:
+                (daemon.STATE.get("channels") or {}).pop(
+                    "%s|executor" % _kf113, None)
+            daemon.save_state()
+
+    _row113(canon(A), time.time() - 600)
+    daemon.check_processes()
+    check("(g) another project's window with that number is not this half's",
+          _has113("toolu_g113"), True)
+    _row113(_kf113, time.time() + 3600)
+    daemon.check_processes()
+    check("(g) nor a window of this half launched after the session was "
+          "seen in that number", _has113("toolu_g113"), True)
+    _pids113(time.time() + 3600)
+    daemon.check_processes()
+    check("(g) nor this half's pids record written after it",
+          _has113("toolu_g113"), True)
+    print("   (g) CONTROL, one per witness: this half's pids record written")
+    print("   before, then its channel seat, then its launch row - each on a")
+    print("   fresh record, and each the only witness that names the number")
+    _pids113(time.time() - 600)
+    daemon.check_processes()
+    check("(g) CONTROL: this half's pids record, written before - the record "
+          "goes", _has113("toolu_g113"), False)
+    _pids113(None)
+    _run113("g113gone-7", "make test", "toolu_i113")
+    check("PRECONDITION: a fresh record, and the number is not this half's "
+          "yet", _has113("toolu_i113"), True)
+    daemon.check_processes()
+    check("PRECONDITION: it stays", _has113("toolu_i113"), True)
+    _seat113(True)
+    daemon.check_processes()
+    check("(g) CONTROL: the window holding this half's channel seat - the "
+          "record goes", _has113("toolu_i113"), False)
+    _seat113(False)
+    _run113("g113gone-7", "make dist", "toolu_j113")
+    daemon.check_processes()
+    check("PRECONDITION: another fresh record stays", _has113("toolu_j113"),
+          True)
+    _row113(_kf113, time.time() - 600)
+    daemon.check_processes()
+    check("(g) CONTROL: this half's own launch row, written before - the "
+          "record goes", _has113("toolu_j113"), False)
 finally:
     try:
         _win113.kill()
@@ -16636,6 +16747,14 @@ finally:
         pass
     with daemon._lock:
         (daemon.STATE.get("inflight") or {}).pop(_kf113, None)
+        (daemon.STATE.get("pids") or {}).pop("%s|executor" % _kf113, None)
+        (daemon.STATE.get("channels") or {}).pop("%s|executor" % _kf113,
+                                                 None)
+        daemon.STATE["window_log"] = [
+            r for r in (daemon.STATE.get("window_log") or [])
+            if not (isinstance(r, dict)
+                    and r.get("pid") == getattr(globals().get("_sh113"),
+                                                "pid", None))]
         daemon.save_state()
     daemon.PROCTRACK.pop(_kf113, None)
     post("/config", {"projects": {A: {}, B: {}, C: {}}})
@@ -18378,6 +18497,1573 @@ finally:
     for _kid in _kids128:
         sessions.terminate_and_wait(_kid.pid)
     post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n129. the seed tells of a restart only a window it touched, and once")
+print("    The seed read STATE['mode'], the panel's acknowledgement, which a")
+print("    restart through the gate leaves 'recovered' for the daemon's whole")
+print("    life. 2026-09-28: up at 06:04:01, and at 08:07:57 a compaction of")
+print("    the executor - which had finished several turns since - was told")
+print("    'A turn in flight was cut off at the restart', and reported a")
+print("    restart that had not happened. Real order on this daemon: the")
+print("    windows and their sessions, the start main() runs (begin_run), then")
+print("    SessionStart and Stop through /event, each seed read from the")
+print("    endpoint's own answer. -> DECISIONS.md 8.49")
+_begin129 = need78(daemon, "begin_run", {})
+_p129 = os.path.join(TMP, "restart-seed")
+_q129 = os.path.join(TMP, "restart-seed-loop-off")
+for _d129 in (_p129, _q129):
+    os.makedirs(_d129, exist_ok=True)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p129: {}, _q129: {}}})
+_SAID129 = "The bridge was restarted while this loop was running"
+_CRASH129 = "The machine stopped without shutting down cleanly"
+# Every key the start writes goes back afterwards, as in case 93: this
+# daemon did not really restart, and check_sessions reads `started_at`.
+_RUN129 = ("mode", "recovered_reason", "clean_shutdown", "last_stop_mid_run",
+           "started_at", "alive_at", "restart_notice")
+with daemon._lock:
+    _pids129 = {k: dict(v or {}) for k, v in
+                (daemon.STATE.get("pids") or {}).items()}
+    _run129 = {k: daemon.STATE.get(k) for k in _RUN129}
+
+
+def _start129(project, role, sid, window, source):
+    """A SessionStart as hook.py posts it; the seed the endpoint answered."""
+    _c, _o = post_rc("/event", {"hook_event_name": "SessionStart",
+                                "role": role, "session_id": sid,
+                                "project_dir": project, "cwd": project,
+                                "window_pid": window, "source": source})
+    return ((((_o if isinstance(_o, dict) else {}).get("hook_output")
+              or {}).get("hookSpecificOutput") or {})
+            .get("additionalContext") or "")
+
+
+def _window129():
+    """A live process for a window the stop did NOT see - a new one."""
+    _pw = subprocess.Popen([sys.executable, "-c",
+                            "import time" + chr(10) + "time.sleep(900)"],
+                           creationflags=getattr(subprocess,
+                                                 "CREATE_NO_WINDOW", 0))
+    STAND_INS.append(_pw)
+    return _pw.pid
+
+
+def _j129(sub):
+    _f = os.path.join(_p129, "bridge-logs", time.strftime("%Y-%m-%d"),
+                      "events.jsonl")
+    try:
+        with open(_f, encoding="utf-8") as _fh:
+            return [t for t in (json.loads(l).get("text") or ""
+                                for l in _fh if l.strip())
+                    if sub in t]
+    except (OSError, ValueError):
+        return []
+
+
+try:
+    post("/loop", {"action": "start", "project": _p129})
+    _we129 = stand_in(_p129, "executor")
+    _wp129 = stand_in(_p129, "planner")
+    _wq129 = stand_in(_q129, "executor")
+    # The sessions the windows' own hooks named, BEFORE the stop.
+    _start129(_p129, "executor", "s129-exec", _we129, "startup")
+    _start129(_p129, "planner", "s129-plan", _wp129, "startup")
+    _start129(_q129, "executor", "s129-idle", _wq129, "startup")
+
+    print("   (a) the order the planner named: restart, the window's first")
+    print("   start since, then a compaction - the first speaks as before,")
+    print("   the compaction does not")
+    _begin129("shutdown_mid_run")
+    check("(a) the panel's flag is untouched - still 'recovered'",
+          daemon.STATE.get("mode"), "recovered")
+    _first129 = _start129(_p129, "executor", "s129-exec", _we129, "resume")
+    check("(a) CONTROL: the first start after the restart is told of it",
+          _SAID129 in _first129, True)
+    check("(a) ...in the words of a clean stop, not a crash",
+          _CRASH129 in _first129, False)
+    check("(a) and the telling is in the journal",
+          bool(_j129("Told session s129-exe")), True)
+    _later129 = _start129(_p129, "executor", "s129-exec", _we129, "compact")
+    check("(a) the compaction after it is NOT told of the restart again",
+          _SAID129 in _later129, False)
+
+    print("   (b) the order of 2026-09-28: restart, the half FINISHES A TURN,")
+    print("   then a compaction - it lived through the restart and is not")
+    print("   told of it")
+    post_rc("/event", {"hook_event_name": "Stop", "role": "planner",
+                       "session_id": "s129-plan", "project_dir": _p129,
+                       "cwd": _p129, "last_assistant_message": "verdict sent"})
+    check("(b) the finished turn is in the journal as the end of it",
+          bool(_j129("is behind this half - it finished a turn after it")),
+          True)
+    _plan129 = _start129(_p129, "planner", "s129-plan", _wp129, "compact")
+    check("(b) the compaction after a finished turn is NOT told of it",
+          _SAID129 in _plan129, False)
+
+    print("   (c) nobody the stop did not touch: another session in the half,")
+    print("   and a pair whose loop was off")
+    _begin129("shutdown_mid_run")
+    _other129 = _start129(_p129, "executor", "s129-other", _window129(),
+                          "startup")
+    check("(c) a session in a window that was not up through it - not told",
+          _SAID129 in _other129, False)
+    _idle129 = _start129(_q129, "executor", "s129-idle", _wq129, "resume")
+    check("(c) a pair whose loop was off at the stop - not told",
+          _SAID129 in _idle129, False)
+    _own129 = _start129(_p129, "executor", "s129-exec", _we129, "resume")
+    check("(c) CONTROL: the touched session itself still is, after them",
+          _SAID129 in _own129, True)
+
+    print("   (d) a power loss takes the window with it: its replacement is")
+    print("   told, once; after a clean stop a dead window's half is not")
+    sessions.terminate_and_wait(_we129)
+    _begin129("reboot")
+    _new129 = _window129()
+    _boot129 = _start129(_p129, "executor", "s129-new", _new129, "startup")
+    check("(d) the replacement after a power loss is told the machine stopped",
+          _CRASH129 in _boot129, True)
+    _boot2129 = _start129(_p129, "executor", "s129-new", _new129, "compact")
+    check("(d) ...once", _CRASH129 in _boot2129, False)
+    check("(d) the record still names the window that died - what the next "
+          "start judges", ((daemon.STATE.get("pids") or {}).get(
+              "%s|executor" % canon(_p129)) or {}).get("pid"), _we129)
+    _begin129("shutdown_mid_run")
+    _dead129 = _start129(_p129, "executor", "s129-new2", _window129(),
+                         "startup")
+    check("(d) a clean stop did not touch a window already dead - not told",
+          _SAID129 in _dead129 or _CRASH129 in _dead129, False)
+finally:
+    with daemon._lock:
+        daemon.STATE["pids"] = _pids129
+        for _k, _v in _run129.items():
+            if _v is None:
+                daemon.STATE.pop(_k, None)
+            else:
+                daemon.STATE[_k] = _v
+        daemon.save_state()
+    post("/loop", {"action": "stop", "project": _p129})
+    post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n130. a turn cut off is said only where the stop saw one")
+print("    'A turn in flight was cut off at the restart' went to every")
+print("    touched session, and after a restart through the gate - which")
+print("    lets one through only when every pair is idle - it is almost")
+print("    never true. The stop now writes down, while PENDING and the")
+print("    records still say so, which half had a turn in flight: a report")
+print("    waiting for its verdict, or a tracked foreground command. The")
+print("    start carries that and nothing older. Real order: the Stop hook")
+print("    blocks on a real report, the stop step shutdown() runs, the start,")
+print("    then the window's SessionStart. -> DECISIONS.md 8.49 (32b)")
+_ev130 = need78(daemon, "note_stop_evidence", {})
+_begin130 = need78(daemon, "begin_run", {})
+_p130 = os.path.join(TMP, "cut-turn")
+os.makedirs(_p130, exist_ok=True)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p130: {}}})
+_k130 = canon(_p130)
+_SAID130 = "The bridge was restarted while this loop was running"
+_CUT130 = "A turn in flight was cut off at the restart"
+_RUN130 = ("mode", "recovered_reason", "clean_shutdown", "last_stop_mid_run",
+           "started_at", "alive_at", "restart_notice")
+with daemon._lock:
+    _pids130 = {k: dict(v or {}) for k, v in
+                (daemon.STATE.get("pids") or {}).items()}
+    _run130 = {k: daemon.STATE.get(k) for k in _RUN130}
+_thr130 = dict(daemon.CFG.get("thresholds") or {})
+
+
+def _start130(role, sid, window):
+    _c, _o = post_rc("/event", {"hook_event_name": "SessionStart",
+                                "role": role, "session_id": sid,
+                                "project_dir": _p130, "cwd": _p130,
+                                "window_pid": window, "source": "resume"})
+    return ((((_o if isinstance(_o, dict) else {}).get("hook_output")
+              or {}).get("hookSpecificOutput") or {})
+            .get("additionalContext") or "")
+
+
+def _j130(sub):
+    _f = os.path.join(_p130, "bridge-logs", time.strftime("%Y-%m-%d"),
+                      "events.jsonl")
+    try:
+        with open(_f, encoding="utf-8") as _fh:
+            return [t for t in (json.loads(l).get("text") or ""
+                                for l in _fh if l.strip())
+                    if sub in t]
+    except (OSError, ValueError):
+        return []
+
+
+try:
+    print("   THE WIRING: shutdown() itself cannot run here (it ends the")
+    print("   process), so the step it calls is run, and the call is asked")
+    check("shutdown() takes the stop's evidence before it goes",
+          "note_stop_evidence(" in inspect.getsource(daemon.shutdown), True)
+    post("/loop", {"action": "start", "project": _p130})
+    _we130 = stand_in(_p130, "executor")
+    _wp130 = stand_in(_p130, "planner")
+    _start130("executor", "s130-exec", _we130)
+    _start130("planner", "s130-plan", _wp130)
+
+    print("   (a) a restart with the pair idle: the restart is said, a cut")
+    print("   turn is not")
+    _ev130()
+    _begin130("shutdown_mid_run")
+    _idle130 = _start130("executor", "s130-exec", _we130)
+    check("(a) CONTROL: the restart is said", _SAID130 in _idle130, True)
+    check("(a) and NO turn cut off - the stop saw none",
+          _CUT130 in _idle130, False)
+
+    print("   (b) the stop while a report waits for its verdict: both")
+    daemon.CFG.setdefault("thresholds", {}).update(
+        {"undelivered_hold": 120, "review_timeout": 120})
+    _hook130 = threading.Thread(
+        target=stop_hook, args=(_p130, "executor", "s130-exec",
+                                "work done, report follows"),
+        name="stop-130", daemon=True)
+    _hook130.start()
+    check("(b) the report is waiting in PENDING - the fact the stop reads",
+          until(lambda: _k130 in daemon.PENDING, 30), True)
+    _n130 = str(((daemon.PENDING.get(_k130) or {}).get("meta") or {})
+                .get("report") or "?")
+    _book130 = _ev130() or {}
+    check("(b) the stop wrote it down for the executor",
+          "report %s" % _n130 in ((_book130.get("%s|executor" % _k130) or {})
+                                  .get("cut") or ""), True)
+    check("(b) and for nobody else in the pair",
+          "%s|planner" % _k130 in _book130, False)
+    check("(b) the journal says it at the stop",
+          bool(_j130("At the stop the executor had a turn in flight")), True)
+    _w130 = daemon.PENDING.get(_k130) or {}
+    if _w130.get("event"):
+        _w130["event"].set()        # the old daemon's waiter dies with it
+    _hook130.join(60)
+    _begin130("shutdown_mid_run")
+    _cut130 = _start130("executor", "s130-exec", _we130)
+    check("(b) the restart is said", _SAID130 in _cut130, True)
+    check("(b) and the cut turn, naming the report",
+          _CUT130 in _cut130 and ("report %s" % _n130) in _cut130, True)
+    _plan130 = _start130("planner", "s130-plan", _wp130)
+    check("(b) the planner, whose turn nothing cut, hears the restart only",
+          (_SAID130 in _plan130, _CUT130 in _plan130), (True, False))
+
+    print("   (c) a tracked foreground command running at the stop: said;")
+    print("   a background job is not a turn in flight: not said")
+    post_rc("/event", {"hook_event_name": "PreToolUse", "role": "executor",
+                       "session_id": "s130-exec", "project_dir": _p130,
+                       "cwd": _p130, "tool_name": "Bash",
+                       "tool_use_id": "tu-130-bg",
+                       "tool_input": {"command": "godot --headless run",
+                                      "run_in_background": True}})
+    _ev130()
+    _begin130("shutdown_mid_run")
+    check("(c) CONTROL: a background job alone - no cut turn",
+          _CUT130 in _start130("executor", "s130-exec", _we130), False)
+    post_rc("/event", {"hook_event_name": "PreToolUse", "role": "executor",
+                       "session_id": "s130-exec", "project_dir": _p130,
+                       "cwd": _p130, "tool_name": "Bash",
+                       "tool_use_id": "tu-130-fg",
+                       "tool_input": {"command": "pytest -q"}})
+    _ev130()
+    _begin130("shutdown_mid_run")
+    _fg130 = _start130("executor", "s130-exec", _we130)
+    check("(c) a foreground command running at the stop - the cut turn is "
+          "said, naming it",
+          _CUT130 in _fg130 and "pytest -q" in _fg130, True)
+
+    print("   (d) the stop's words are about THAT stop: a start that finds a")
+    print("   book no stop wrote since the last start - the stop's step did")
+    print("   not run - says no cut turn, whatever the book still carries")
+    _ev130()                      # the command above is still on record
+    _begin130("shutdown_mid_run")   # carried into this start, never told
+    _begin130("shutdown_mid_run")   # and a start with no stop between
+    check("(d) an older stop's words are not carried into a later start",
+          _CUT130 in _start130("executor", "s130-exec", _we130), False)
+finally:
+    with daemon._lock:
+        daemon.STATE["pids"] = _pids130
+        for _k, _v in _run130.items():
+            if _v is None:
+                daemon.STATE.pop(_k, None)
+            else:
+                daemon.STATE[_k] = _v
+        (daemon.STATE.get("inflight") or {}).pop(_k130, None)
+        daemon.save_state()
+    daemon.PROCTRACK.pop(_k130, None)
+    daemon.CFG["thresholds"] = _thr130
+    post("/loop", {"action": "stop", "project": _p130})
+    post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n131. a long command that is WORKING is not called stuck")
+print("    The history of 'how long does this usually take' was kept under")
+print("    the first word, and every command of one watched project began")
+print("    'cd ...;' - a grep of one second and an engine run of ten minutes")
+print("    were one command. 22-28.09: 28 'asked the pair to decide', 11 of")
+print("    them on to a person, and 9 of the 28 were real long runs. Two")
+print("    layers: the key is what the command runs (31.1), and before")
+print("    anybody is woken the call's OWN process tree is asked whether it")
+print("    uses CPU (31.2). Real order: the window and its session, the")
+print("    call's PreToolUse, the watch's real ticks; time moves by the")
+print("    watch's thresholds, never by a record's past. -> DECISIONS.md 8.50")
+_p131 = os.path.join(TMP, "long-run")
+os.makedirs(_p131, exist_ok=True)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p131: {}}})
+_k131 = canon(_p131)
+_thr131 = dict(daemon.CFG.get("thresholds") or {})
+_S131 = {"busy": "import time\nt=time.time()\nwhile time.time()-t<180: pass\n",
+         "sleep": "import time\ntime.sleep(180)\n",
+         "later": "import time\ntime.sleep(6)\nt=time.time()\n"
+                  "while time.time()-t<180: pass\n"}
+for _m131, _body131 in _S131.items():
+    with open(os.path.join(TMP, "c131_%s.py" % _m131), "w",
+              encoding="utf-8") as _fh:
+        _fh.write(_body131)
+with open(os.path.join(TMP, "w131.py"), "w", encoding="utf-8") as _fh:
+    # The WINDOW: it starts the call's shell - cmd.exe, a shell by the
+    # daemon's own list - running one of the scripts above, and waits.
+    _fh.write("import subprocess, sys, time\n"
+              "subprocess.Popen(['cmd.exe', '/c', sys.executable, "
+              "sys.argv[1]], creationflags=0x08000000)\n"
+              "time.sleep(300)\n")
+_W131 = []
+
+
+def _window131(mode):
+    _w = subprocess.Popen([sys.executable, os.path.join(TMP, "w131.py"),
+                           os.path.join(TMP, "c131_%s.py" % mode)],
+                          creationflags=getattr(subprocess,
+                                                "CREATE_NO_WINDOW", 0))
+    _W131.append(_w.pid)
+    STAND_INS.append(_w)
+    # the shell exists before the call is posted, as a real window's does
+    until(lambda: any(pp == _w.pid and n.startswith("cmd.exe")
+                      for pp, n in (sessions.process_table() or {})
+                      .values()), 10)
+    return _w.pid
+
+
+def _tree131(root):
+    """This case's own processes: the window it started and what that
+    window started - a child counts only if it was born after its parent,
+    because a snapshot keeps a dead parent's pid, and an older stranger can
+    name a number this window was later given. Nothing here may be ended
+    that this case did not start."""
+    _t = sessions.process_table() or {}
+    _kids = {}
+    for _pid, (_pp, _n) in _t.items():
+        _kids.setdefault(_pp, []).append(_pid)
+    _seen, _st = [], [(root, daemon.proc_started(root))]
+    while _st:
+        _x, _born = _st.pop()
+        if _x in _seen:
+            continue
+        _seen.append(_x)
+        for _c in _kids.get(_x, []):
+            _cb = daemon.proc_started(_c)
+            if _born is not None and _cb is not None and _cb >= _born - 1:
+                _st.append((_c, _cb))
+    return _seen
+
+
+def _ev131(name, sid, window=None, **extra):
+    body = {"hook_event_name": name, "role": "executor", "session_id": sid,
+            "project_dir": _p131, "cwd": _p131}
+    if window:
+        body["window_pid"] = window
+    body.update(extra)
+    return post_rc("/event", body)
+
+
+def _call131(sid, cmd, tid, end=False):
+    return _ev131("PostToolUse" if end else "PreToolUse", sid,
+                  tool_name="Bash", tool_use_id=tid,
+                  tool_input={"command": cmd},
+                  **({"tool_response": {"stdout": "", "stderr": ""}}
+                     if end else {}))
+
+
+def _said131(sub):
+    return [r.get("text") or "" for r in
+            daemon.store.recent_events(800, project=_p131)
+            if sub in (r.get("text") or "") and r.get("path") == _k131]
+
+
+def _ticks131(seconds, done=None):
+    _end = time.time() + seconds
+    while time.time() < _end:
+        daemon.check_processes()
+        if done and done():
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def _asks131():
+    """What the pair's planner was actually handed - the receiver, not the
+    record."""
+    return sum(1 for b in DELIVERED.get((_k131, "planner"), [])
+               if "Decide whether it is stuck" in json.dumps(b))
+
+
+_CPU131 = "its own tree is still using CPU"
+_HUMAN131 = "notify process_stuck"
+try:
+    daemon.CFG.setdefault("thresholds", {}).update(
+        {"stuck_floor_sec": 1, "cpu_idle_sec": 2, "stuck_planner_grace": 5})
+    _GREP131 = "cd /c/projects/godot/lr; grep -n x notes.txt"
+    # one script per part, each with its own quick history, so a long
+    # run of one part never raises the next part's usual
+    _RUN131 = "cd /c/projects/godot/lr; sh tools/run_%s.sh"
+    _LONG131 = "cd /c/projects/godot/lr; sh tools/run_long.sh"
+    _ev131("SessionStart", "s131-seed")
+    # the pair's planner is reachable, so an ask reaches it and the grace
+    # before a person applies - the order a live pair has
+    register(_p131, "planner", "s131-plan")
+    print("   the history, through real calls: five quick greps, and five")
+    print("   quick runs of each part's script - all begin 'cd ...;'")
+    for _i in range(5):
+        _call131("s131-seed", _GREP131, "t131-g%d" % _i)
+        _call131("s131-seed", _GREP131, "t131-g%d" % _i, end=True)
+        for _part in ("b", "c", "d", "e"):
+            _call131("s131-seed", _RUN131 % _part,
+                     "t131-%s%d" % (_part, _i))
+            _call131("s131-seed", _RUN131 % _part,
+                     "t131-%s%d" % (_part, _i), end=True)
+
+    print("   (a) 31.1: a long command whose PROGRAM has no history is not")
+    print("   judged by the greps' - its tree sleeps, so only the key decides")
+    _wa = _window131("sleep")
+    _ev131("SessionStart", "s131-a", window=_wa)
+    _a0 = _asks131()
+    _call131("s131-a", _LONG131, "t131-a")
+    _ticks131(4)
+    check("(a) nobody is asked about it - its own history is empty",
+          _asks131() - _a0, 0)
+    _call131("s131-a", _LONG131, "t131-a", end=True)
+
+    print("   (b) 31.2: past its limit and USING CPU - nobody is asked")
+    _wb = _window131("busy")
+    _ev131("SessionStart", "s131-b", window=_wb)
+    _b0 = _asks131()
+    _c0 = len(_said131(_CPU131))
+    _call131("s131-b", _RUN131 % "b", "t131-b")
+    _ticks131(6)
+    check("(b) nobody is asked whether a working command is stuck",
+          _asks131() - _b0, 0)
+    check("(b) and the journal says why, once",
+          len(_said131(_CPU131)) - _c0, 1)
+    _mb = (daemon.PROCTRACK.get(_k131) or {}).get("t131-b") or {}
+    check("(b) the tree it read is the call's shell under that window",
+          (bool(_mb.get("shell")), _mb.get("shell") in _tree131(_wb)),
+          (True, True))
+    _call131("s131-b", _RUN131 % "b", "t131-b", end=True)
+
+    print("   (c) the same, but the tree SLEEPS - still caught: the pair is")
+    print("   asked, and then a person, because the tree still stands")
+    _wc = _window131("sleep")
+    _ev131("SessionStart", "s131-c", window=_wc)
+    _cq0, _ch0 = _asks131(), len(_said131(_HUMAN131))
+    _call131("s131-c", _RUN131 % "c", "t131-c")
+    check("(c) CONTROL: a command that stands is asked about",
+          _ticks131(10, lambda: _asks131() > _cq0), True)
+    check("(c) and a person is told once the pair was asked and it still "
+          "stands", _ticks131(10, lambda: len(_said131(_HUMAN131)) > _ch0),
+          True)
+    _call131("s131-c", _RUN131 % "c", "t131-c", end=True)
+
+    print("   (d) asked while it stood, then it went back to WORK: the")
+    print("   person is not told")
+    _wd = _window131("later")
+    _ev131("SessionStart", "s131-d", window=_wd)
+    _dq0, _dh0 = _asks131(), len(_said131(_HUMAN131))
+    _call131("s131-d", _RUN131 % "d", "t131-d")
+    check("(d) it was asked while it stood",
+          _ticks131(10, lambda: _asks131() > _dq0), True)
+    _ticks131(9)
+    _md = (daemon.PROCTRACK.get(_k131) or {}).get("t131-d") or {}
+    check("(d) the tree was seen working again",
+          float(_md.get("cpu_last") or 0) >= daemon.CPU_WORK_EPS
+          if hasattr(daemon, "CPU_WORK_EPS") else False, True)
+    check("(d) and nobody was told past the pair's grace",
+          len(_said131(_HUMAN131)) - _dh0, 0)
+    _call131("s131-d", _RUN131 % "d", "t131-d", end=True)
+
+    print("   (e) the tree CANNOT be read - the session names no window, so")
+    print("   the call cannot be tied to one - and the watch is not quieter")
+    print("   for it: asked at the limit, as before, although the window it")
+    print("   runs in is working")
+    _we = _window131("busy")
+    _ev131("SessionStart", "s131-e")          # no window_pid: no link
+    _eq0 = _asks131()
+    _call131("s131-e", _RUN131 % "e", "t131-e")
+    check("(e) a call whose tree cannot be read is asked about, as before",
+          _ticks131(10, lambda: _asks131() > _eq0), True)
+    _me = (daemon.PROCTRACK.get(_k131) or {}).get("t131-e") or {}
+    check("(e) and no tree was claimed for it",
+          (_me.get("shell"), _me.get("cpu_total")), (None, None))
+    _call131("s131-e", _RUN131 % "e", "t131-e", end=True)
+finally:
+    daemon.CFG["thresholds"] = _thr131
+    for _w in _W131:
+        for _pid in reversed(_tree131(_w)):
+            try:
+                sessions.terminate_and_wait(_pid)
+            except Exception:
+                pass
+    daemon.PROCTRACK.pop(_k131, None)
+    with daemon._lock:
+        (daemon.STATE.get("inflight") or {}).pop(_k131, None)
+        daemon.save_state()
+    post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n132. a SUBAGENT's call after the half's turn is not the half's call")
+print("    2026-09-28 12:02:29 a watched project's executor ended its turn;")
+print("    at 12:02:31 a call came with its session's id and a subagent's")
+print("    agent_id. Nothing the bridge reads ended it: the record held the")
+print("    restart gate for 21 minutes, asked the pair at 12:07:51 whether it")
+print("    was stuck and rang the owner at 12:17:56 - about a call the half")
+print("    was not making. Real order: the half's call, the half's Stop")
+print("    listing its running subagent, the subagent's PreToolUse, the")
+print("    watch's ticks, and the restart gate itself (relayout.busy_now).")
+print("    -> DECISIONS.md 8.51")
+_p132 = os.path.join(TMP, "sub-call")
+os.makedirs(_p132, exist_ok=True)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p132: {}}})
+_k132 = canon(_p132)
+_thr132 = dict(daemon.CFG.get("thresholds") or {})
+_tof132 = sessions.transcript_of
+_TR132 = os.path.join(TMP, "tr132")
+os.makedirs(os.path.join(_TR132, "s132", "subagents"), exist_ok=True)
+with open(os.path.join(_TR132, "s132.jsonl"), "w", encoding="utf-8") as _fh:
+    _fh.write("{}\n")
+from bridgecore import relayout as _rl132                  # noqa: E402
+
+
+def _ev132(name, **extra):
+    body = {"hook_event_name": name, "role": "executor",
+            "session_id": "s132", "project_dir": _p132, "cwd": _p132}
+    body.update(extra)
+    return post_rc("/event", body)
+
+
+def _call132(cmd, tid, agent=None, end=False):
+    extra = {"tool_name": "Bash", "tool_use_id": tid,
+             "tool_input": {"command": cmd}}
+    if agent:
+        extra.update({"agent_id": agent, "agent_type": "general-purpose"})
+    if end:
+        extra["tool_response"] = {"stdout": "", "stderr": ""}
+    return _ev132("PostToolUse" if end else "PreToolUse", **extra)
+
+
+def _asks132():
+    return sum(1 for b in DELIVERED.get((_k132, "planner"), [])
+               if "Decide whether it is stuck" in json.dumps(b))
+
+
+def _gate132():
+    """What the restart gate itself says about THIS project."""
+    _v, _lines = _rl132.busy_now(PORT)
+    _mine = [l for l in _lines if l.startswith(os.path.basename(_p132))]
+    return any("tracked command(s) still running" in l for l in _mine)
+
+
+def _ticks132(seconds, done=None):
+    _end = time.time() + seconds
+    while time.time() < _end:
+        daemon.check_processes()
+        if done and done():
+            return True
+        time.sleep(0.5)
+    return False
+
+
+try:
+    daemon.CFG.setdefault("thresholds", {}).update(
+        {"stuck_floor_sec": 1, "cpu_idle_sec": 2, "stuck_planner_grace": 5})
+    sessions.transcript_of = (lambda sid, cwd=None:
+                              os.path.join(_TR132, "%s.jsonl" % sid)
+                              if sid == "s132" else _tof132(sid, cwd))
+    register(_p132, "planner", "s132-plan")
+    _RUN132 = "cd /c/projects/godot/sa; sh tools/run_s.sh"
+    _ev132("SessionStart")
+    print("   the history: five quick runs of the same script, by the half")
+    for _i in range(5):
+        _call132(_RUN132, "t132-q%d" % _i)
+        _call132(_RUN132, "t132-q%d" % _i, end=True)
+
+    print("   (a) the half's turn ends with its subagent still running; the")
+    print("   subagent's call comes after the Stop")
+    _ev132("Stop", stop_hook_active=False, last_assistant_message="",
+           background_tasks=[{"id": "agent132", "type": "subagent",
+                              "status": "running",
+                              "agent_type": "general-purpose"}])
+    _q0 = _asks132()
+    _call132(_RUN132 + " sub", "t132-a", agent="agent132")
+    _ticks132(5)
+    check("(a) nobody is asked whether the subagent's call is stuck",
+          _asks132() - _q0, 0)
+    check("(a) and the restart gate does not count it as the half's own",
+          _gate132(), False)
+    _ma = (daemon.PROCTRACK.get(_k132) or {}).get("t132-a") or {}
+    check("(a) its record says whose it is",
+          (_ma.get("agent"), bool(_ma.get("after_turn"))),
+          ("agent132", True))
+    check("(a) and so does its journal line, for a census afterwards",
+          any("[subagent agent132, after the half's turn]"
+              in (r.get("text") or "") for r in
+              daemon.store.recent_events(400, project=_p132)), True)
+
+    print("   (b) it ends by its OWN result - in the subagent's transcript,")
+    print("   where the client keeps it, not in the half's")
+    with open(os.path.join(_TR132, "s132", "subagents",
+                           "agent-agent132.jsonl"), "w",
+              encoding="utf-8") as _fh:
+        _fh.write(json.dumps({"type": "user", "timestamp":
+                              time.strftime("%Y-%m-%dT%H:%M:%S.000Z",
+                                            time.gmtime()),
+                              "message": {"content": [
+                                  {"type": "tool_result",
+                                   "tool_use_id": "t132-a",
+                                   "content": "done"}]}}) + "\n")
+    check("(b) its record is closed by that result",
+          until(lambda: (daemon.check_processes() or True) and
+                "t132-a" not in (daemon.PROCTRACK.get(_k132) or {}), 90),
+          True)
+
+    print("   CONTROL (c): the half's OWN call that stands is caught, and")
+    print("   holds the gate, as before")
+    _call132(_RUN132 + " own", "t132-c")
+    _qc = _asks132()
+    check("(c) the half's own standing call is asked about",
+          _ticks132(10, lambda: _asks132() > _qc), True)
+    check("(c) and the restart gate counts it",
+          _gate132(), True)
+    _call132(_RUN132 + " own", "t132-c", end=True)
+
+    print("   CONTROL (d): a subagent's call INSIDE the half's turn - the half")
+    print("   waits on it - is the half's call, and is caught")
+    _call132("cd /c/projects/godot/sa; ls", "t132-m")          # the turn
+    _call132("cd /c/projects/godot/sa; ls", "t132-m", end=True)
+    _call132(_RUN132 + " inner", "t132-d", agent="agent132b")
+    _qd = _asks132()
+    check("(d) a subagent's call inside the half's turn is asked about",
+          _ticks132(10, lambda: _asks132() > _qd), True)
+    _call132(_RUN132 + " inner", "t132-d", agent="agent132b", end=True)
+finally:
+    sessions.transcript_of = _tof132
+    daemon.CFG["thresholds"] = _thr132
+    daemon.PROCTRACK.pop(_k132, None)
+    with daemon._lock:
+        (daemon.STATE.get("inflight") or {}).pop(_k132, None)
+        daemon.save_state()
+    post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n133. a half that died comes back with --resume of its own newest")
+print("     session that finished a turn - both halves - and the loop goes on")
+print("     The owner's word, 2026-09-28: the old pairs come back every")
+print("     time - older than 8.9's fresh executor with /init. And at 17:33")
+print("     the same day continue resumed a pair's")
+print("     executor into its 14:54 /init session, which had never answered,")
+print("     instead of its working one. Real order: SessionStarts with their")
+print("     windows, the death the process watch hands over, then what was")
+print("     launched and written. -> DECISIONS.md 8.56 (36.1, 36.4)")
+
+
+def _jl(sub, path):
+    """This project's journal lines that carry `sub`."""
+    return [r for r in daemon.store.recent_events(800, project=path)
+            if sub in (r.get("text") or "")]
+
+
+_p133 = os.path.join(TMP, "raise-old-133")
+os.makedirs(_p133, exist_ok=True)
+_k133 = canon(_p133)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p133: {}}})
+post_rc("/loop", {"action": "start", "project": _p133})
+_tr133 = {}
+
+
+def _write133(sid, finished):
+    _f = os.path.join(_p133, "%s.jsonl" % sid)
+    with open(_f, "w", encoding="utf-8") as _fh:
+        _fh.write(json.dumps({"type": "user",
+                              "message": {"content": "go"}}) + "\n")
+        if finished:
+            _fh.write(json.dumps({"type": "assistant", "message": {
+                "content": [{"type": "text", "text": "done"}],
+                "stop_reason": "end_turn"}}) + "\n")
+    _tr133[sid] = _f
+
+
+_tof133 = sessions.transcript_of
+_l133 = []
+_launch133o = daemon.sessions.launch
+_n133 = [0]
+
+
+def _launch133(project, role, **kw):
+    _l133.append({"project": canon(project), "role": role,
+                  "resume": kw.get("resume_id"), "prompt": kw.get("prompt")})
+    _n133[0] += 1
+    return 1331001 + 2 * _n133[0]        # odd: never a real Windows pid
+
+
+def _mine133(role):
+    return [l for l in _l133 if l["project"] == _k133 and l["role"] == role]
+
+
+def _start133(role, sid, window):
+    post_rc("/event", {"hook_event_name": "SessionStart", "role": role,
+                       "session_id": sid, "project_dir": _p133,
+                       "cwd": _p133, "window_pid": window})
+
+
+def _die133(role):
+    # the watch hands over the canonical key, as check_sessions does
+    daemon.handle_session_death(_k133, role,
+                                daemon.best_session(_k133, role) or {})
+
+
+try:
+    sessions.transcript_of = (lambda sid, *a, **k: _tr133.get(sid)
+                              or _tof133(sid, *a, **k))
+    daemon.sessions.launch = _launch133
+    _write133("rw133-work", True)
+    _write133("rw133-init", False)
+    _write133("rw133-plan", True)
+    _start133("executor", "rw133-work", 1331901)     # the working session
+    _start133("executor", "rw133-init", 1331903)     # a raise that failed
+    _start133("planner", "rw133-plan", 1331905)
+    check("PRECONDITION: the executor's last session is the failed one",
+          daemon.last_session_id(_p133, "executor"), "rw133-init")
+
+    print("   (a) the executor comes back in its WORKING session")
+    _die133("executor")
+    _x133 = (_mine133("executor") or [{}])[-1]
+    check("(a) --resume of the newest session that finished a turn, no /init",
+          (_x133.get("resume"), _x133.get("prompt")), ("rw133-work", None))
+    check("(a) and the journal names what it took and what it passed over",
+          bool(_jl("Raising the executor with --resume of session rw133-wo, "
+                   "its newest with a finished turn (passed over, no "
+                   "finished turn: rw133-in)", _p133)), True)
+    print("   (b) so does the planner")
+    _die133("planner")
+    check("(b) --resume of its own session",
+          ((_mine133("planner") or [{}])[-1]).get("resume"), "rw133-plan")
+    print("   (c) the loop is not paused by the death - the half comes back")
+    check("(c) not paused, and the loop still on",
+          (bool(daemon.paused_for(_p133)),
+           bool(((daemon.STATE.get("loops") or {}).get(_k133) or {})
+                .get("active"))), (False, True))
+
+    print("   (d) a raise that keeps dying: resumed twice, then a NEW session,")
+    print("   then a person - each time the window came up and died again")
+    for _i133 in (2, 3, 4):
+        # the raised window comes up on the session it was handed
+        _start133("executor", "rw133-work", 1331001 + 2 * _n133[0])
+        _die133("executor")
+    _xs133 = [(l.get("resume"), l.get("prompt")) for l in _mine133("executor")]
+    check("(d) resume, resume, then a NEW session with /init",
+          _xs133[:3], [("rw133-work", None), ("rw133-work", None),
+                       (None, getattr(daemon, "INIT_PROMPT", "-"))])
+    check("(d) the new session says why",
+          bool(_jl("the session resumed twice ended right after start",
+                   _p133)), True)
+    check("(d) and after that the bridge stops and says so",
+          (len(_xs133), bool(_jl("two resumes and a new session all ended",
+                                 _p133))), (3, True))
+finally:
+    sessions.transcript_of = _tof133
+    daemon.sessions.launch = _launch133o
+    post("/loop", {"project": _p133, "action": "stop"}, secret=True)
+    with daemon._lock:
+        for _box in ("pids", "restart_tries", "down", "window_sessions",
+                     "launches"):
+            for _r in ("executor", "planner"):
+                (daemon.STATE.get(_box) or {}).pop("%s|%s" % (_k133, _r),
+                                                   None)
+        for _box in ("init_pending", "planner_seed"):
+            (daemon.STATE.get(_box) or {}).pop(_k133, None)
+        daemon.save_state()
+    post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n134. continue on the resume tab says why it would not start a half,")
+print("     and still asks the other one")
+print("     2026-09-28, four presses of continue 14:54:42-14:56:08 (J 28.09:")
+print("     3634, 3661, 3662, 3668) left four 'Resume check for the executor'")
+print("     lines and no reason: launch_guard's refusal went only into the")
+print("     panel's alert, and do_resume returned on it, so the planner was")
+print("     never looked at. Real order: the window on record is alive and")
+print("     never came up; the panel's POST /resume. -> DECISIONS.md 8.53 (33.2)")
+_p134 = os.path.join(TMP, "resume-refused-134")
+os.makedirs(_p134, exist_ok=True)
+_k134 = canon(_p134)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p134: {}}})
+_w134 = subprocess.Popen([sys.executable, "-c",
+                          "import time" + chr(10) + "time.sleep(900)"],
+                         creationflags=getattr(subprocess,
+                                               "CREATE_NO_WINDOW", 0))
+STAND_INS.append(_w134)
+_l134 = []
+_launch134o = daemon.sessions.launch
+
+
+def _launch134(project, role, **kw):
+    _l134.append({"project": canon(project), "role": role})
+    return 1341003
+
+
+def _mine134():
+    return sorted(l["role"] for l in _l134 if l["project"] == _k134)
+
+
+try:
+    daemon.sessions.launch = _launch134
+    with daemon._lock:
+        # written now, for the process born just above: a window the bridge
+        # opened and that is sitting there, never registered
+        daemon.STATE.setdefault("pids", {})["%s|executor" % _k134] = {
+            "pid": _w134.pid, "at": time.time(), "registered": False,
+            "why": "restart after it died"}
+        daemon.save_state()
+    _why134 = daemon.launch_guard(_p134, "executor") or ""
+    check("PRECONDITION: launch_guard refuses the executor - its window is "
+          "alive and never came up", bool(_why134), True)
+    _r134 = post("/resume", {"project": _p134}, secret=True)
+    check("(a) the refusal is in the journal, at warn, with its reason",
+          any(r.get("level") == "warn" and _why134[:40]
+              and _why134[:40] in (r.get("text") or "")
+              for r in _jl("Resume refused the executor: ", _p134)), True)
+    check("(b) the planner was still asked",
+          bool(_jl("Resume check for the planner", _p134)), True)
+    check("(b) and started", _mine134(), ["planner"])
+    check("(c) the panel is told both, in one answer",
+          (_r134.get("ok"), len(_r134.get("refused") or []),
+           "executor" in (_r134.get("error") or ""),
+           "Started: planner" in (_r134.get("error") or "")),
+          (False, 1, True, True))
+    print("   CONTROL: nothing to refuse - both start and the answer is ok")
+    with daemon._lock:
+        for _r in ("executor", "planner"):
+            (daemon.STATE.get("pids") or {}).pop("%s|%s" % (_k134, _r), None)
+            (daemon.STATE.get("launches") or {}).pop("%s|%s" % (_k134, _r),
+                                                     None)
+        daemon.save_state()
+    del _l134[:]
+    _r134b = post("/resume", {"project": _p134}, secret=True)
+    check("CONTROL: both started, and the answer is ok",
+          (_r134b.get("ok"), _mine134()), (True, ["executor", "planner"]))
+finally:
+    daemon.sessions.launch = _launch134o
+    with daemon._lock:
+        for _r in ("executor", "planner"):
+            (daemon.STATE.get("pids") or {}).pop("%s|%s" % (_k134, _r), None)
+        daemon.save_state()
+    post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n135. a task held for an /init is said to be held, and the hold is")
+print("     the /init window's alone")
+print("     2026-09-28: the /init window of 14:54:27 (pid 10128) ended in")
+print("     seconds; the panel opened 13380 and then 1860 WITHOUT /init; the")
+print("     planner's task of 15:04:31 was journalled 'Task delivered' (J")
+print("     28.09:3775) and sat in the hold set for 10128 until 1860 ended a")
+print("     turn at 15:17:06 (3920) - 12.5 minutes. Real order: the death,")
+print("     restart_session with /init, that session ends, the panel's start,")
+print("     SessionStart, the task. -> DECISIONS.md 8.53 (33.3)")
+_p135 = os.path.join(TMP, "init-hold-135")
+os.makedirs(_p135, exist_ok=True)
+_k135 = canon(_p135)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p135: {}}})
+post_rc("/loop", {"action": "start", "project": _p135})
+for _r, _s in (("executor", "ih135-e1"), ("planner", "ih135-p1")):
+    post_rc("/event", {"hook_event_name": "SessionStart", "role": _r,
+                       "session_id": _s, "project_dir": _p135, "cwd": _p135})
+    register(_p135, _r, _s)
+DELIVERED[(_k135, "executor")] = []
+_l135 = []
+_launch135o = daemon.sessions.launch
+_alive135o = daemon.sessions.pid_alive
+
+
+def _launch135(project, role, **kw):
+    _l135.append({"project": canon(project), "role": role,
+                  "prompt": kw.get("prompt")})
+    return 1351001 if len([l for l in _l135 if l["project"] == _k135]) == 1 \
+        else 1351002
+
+
+def _got135(marker):
+    return any(marker in (d.get("content") or "")
+               for d in DELIVERED.get((_k135, "executor"), []))
+
+
+def _held135(marker):
+    return any(marker in (b.get("content") or "")
+               for b in (daemon.STATE.get("after_init") or {}).get(_k135)
+               or [])
+
+
+try:
+    daemon.sessions.launch = _launch135
+    daemon.sessions.pid_alive = lambda pid: False
+    daemon.handle_session_death(_p135, "executor",
+                                daemon.best_session(_p135, "executor") or {})
+    daemon.sessions.pid_alive = _alive135o
+    check("PRECONDITION: the executor was raised with /init, and the bridge "
+          "waits for it",
+          (bool([l for l in _l135 if l["project"] == _k135 and l["prompt"]]),
+           bool(daemon.init_pending(_p135))), (True, True))
+    print("   (a) while the /init window holds the half a task is HELD - and")
+    print("   the journal says held, not delivered")
+    _n135 = len(_jl("Task delivered to the executor", _p135))
+    post("/task", {"project": _p135,
+                   "instructions": "PIECE-A-135 while it starts"},
+         secret=True)
+    check("(a) the journal says it is held until the /init ends",
+          until(lambda: bool(_jl("Task held until the executor's /init "
+                                 "ends", _p135)), 20), True)
+    check("(a) it is held, and not handed to the window",
+          (_held135("PIECE-A-135"), _got135("PIECE-A-135")), (True, False))
+    check("(a) and the journal does not say it was delivered",
+          len(_jl("Task delivered to the executor", _p135)), _n135)
+    print("   (b) that window's session ends, and a person opens the half from")
+    print("   the panel - WITHOUT /init")
+    post_rc("/event", {"hook_event_name": "SessionEnd", "role": "executor",
+                       "session_id": "ih135-e2", "project_dir": _p135,
+                       "cwd": _p135, "reason": "other"})
+    post("/session", {"action": "launch", "project": _p135,
+                      "role": "executor", "confirm": True}, secret=True)
+    check("PRECONDITION: the panel's window holds the half now",
+          ((daemon.STATE.get("pids") or {}).get("%s|executor" % _k135)
+           or {}).get("pid"), 1351002)
+    post_rc("/event", {"hook_event_name": "SessionStart", "role": "executor",
+                       "session_id": "ih135-e3", "project_dir": _p135,
+                       "cwd": _p135})
+    register(_p135, "executor", "ih135-e3")
+    post("/task", {"project": _p135,
+                   "instructions": "PIECE-B-135 after the panel"},
+         secret=True)
+    check("(b) the task goes to that window at once, not into the hold",
+          until(lambda: _got135("PIECE-B-135"), 20), True)
+    check("(b) and nothing of it is held", _held135("PIECE-B-135"), False)
+    check("(b) the bridge no longer waits for an /init nobody is running",
+          bool(daemon.init_pending(_p135)), False)
+    print("   (c) what was held for the /init window goes to the window that")
+    print("   holds the half, and the journal says why")
+    daemon.release_stranded_init_holds()
+    check("(c) the held task reaches the panel's window",
+          until(lambda: _got135("PIECE-A-135"), 20), True)
+    check("(c) with the reason in the journal",
+          bool(_jl("The /init hold was set for window 1351001", _p135)), True)
+finally:
+    daemon.sessions.launch = _launch135o
+    daemon.sessions.pid_alive = _alive135o
+    post("/loop", {"project": _p135, "action": "stop"}, secret=True)
+    with daemon._lock:
+        (daemon.STATE.get("pids") or {}).pop("%s|executor" % _k135, None)
+        (daemon.STATE.get("init_pending") or {}).pop(_k135, None)
+        (daemon.STATE.get("after_init") or {}).pop(_k135, None)
+        daemon.save_state()
+    post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n136. a new session's quiet is its own, not its predecessor's")
+print("     2026-09-28 15:13:13 (J 28.09:3874): a session sixteen minutes old")
+print("     was told 'nothing written for 75 minutes' - counted from the last")
+print("     write of the session that died with the power at 13:58, through")
+print("     the reboot and a new SessionStart, because the record the quiet is")
+print("     measured from was kept per pair. Real order: the old session goes")
+print("     quiet under the bridge's eye, a new one starts through /event, then")
+print("     the tier's own question. -> DECISIONS.md 8.53 (33.4)")
+_p136 = os.path.join(TMP, "quiet-136")
+os.makedirs(_p136, exist_ok=True)
+_k136 = canon(_p136)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p136: {}}})
+post_rc("/loop", {"action": "start", "project": _p136})
+_tr136 = {}
+_tof136 = sessions.transcript_of
+_thr136 = dict(daemon.CFG.get("thresholds") or {})
+
+
+def _iso136(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t))
+
+
+def _write136(sid, rows):
+    _f = os.path.join(_p136, "%s.jsonl" % sid)
+    with open(_f, "w", encoding="utf-8") as _fh:
+        for _row in rows:
+            _fh.write(json.dumps(_row) + "\n")
+    _tr136[sid] = _f
+
+
+def _st136():
+    return daemon.stalled(_p136, daemon.situation(_p136))
+
+
+try:
+    sessions.transcript_of = (lambda sid, *a, **k: _tr136.get(sid)
+                              or _tof136(sid, *a, **k))
+    daemon.CFG.setdefault("thresholds", {})["stall_quiet"] = 5
+    _write136("qt136-old", [{"type": "assistant",
+                             "timestamp": _iso136(time.time() - 120),
+                             "message": {"role": "assistant",
+                                         "content": "old work"}}])
+    for _r, _s in (("executor", "qt136-old"), ("planner", "qt136-pl")):
+        post_rc("/event", {"hook_event_name": "SessionStart", "role": _r,
+                           "session_id": _s, "project_dir": _p136,
+                           "cwd": _p136})
+        register(_p136, _r, _s)
+    daemon.transcript_frozen(_p136, "executor", 5)      # the bridge looks
+    with daemon._lock:
+        daemon.STATE["tscript"]["%s|executor" % _k136]["at"] = \
+            time.time() - 60
+        daemon.save_state()
+    check("PRECONDITION: the old session, quiet 60 s past a 5 s threshold, "
+          "is named", (_st136() or ("",))[0], "executor")
+    print("   a new session starts in the half; its transcript has nothing a")
+    print("   turn wrote yet, as a fresh window's has not")
+    _write136("qt136-new", [{"type": "system", "subtype": "bridge_status",
+                             "timestamp": _iso136(time.time()),
+                             "content": "remote control is active"}])
+    post_rc("/event", {"hook_event_name": "SessionStart", "role": "executor",
+                       "session_id": "qt136-new", "project_dir": _p136,
+                       "cwd": _p136})
+    register(_p136, "executor", "qt136-new")
+    check("PRECONDITION: the half's session is the new one",
+          daemon.last_session_id(_p136, "executor"), "qt136-new")
+    check("(a) the new session is not called silent for its predecessor's "
+          "quiet", _st136(), None)
+    check("(a) and the record the quiet is counted from is this session's",
+          ((daemon.STATE.get("tscript") or {}).get("%s|executor" % _k136)
+           or {}).get("sid"), "qt136-new")
+    print("   CONTROL: the new session itself, quiet longer than stall_quiet")
+    print("   after its own start, is still named")
+    with daemon._lock:
+        _rec136 = (daemon.STATE.get("tscript") or {}).get(
+            "%s|executor" % _k136)
+        if _rec136:
+            _rec136["at"] = time.time() - 60
+        daemon.save_state()
+    check("CONTROL: named", (_st136() or ("",))[0], "executor")
+finally:
+    sessions.transcript_of = _tof136
+    daemon.CFG["thresholds"] = _thr136
+    post("/loop", {"project": _p136, "action": "stop"}, secret=True)
+    with daemon._lock:
+        (daemon.STATE.get("tscript") or {}).pop("%s|executor" % _k136, None)
+        daemon.save_state()
+    post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+_RUN33 = ("mode", "recovered_reason", "clean_shutdown", "last_stop_mid_run",
+          "started_at", "alive_at", "restart_notice")
+
+
+def _save33():
+    with daemon._lock:
+        return ({k: dict(v or {}) for k, v in
+                 (daemon.STATE.get("pids") or {}).items()},
+                {k: daemon.STATE.get(k) for k in _RUN33})
+
+
+def _restore33(saved):
+    with daemon._lock:
+        daemon.STATE["pids"] = saved[0]
+        for _k, _v in saved[1].items():
+            if _v is None:
+                daemon.STATE.pop(_k, None)
+            else:
+                daemon.STATE[_k] = _v
+        daemon.save_state()
+
+
+print("\n137. the restart notice says what happened to the window")
+print("     2026-09-28 (J 28.09:3600, 3605, 3693, 3700): four sessions after")
+print("     the power cut were written down as 'its window was up through it'")
+print("     - no window was up through anything. Real order: the start the")
+print("     daemon runs (begin_run) over a dead window's record, then the new")
+print("     session's SessionStart. -> DECISIONS.md 8.53 (33.5)")
+_p137 = os.path.join(TMP, "notice-137")
+os.makedirs(_p137, exist_ok=True)
+_k137 = canon(_p137)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p137: {}}})
+post_rc("/loop", {"action": "start", "project": _p137})
+_saved137 = _save33()
+try:
+    _dead137 = dead_pid()
+    with daemon._lock:
+        daemon.STATE.setdefault("pids", {})["%s|executor" % _k137] = {
+            "pid": _dead137, "at": time.time() - 300, "registered": True,
+            "registered_via": "session"}
+        daemon.save_state()
+    daemon.begin_run("reboot")
+    check("PRECONDITION: the reboot touched the half, and its window is NOT "
+          "alive", ((daemon.STATE.get("restart_notice") or {})
+                    .get("%s|executor" % _k137) or {}).get("alive"), False)
+    post_rc("/event", {"hook_event_name": "SessionStart", "role": "executor",
+                       "session_id": "nt137-new", "project_dir": _p137,
+                       "cwd": _p137})
+    _told137 = _jl("Told session nt137-ne", _p137)
+    _t137 = _told137[-1].get("text") if _told137 else ""
+    check("the new session was told", bool(_told137), True)
+    check("(a) the line says the machine restarted and this window is new",
+          ("the machine restarted" in _t137, "this window is new" in _t137),
+          (True, True))
+    check("(a) and not that its window was up through it",
+          "was up through it" in _t137, False)
+    print("   CONTROL: a window that WAS up through a clean stop is still said")
+    print("   to have been")
+    stand_in(_p137, "executor")
+    daemon.begin_run("shutdown_mid_run")
+    post_rc("/event", {"hook_event_name": "SessionStart", "role": "executor",
+                       "session_id": "nt137-liv", "project_dir": _p137,
+                       "cwd": _p137})
+    _live137 = _jl("Told session nt137-li", _p137)
+    check("CONTROL: said to have been up through it",
+          "was up through it" in (_live137[-1].get("text")
+                                  if _live137 else ""), True)
+finally:
+    _restore33(_saved137)
+    post("/loop", {"project": _p137, "action": "stop"}, secret=True)
+    post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n138. the planner's check answers with the run's result, however long")
+print("     the run - and never FAILED about a run that is still going")
+print("     2026-09-28: the planner's check of 15:19:01 passed at 15:48:36")
+print("     (its planner_check line, folder 2026-09-28_151901-planner-check)")
+print("     while the tool had said 'CHECK FAILED ... nothing ran ... artefacts:")
+print("     -': one HTTP call waited for the whole run and timed out first.")
+print("     Real order: the planner's channel code calling the real endpoints")
+print("     of this daemon; the run is stubbed to take longer than one call.")
+print("     -> DECISIONS.md 8.53 (33.6)")
+from bridgecore import channel as _chan138                   # noqa: E402
+_p138 = os.path.join(TMP, "check-138")
+os.makedirs(_p138, exist_ok=True)
+_k138 = canon(_p138)
+post("/config", {"projects": {A: {}, B: {}, C: {},
+                              _p138: {"checks": ["suites"]}}})
+_saved138 = (daemon._check_copy, daemon._run_one, daemon._check_package,
+             _chan138.DAEMON, _chan138.PROJECT,
+             {n: getattr(_chan138, n, None) for n in
+              ("CHECK_CALL_TIMEOUT", "CHECK_POLL_SEC", "CHECK_WAIT_MAX_SEC")})
+_RUN138 = 2.0
+
+
+def _run_one138(cmd, cwd, env, out_path):
+    time.sleep(_RUN138)
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write("stubbed" + chr(10))
+    return 0, "ok"
+
+
+def _tool138():
+    _r = _chan138.handle_request({"jsonrpc": "2.0", "id": 138,
+                                  "method": "tools/call",
+                                  "params": {"name": "check",
+                                             "arguments": {
+                                                 "suite": "handover"}}})
+    _res = (_r or {}).get("result") or {}
+    return (" ".join(c.get("text") or "" for c in _res.get("content") or []),
+            _res.get("isError"))
+
+
+try:
+    daemon._check_copy = lambda dst: os.makedirs(dst, exist_ok=True)
+    daemon._run_one = _run_one138
+    daemon._check_package = lambda work, env, artefacts: (0, "ok")
+    _chan138.DAEMON = "http://127.0.0.1:%d" % PORT
+    _chan138.PROJECT = _p138
+    _chan138.CHECK_CALL_TIMEOUT = 1
+    _chan138.CHECK_POLL_SEC = 0.3
+    _chan138.CHECK_WAIT_MAX_SEC = 60
+    print("   (a) one call to the bridge gives up after 1 s; the run takes 4 s")
+    _t138, _e138 = _tool138()
+    check("(a) the planner gets the run's result: CHECK PASSED",
+          "CHECK PASSED" in _t138, True)
+    check("(a) and not a word of FAILED", "FAILED" in _t138, False)
+    check("(a) with the folder the run wrote into",
+          ("planner-check" in _t138, "artefacts: -" in _t138), (True, False))
+    check("(a) and it is not an error", bool(_e138), False)
+    print("   (b) a whole wait shorter than the run: the tool says the run is")
+    print("   going and where its result will be - and the run still ends and")
+    print("   is recorded")
+    _chan138.CHECK_WAIT_MAX_SEC = 1
+    _t138b, _e138b = _tool138()
+    check("(b) it says RUNNING, and that this is not a result",
+          ("RUNNING since" in _t138b, "not a result" in _t138b),
+          (True, True))
+    check("(b) and not a word of FAILED", "FAILED" in _t138b, False)
+    check("(b) the run itself ends and is recorded as passed",
+          until(lambda: bool(((daemon.STATE.get("checks") or {})
+                              .get(_k138) or {}).get("ok"))
+                and not daemon.CHECK_RUNNING.get(_k138), 30), True)
+    # WAITED ON, not read once: _check_execute writes the record and
+    # THEN the journal line, and the wait above ends on the record - the
+    # first red run read the journal in between (rule under case 74)
+    check("(b) and the journal carries its planner_check line",
+          until(lambda: bool([r for r in daemon.store.recent_events(
+              800, project=_p138) if r.get("kind") == "planner_check"
+              and "check passed" in (r.get("text") or "")]), 15), True)
+finally:
+    # the run goes on in a thread and reads _run_one at call time: the
+    # stubs stay until it is over, or its tail would run the real suites
+    until(lambda: not daemon.CHECK_RUNNING.get(_k138), 30)
+    (daemon._check_copy, daemon._run_one, daemon._check_package,
+     _chan138.DAEMON, _chan138.PROJECT) = _saved138[:5]
+    for _n, _v in _saved138[5].items():
+        if _v is not None:
+            setattr(_chan138, _n, _v)
+    post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n139. the old pairs come back at the start, each on its own session -")
+print("     unless a live window already holds the half")
+print("     2026-09-28 the start after the power cut said 'Nothing was")
+print("     restarted on its own', and 33.7 then held the dead halves until")
+print("     the resume tab answered. The owner's word: the old pairs come")
+print("     back every time - unless a new pair has started in the project.")
+print("     Real order: the")
+print("     SessionStarts of the windows the reboot took, a planner window")
+print("     opened by hand, the start main() runs (begin_run,")
+print("     raise_after_stop, report_startup), then the watch's tick.")
+print("     -> DECISIONS.md 8.56 (36.2, 36.3)")
+_p139 = os.path.join(TMP, "reboot-raise-139")
+os.makedirs(_p139, exist_ok=True)
+_k139 = canon(_p139)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p139: {}}})
+post_rc("/loop", {"action": "start", "project": _p139})
+_saved139 = _save33()
+_raise139 = need78(daemon, "raise_after_stop", [])
+_tr139 = {}
+for _s in ("rw139-ex", "rw139-pl"):
+    _tr139[_s] = os.path.join(_p139, "%s.jsonl" % _s)
+    with open(_tr139[_s], "w", encoding="utf-8") as _fh:
+        _fh.write(json.dumps({"type": "assistant", "message": {
+            "content": [{"type": "text", "text": "done"}],
+            "stop_reason": "end_turn"}}) + "\n")
+_tof139 = sessions.transcript_of
+_l139 = []
+_launch139o = daemon.sessions.launch
+_notify139o = daemon.notify
+_up139 = 1391001                  # odd: never a real Windows pid
+_live139 = subprocess.Popen([sys.executable, "-c",
+                             "import time" + chr(10) + "time.sleep(900)"],
+                            creationflags=getattr(subprocess,
+                                                  "CREATE_NO_WINDOW", 0))
+STAND_INS.append(_live139)
+
+
+def _launch139(project, role, **kw):
+    _l139.append({"project": canon(project), "role": role,
+                  "resume": kw.get("resume_id"), "prompt": kw.get("prompt")})
+    return _up139
+
+
+def _mine139():
+    return [(l["role"], l["resume"], l["prompt"]) for l in _l139
+            if l["project"] == _k139]
+
+
+def _start139(role, sid, window):
+    post_rc("/event", {"hook_event_name": "SessionStart", "role": role,
+                       "session_id": sid, "project_dir": _p139,
+                       "cwd": _p139, "window_pid": window})
+
+
+try:
+    sessions.transcript_of = (lambda sid, *a, **k: _tr139.get(sid)
+                              or _tof139(sid, *a, **k))
+    daemon.sessions.launch = _launch139
+    daemon.notify = lambda *a, **k: None
+    _dx139, _dp139 = dead_pid(), dead_pid()
+    _start139("executor", "rw139-ex", _dx139)
+    _start139("planner", "rw139-pl", _dp139)
+    with daemon._lock:
+        # only this project's windows are judged here: the others are the
+        # other cases', and the start below would raise them too
+        daemon.STATE["pids"] = {
+            "%s|executor" % _k139: {"pid": _dx139, "at": time.time() - 900,
+                                    "registered": True,
+                                    "registered_via": "session"},
+            "%s|planner" % _k139: {"pid": _dp139, "at": time.time() - 900,
+                                   "registered": True,
+                                   "registered_via": "session"}}
+        daemon.save_state()
+    # a planner window somebody opened by hand, alive, on a session of its own
+    _start139("planner", "rw139-pl2", _live139.pid)
+    daemon.begin_run("reboot")
+    _raised139 = _raise139("reboot")
+    _at139 = time.strftime("%Y-%m-%dT%H:%M:%S")     # this start's line
+    try:
+        daemon.report_startup("reboot", False, _raised139)
+    except TypeError:
+        # the code before 36 took two arguments; the red run needs the
+        # rest of this case, not a traceback
+        daemon.report_startup("reboot", False)
+    print("   (a) the executor comes back at the start, --resume of its own")
+    check("(a) the executor is raised with --resume of its session, no /init",
+          _mine139(), [("executor", "rw139-ex", None)])
+    check("(a) the planner is not: a live window holds that half",
+          bool(_jl("The planner is not raised: a live window holds this "
+                   "half (pid %s)" % _live139.pid, _p139)), True)
+    # THIS start's line, whatever it says: a filter on the words the
+    # new code writes left the negative below nothing to deny on the
+    # code before 36, and it stayed green there
+    _rec139 = [r.get("text") or "" for r in
+               daemon.store.recent_events(300)
+               if r.get("kind") == "recovery"
+               and (r.get("at") or "") >= _at139
+               and (r.get("text") or "").startswith(
+                   daemon.REASONS["reboot"][:30])]
+    check("(a) the start wrote its line", bool(_rec139), True)
+    _name139 = daemon.project_name(_k139)
+    check("(a) the line says which old sessions it raised",
+          bool([t for t in _rec139 if "Raising the old sessions" in t
+                and
+                "%s executor: resumed rw139-e" % _name139 in t
+                and "%s planner: not raised - a live window holds this half"
+                % _name139 in t]), True)
+    check("(a) and it does not say nothing was restarted",
+          [t for t in _rec139 if "Nothing was restarted" in t], [])
+    check("(a) the pair is not paused",
+          bool(daemon.paused_for(_p139)), False)
+    check("(b) main() runs the raise between begin_run and report_startup",
+          "report_startup(reason, prev_clean, raise_after_stop(reason))"
+          in inspect.getsource(daemon.main), True)
+    print("   (c) the watch's tick after the settle adds nothing: the raised")
+    print("   window came up, and the planner's dead record went with the")
+    print("   refusal, so its death is not handled again")
+    DECLARED_ALIVE.add(_up139)
+    _start139("executor", "rw139-ex", _up139)
+    with daemon._lock:
+        daemon.STATE["started_at"] = time.time() - 9999   # past the settle
+        daemon.save_state()
+    daemon.check_sessions(0)
+    daemon.check_sessions(0)
+    check("(c) no further window is opened", _mine139(),
+          [("executor", "rw139-ex", None)])
+    check("(c) the refusal is said once, not at every tick",
+          len(_jl("not raised: a live window holds this half", _p139)), 1)
+    print("   CONTROL: a window that dies after the start is raised by the")
+    print("   death watch, on its own session, as before")
+    DECLARED_ALIVE.discard(_up139)
+    _dz139 = dead_pid()
+    with daemon._lock:
+        daemon.STATE["pids"]["%s|executor" % _k139] = {
+            "pid": _dz139, "at": time.time() - 900, "registered": True,
+            "registered_via": "session"}
+        (daemon.STATE.get("down") or {}).pop("%s|executor" % _k139, None)
+        daemon.save_state()
+    daemon.check_sessions(0)
+    check("CONTROL: it is raised on its own, with --resume",
+          until(lambda: _mine139()[1:] == [("executor", "rw139-ex", None)],
+                15), True)
+finally:
+    DECLARED_ALIVE.discard(_up139)
+    sessions.transcript_of = _tof139
+    daemon.sessions.launch = _launch139o
+    daemon.notify = _notify139o
+    _restore33(_saved139)
+    with daemon._lock:
+        for _box in ("down", "restart_tries", "init_pending",
+                     "window_sessions", "launches"):
+            for _r in ("executor", "planner"):
+                (daemon.STATE.get(_box) or {}).pop("%s|%s" % (_k139, _r),
+                                                   None)
+            (daemon.STATE.get(_box) or {}).pop(_k139, None)
+        daemon.save_state()
+    post("/loop", {"project": _p139, "action": "stop"}, secret=True)
+    post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n140. the model probe and the archive search ask the real-client gate")
+print("     2026-09-28: a suite's /session launch reached maybe_auto_probe,")
+print("     and probe_models ran `claude -p` through subprocess.run with no")
+print("     gate in front of it. In the sabotage copies inside the bridge's")
+print("     own project folder each probe's client found its .mcp.json, whose")
+print("     bridge server pins BRIDGE_PORT 8765: 62 channels 'bridge-probe'")
+print("     registered with the LIVE daemon. Real order: the panel's start,")
+print("     the probe it sets off, the call that would start the client.")
+print("     NOTHING HERE MAY REALLY START THE CLIENT, not even on the old code:")
+print("     the start is recorded instead (the idiom of case 79).")
+print("     -> DECISIONS.md 8.55 (34)")
+_p140 = os.path.join(TMP, "probe-gate-140")
+os.makedirs(os.path.join(_p140, "bridge-logs"), exist_ok=True)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p140: {}}})
+_run140o = daemon.subprocess.run
+_pop140o = daemon.subprocess.Popen
+_started140 = []
+
+
+class _Done140(object):
+    returncode = 1
+    stdout = ""
+    stderr = "recorded by case 140, not started"
+
+
+class _Proc140(object):
+    pid = 1400001
+    returncode = 1
+
+    def communicate(self, timeout=None):
+        return b"", b"recorded by case 140, not started"
+
+    def poll(self):
+        return 1
+
+
+def _is_client140(cmd):
+    c = [cmd] if isinstance(cmd, str) else list(cmd or [])
+    return bool(c) and os.path.splitext(
+        os.path.basename(str(c[0])))[0].lower() == "claude"
+
+
+def _run140(cmd, *a, **kw):
+    if _is_client140(cmd):
+        _started140.append(("run", list(cmd)))
+        return _Done140()
+    return _run140o(cmd, *a, **kw)
+
+
+def _popen140(cmd, *a, **kw):
+    if _is_client140(cmd):
+        _started140.append(("popen", list(cmd)))
+        return _Proc140()
+    return _pop140o(cmd, *a, **kw)
+
+
+def _stale140():
+    """The registry as a fresh machine has it: never probed. Written, so
+    the case does not depend on whether an earlier case probed."""
+    _m = daemon.store.load_models()
+    _m["last_probe"] = ""
+    daemon.store.save_models(_m)
+    with daemon._lock:
+        daemon.STATE["model_probe_running"] = False
+        daemon.save_state()
+
+
+def _probe_lines140():
+    return [r for r in daemon.store.recent_events(800)
+            if "Model probe refused" in (r.get("text") or "")]
+
+
+try:
+    daemon.subprocess.run = _run140
+    daemon.subprocess.Popen = _popen140
+    os.environ.pop("BRIDGE_REAL_CLIENT", None)
+    _stale140()
+    _n140 = len(_probe_lines140())
+    print("   (a) the panel's start sets the probe off; a suite's probe is")
+    print("   refused, and says so")
+    post("/session", {"action": "launch", "project": _p140,
+                      "role": "executor", "confirm": True}, secret=True)
+    check("PRECONDITION: the probe ran to its end",
+          until(lambda: not daemon.STATE.get("model_probe_running"), 30),
+          True)
+    check("(a) THE RECEIVER: no start of the client was attempted",
+          [c for k, c in _started140 if k == "run"], [])
+    check("(a) and the journal says the probe was refused, and why",
+          until(lambda: len(_probe_lines140()) > _n140, 10), True)
+    print("   (b) the archive search, left with its default `claude`, is")
+    print("   refused the same way")
+    _rec140 = archive.search(_p140, "what broke?", timeout=30)
+    check("(b) THE RECEIVER: nothing was started for it",
+          [c for k, c in _started140 if k == "popen"], [])
+    check("(b) and its record says why, as a failure with its reason",
+          (_rec140.get("state"), "not started" in (_rec140.get("error")
+                                                   or "")), ("failed", True))
+    print("   CONTROL: BRIDGE_REAL_CLIENT=1 is how to mean it - the probe and")
+    print("   the search go through (to the recorder, not a real client)")
+    os.environ["BRIDGE_REAL_CLIENT"] = "1"
+    _stale140()
+    del _started140[:]
+    daemon.start_probe()
+    check("CONTROL: the probe ran to its end",
+          until(lambda: not daemon.STATE.get("model_probe_running"), 30),
+          True)
+    check("CONTROL: the probe started the client, once per model",
+          len([c for k, c in _started140 if k == "run"]) > 0, True)
+    archive.search(_p140, "what broke?", timeout=30)
+    check("CONTROL: the search started the client",
+          len([c for k, c in _started140 if k == "popen"]), 1)
+finally:
+    until(lambda: not daemon.STATE.get("model_probe_running"), 30)
+    daemon.subprocess.run = _run140o
+    daemon.subprocess.Popen = _pop140o
+    os.environ.pop("BRIDGE_REAL_CLIENT", None)
+    post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n141. a channel that was never a pair's, and its colour, go at start")
+print("     After the leak of case 140 the next start dropped the probe's loop")
+print("     records and notes and kept 12 channel records and 16 colours for")
+print("     folders named 'bridge-probe' - neither is a dictionary keyed by")
+print("     path, so the sweep never looked. Real order: the channel's own")
+print("     registration, the panel's poll that gives it a colour, the folder")
+print("     going, then the step the start runs. -> DECISIONS.md 8.55 (34)")
+_g141 = os.path.join(TMP, "ghost-141", "bridge-probe")
+_t141 = os.path.join(TMP, "kept-141", "bridge-probe")
+_p141 = os.path.join(TMP, "a-real-pair-141")
+for _d in (_g141, _t141, _p141):
+    os.makedirs(_d, exist_ok=True)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p141: {}}})
+for _d in (_g141, _t141, _p141):
+    post("/channel/register", {"project": _d, "role": "executor",
+                               "port": open_channel(_d, "executor"),
+                               "pid": os.getpid()}, secret=True)
+get("/state")                                   # the panel's poll
+
+
+def _chan141(d):
+    return [k for k, v in (daemon.STATE.get("sessions") or {}).items()
+            if ":channel:" in k and daemon.norm((v or {}).get("path"))
+            == daemon.norm(d)]
+
+
+def _mark141(d):
+    return daemon.norm(d) in {daemon.norm(k)
+                              for k in (daemon.CFG.get("marks") or {})}
+
+
+check("PRECONDITION: each registration left a channel record",
+      (bool(_chan141(_g141)), bool(_chan141(_t141)), bool(_chan141(_p141))),
+      (True, True, True))
+check("PRECONDITION: and the panel's poll gave each a colour",
+      (_mark141(_g141), _mark141(_t141), _mark141(_p141)),
+      (True, True, True))
+# the copy it lived in went. MOVED aside inside TMP, not deleted: the
+# daemon's journal has written into it, and a suite deletes only
+# through owntemp.finish(TMP) (8.43, 8.45)
+os.rename(os.path.dirname(_g141), os.path.dirname(_g141) + "-gone")
+daemon.migrate_ghost_records()
+check("(a) the gone folder's channel record is dropped", _chan141(_g141), [])
+check("(a) and so is its colour", _mark141(_g141), False)
+check("(b) a folder under the temp folder that is not a project goes too",
+      (_chan141(_t141), _mark141(_t141)), ([], False))
+check("(c) the journal says how many, and which",
+      (bool([r for r in daemon.store.recent_events(400)
+             if "channel record(s) of folders that are not projects"
+             in (r.get("text") or "") and "ghost-141" in r["text"]]),
+       bool([r for r in daemon.store.recent_events(400)
+             if "pair colour(s) given to folders that are not projects"
+             in (r.get("text") or "") and "kept-141" in r["text"]])),
+      (True, True))
+print("   CONTROL: a configured project under the same temp folder keeps its")
+print("   channel record and its colour")
+check("CONTROL: kept", (bool(_chan141(_p141)), _mark141(_p141)),
+      (True, True))
+check("CONTROL: running it again drops nothing more",
+      daemon.migrate_ghost_records(), ([], []))
+post("/config", {"projects": {A: {}, B: {}, C: {}}})
 
 
 for _si in STAND_INS:

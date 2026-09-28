@@ -902,13 +902,29 @@ check("and so does the gate that holds a report",
 check("lifting it lifts only it", daemon.resume_project(PATH), True)
 check("held nowhere now",
       (daemon.paused_for(PATH), daemon.paused_for(PATH_B)), (False, False))
-print("   a window dying holds its own pair and leaves the others working")
+print("   a window dying holds its own pair and leaves the others working -")
+print("   in a project that does not raise its halves on its own; one that")
+print("   does is not paused at all, the half comes back (8.56, 36.4)")
 daemon.STATE["down"] = {}
 real_notify, daemon.notify = daemon.notify, lambda *a, **k: "log"
+_projects37 = daemon.CFG.get("projects", KeyError)
+_rs37o, _rs37 = daemon.restart_session, []
+daemon.restart_session = lambda *a, **k: _rs37.append(a[:2]) or {"ok": True}
 try:
+    daemon.CFG["projects"] = {A: {"auto_restart_dead_sessions": True}}
+    daemon.handle_session_death(A, "executor", None)
+    check("a project that raises: the half is raised, the pair not held",
+          (_rs37, daemon.paused_for(PATH)), ([(A, "executor")], False))
+    daemon.STATE["down"] = {}
+    daemon.CFG["projects"] = {A: {"auto_restart_dead_sessions": False}}
     daemon.handle_session_death(A, "executor", None)
 finally:
     daemon.notify = real_notify
+    daemon.restart_session = _rs37o
+    if _projects37 is KeyError:
+        daemon.CFG.pop("projects", None)
+    else:
+        daemon.CFG["projects"] = _projects37
 check("the pair whose window died is held", daemon.paused_for(PATH), True)
 check("the other pair keeps working", daemon.paused_for(PATH_B), False)
 check("the bridge is still running", daemon.STATE.get("mode"), "running")
@@ -2958,6 +2974,12 @@ daemon.STATE["loops"] = {
     _here: {"active": False, "iteration": 0},               # here, idle
 }
 _saved_cfg66 = daemon.CFG.get("projects")
+# since 8.55 the sweep also drops channel records and pair colours of any
+# folder that is not a project and is under the temp folder - which, with
+# the projects narrowed to one below, is every other project of this suite.
+# What the case narrows it puts back, as it does for loops and projects.
+_saved_sess66 = dict(daemon.STATE.get("sessions") or {})
+_saved_marks66 = dict(daemon.CFG.get("marks") or {})
 daemon.CFG["projects"] = {daemon.norm(_here): {}}
 # The note the same ghost left in another dictionary. It looks like
 # history and is not: the daemon deletes it as soon as the loop starts.
@@ -2985,6 +3007,8 @@ check("running it again drops nothing",
 daemon.STATE["loops"] = _gl
 daemon.STATE.pop("loop_off", None)
 daemon.CFG["projects"] = _saved_cfg66
+daemon.STATE["sessions"] = _saved_sess66
+daemon.CFG["marks"] = _saved_marks66
 
 print("\n67. the folder's own spelling is what a person is shown")
 print("    Keys are folded to norm(), which on Windows is lower case, and")
@@ -7398,8 +7422,10 @@ for _name in _SUITES113:
         _bad113.append(_name)
 check("(d) every suite here makes and finishes through owntemp - all eight "
       "in the repository", _bad113, [])
-_rc113 = _calls113(_ast113.parse(inspect.getsource(daemon.run_check)))
-check("(d) run_check: owntemp.make, owntemp.remove, and no rmtree",
+# _check_execute since 8.53 (33.6): run_check and start_check share it,
+# and it is the one that makes the copy and removes it
+_rc113 = _calls113(_ast113.parse(inspect.getsource(daemon._check_execute)))
+check("(d) the check's run: owntemp.make, owntemp.remove, and no rmtree",
       (any(a == "make" and b == "owntemp" for a, b, _k, _n in _rc113),
        any(a == "remove" and b == "owntemp" for a, b, _k, _n in _rc113),
        any(a == "rmtree" for a, b, _k, _n in _rc113)), (True, True, False))

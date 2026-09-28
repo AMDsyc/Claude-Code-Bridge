@@ -1190,9 +1190,18 @@ backdate("planner")
 _win36 = _sp31.Popen([sys.executable, "-c",
                       "import time" + chr(10) + "time.sleep(600)"],
                      creationflags=0x08000000 if os.name == "nt" else 0)
+# AND THE RECORD IS WRITTEN NOW, for the process born now - `at` with the
+# pid. Only the pid was written, over a record whose `at` was the planner's
+# first launch; since 8.46 a record vouches only for a process born by its
+# `at` plus a minute, and when the suite ran slower than that - eight
+# suites at once, 2026-09-28 - the handover was rightly refused as naming
+# a window that is not its own. The same fixture fault stand_in had.
+# -> DECISIONS.md 8.51
 with daemon._lock:
-    daemon.STATE.setdefault("pids", {}).setdefault(
-        "%s|planner" % daemon.norm(PROJ), {})["pid"] = _win36.pid
+    _rec36 = daemon.STATE.setdefault("pids", {}).setdefault(
+        "%s|planner" % daemon.norm(PROJ), {})
+    _rec36["pid"] = _win36.pid
+    _rec36["at"] = time.time()
     daemon.save_state()
 before = len(launches())
 res = daemon.assess(PROJ)

@@ -814,6 +814,17 @@ def search(project_dir, question, model=None, timeout=None, claude="claude",
     env["PYTHONIOENCODING"] = "utf-8"
 
     limit = float(timeout or DEFAULT_TIMEOUT)
+    # THE SAME GATE EVERY START OF THE REAL CLIENT ASKS (8.11): a suite that
+    # left `claude` as the default here would start the real one. Refused
+    # like the model probe, which is where this was found. -> DECISIONS.md
+    # 8.55
+    from . import sessions
+    refused = sessions.real_client_refused(cmd)
+    if refused:
+        rec.update(state="failed", seconds=time.time() - rec["started"],
+                   error="the search was not started: %s" % refused)
+        note("archive", "Archive search refused - %s" % refused)
+        return rec
     proc = None
     try:
         proc = subprocess.Popen(cmd, cwd=root, env=env,

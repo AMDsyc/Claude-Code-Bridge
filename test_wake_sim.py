@@ -509,11 +509,21 @@ def run_seed(seed):
             try:
                 _quiet = float(daemon.CFG.get("thresholds", {})
                                .get("stall_quiet", 600))
+                # THE RECORD NAMES ITS SESSION, as the one transcript_frozen
+                # writes does since 8.53 (33.4): a record with no session
+                # is first sight of whichever session is there now, and
+                # the quiet is counted from here. The fixture writes what
+                # the bridge writes - same size, same age, and the session
+                # the bridge would have taken it on. `want` is untouched.
+                _sid33 = (daemon.last_session_id(proj, "executor")
+                          or (daemon.best_session(proj, "executor") or {})
+                          .get("session_id"))
                 with daemon._lock:
                     daemon.STATE.setdefault("tscript", {})[
                         "%s|executor" % key] = {
                             "size": os.path.getsize(_tp),
-                            "at": time.time() - _quiet - 60}
+                            "at": time.time() - _quiet - 60,
+                            "sid": _sid33}
                     daemon.save_state()
                 t0 = time.time()
                 sit = daemon.situation(proj)

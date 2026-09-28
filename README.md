@@ -440,8 +440,10 @@ them start a dozen agents at once.
 The bridge reads the window size and the carried context from what the client
 reports on every status-line redraw. From those it works out the compaction
 point, the distance to the wall, and how much of its life a session has spent.
-A session is handed over when its cycle can no longer hold five turns — not by
-counting compactions and not by distance alone.
+A session is handed over at its fifth compaction — one that actually landed,
+not one the client only announced — with a written handoff. It goes earlier,
+and calmly, if its own measurements show it can never compact at all, and
+at once if it is past the wall with no ordinary compaction still coming.
 
 A measurement is only ever attributed to the session it was taken from. When a
 compaction fires, the size that goes into the calibration is that session's
@@ -651,6 +653,78 @@ running has to be available to them. It cannot be closed up and resold.
 ## Changes
 
 Newest first. Short on purpose — what changed, not why in detail.
+
+**2026-09-28, evening — what is new since the morning release (b300e42)**
+
+The machine lost power in the middle of the day, and most of this is what
+that showed: how windows come back after they die, and what the bridge says
+about them while it happens.
+
+- **A half whose window died comes back in its own conversation.** Both halves
+  are raised with `--resume` of that half's newest session that ever finished
+  a turn. The newest session is often a raise that failed before it answered
+  anything, and resuming that one brought a window back with no memory of the
+  work; the sessions passed over are named in the log. A new session is the
+  third try, after two resumes that ended right after they started — the
+  working half then starts with `/init`, and the reviewer writes it a handoff
+  from the log. After that the bridge stops trying and asks a person. A half
+  that a live window already holds is not raised, and the pair is no longer
+  paused because a window died, since the half is coming straight back. A
+  project can switch automatic raising off; then a death pauses the pair and
+  asks a person, as before.
+- **After a power cut or a killed bridge, the start raises the windows the stop
+  took down**, and its own message says which. It used to say "nothing was
+  restarted on its own" and then raise them a few minutes later anyway; for a
+  few hours of the same day it held them until a person pressed continue
+  instead — that hold is gone. After a clean stop the windows stay up and
+  nothing needs raising. A window opened by hand while the bridge was down is
+  not seen at that moment: it has had no chance to register yet.
+- **When a session ends, the client's own reason is written down**, with how
+  long its window had been open. Six sessions ended within seconds of starting
+  on the day of the power cut, and the one field that named the reason was not
+  kept anywhere.
+- **Only the windows a restart touched are told about it.** Every window that
+  started after a restart used to be told that the bridge had been restarted
+  in the middle of its turn — read from a flag of the whole bridge that only a
+  person clears, so a window that had come through untouched was told its turn
+  had been cut off. The message now goes once, to the session of the window
+  that was up through the stop, and a turn finished after the restart ends it.
+  That a turn was cut off is said only when the stop recorded something in
+  flight: a report awaiting its review, or a running command. What happened to
+  the window is said as it is — up through the stop, or not survived.
+- **A long command is not reported as stuck while it is working.** The usual
+  length of a command is now learned per program it runs, not per first word
+  of the line, and before waking anyone the bridge looks at the CPU used by
+  that call's own process tree. A person is rung only after the pair was asked
+  and the tree has stood still.
+- **A subagent's command is not the working half's.** A command a subagent
+  runs after its parent ended its turn no longer holds the restart gate or
+  wakes the pair or a person as if the half were stuck. Its outcome is in the
+  subagent's own transcript, and the log line that starts it names the
+  subagent.
+- **Words follow what is done.** Raising a half says whether it is resumed or
+  started new, and from which session. Continue on the resume tab checks both
+  halves and logs every refusal with its reason. A task held until a new
+  window's `/init` ends is logged as held, not as delivered, and the hold
+  belongs only to the window that was opened with `/init`. Silence is counted
+  within the current session, so a new session does not inherit the silence
+  of the one before it.
+- **The reviewer's own acceptance run no longer rides on one long request.**
+  It starts in the background and is asked about until it ends. A call that
+  gets no answer says so — "no result on this call" — instead of reporting a
+  run that was going, and passed, as "failed, nothing ran".
+- **A test run never starts the real client.** The model probe and the archive
+  search started it past the guard that keeps tests from opening a client
+  window; in a test copy inside a watched project, the client found that
+  project's channel settings and registered with the live bridge. Both now ask
+  the same guard. At start, the bridge drops channel records and pair colours
+  of folders that are not projects and are gone or under the temporary
+  folder.
+- **A dead window counts only for the pair whose window it was.** A process
+  number that had once been another project's window, and was later given to
+  a short-lived shell, was read as "this pair's window is gone" and closed a
+  running command's record in a pair it had never belonged to. A number now
+  counts only for the half, and the time, that its record was written about.
 
 **2026-09-28 — what is new since the state of 2026-09-13**
 

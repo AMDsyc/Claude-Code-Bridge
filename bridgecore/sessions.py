@@ -485,6 +485,82 @@ def child_pids(pid, names=SHELLS):
         return None
 
 
+def process_table():
+    """{pid: (parent pid, lowercase image name)} for every process, from one
+    snapshot - or None when it cannot be taken (not Windows, or the snapshot
+    failed). A caller walks a tree from it without a second snapshot, so the
+    tree is one moment and not several. -> DECISIONS.md 8.50
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        import ctypes.wintypes as W
+
+        class PE(ctypes.Structure):
+            _fields_ = [("dwSize", W.DWORD), ("cntUsage", W.DWORD),
+                        ("th32ProcessID", W.DWORD),
+                        ("th32DefaultHeapID", ctypes.c_void_p),
+                        ("th32ModuleID", W.DWORD), ("cntThreads", W.DWORD),
+                        ("th32ParentProcessID", W.DWORD),
+                        ("pcPriClassBase", ctypes.c_long),
+                        ("dwFlags", W.DWORD),
+                        ("szExeFile", ctypes.c_char * 260)]
+        k = ctypes.windll.kernel32
+        k.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        h = k.CreateToolhelp32Snapshot(2, 0)
+        if not h or h == ctypes.c_void_p(-1).value:
+            return None
+        out = {}
+        try:
+            e = PE()
+            e.dwSize = ctypes.sizeof(PE)
+            ok = k.Process32First(ctypes.c_void_p(h), ctypes.byref(e))
+            while ok:
+                out[int(e.th32ProcessID)] = (
+                    int(e.th32ParentProcessID),
+                    e.szExeFile.decode("mbcs", "replace").lower())
+                ok = k.Process32Next(ctypes.c_void_p(h), ctypes.byref(e))
+        finally:
+            k.CloseHandle(ctypes.c_void_p(h))
+        return out
+    except Exception:
+        return None
+
+
+def proc_cpu(pid):
+    """CPU seconds this process has used so far (kernel + user), or None
+    when it cannot be read. Only a LIVE process is counted: Windows keeps
+    no running total of a process's children, so what a finished child used
+    is gone - a caller measures a tree by summing the live members.
+    -> DECISIONS.md 8.50
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        import ctypes.wintypes as wt
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        h = k32.OpenProcess(0x1000, False, int(pid))   # QUERY_LIMITED
+        if not h:
+            return None
+        try:
+            created, exited = wt.FILETIME(), wt.FILETIME()
+            kernel, user = wt.FILETIME(), wt.FILETIME()
+            if not k32.GetProcessTimes(h, ctypes.byref(created),
+                                       ctypes.byref(exited),
+                                       ctypes.byref(kernel),
+                                       ctypes.byref(user)):
+                return None
+        finally:
+            k32.CloseHandle(h)
+        t = ((kernel.dwHighDateTime << 32) | kernel.dwLowDateTime) + \
+            ((user.dwHighDateTime << 32) | user.dwLowDateTime)
+        return t / 1e7
+    except Exception:
+        return None
+
+
 def terminate_and_wait(pid, timeout=30.0):
     """Kill a process and WAIT on it. True when it is really gone.
 

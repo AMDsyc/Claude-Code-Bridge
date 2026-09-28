@@ -93,13 +93,14 @@ is not a framework and it does not try to be one.
 - **Context accounting and rotation.** Window size, carried context, the
   measured compaction point and the distance to the wall — read from what the
   client reports, per model and per project, with the ceiling calibrated as it
-  goes. A session is handed over when its cycle can no longer hold five turns.
+  goes. A session is handed over at its fifth compaction, with a written
+  handoff.
 - **The review loop.** Every finished executor turn becomes a report the
   planner must answer: `continue`, `done`, `wait` or `stop`. Each iteration is
   committed to git when the project is a repository, and appended to a log
   that lives with the project.
-- **Acceptance gates.** `done` and `stop` are refused unless the verdict names
-  artefacts that exist on disk, and unless a report that changed code says
+- **Acceptance gates.** A verdict that passes judgement — `done`, `stop` or
+  `continue` — is refused unless it names artefacts that exist on disk, and unless a report that changed code says
   where the fix lives. Refusal costs the report nothing.
 - **Debt register.** A declared temporary solution is written to
   `bridge-logs/DEBT.md`, counted, and shown until it is explicitly closed.

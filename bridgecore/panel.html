@@ -469,8 +469,8 @@ var D={}, CUR="", THRDIRTY=false;
    panel is about one project by construction. */
 var FEEDALL=false;
 var RREASON={
-  reboot:"Power was lost or the machine restarted while work was in flight. Nothing was restarted on its own - the resume tab shows what every session was doing, which files changed after the last recorded turn, and what is safe to continue.",
-  killed:"The bridge was ended the hard way - the window was closed or the process was killed - while work was in flight. Nothing was restarted on its own; the resume tab has the picture.",
+  reboot:"Power was lost or the machine restarted while work was in flight. The bridge raises the old sessions on its own; the resume tab shows what every session was doing, which files changed after the last recorded turn, and is there for a manual retry.",
+  killed:"The bridge was ended the hard way - the window was closed or the process was killed - while work was in flight. The bridge raises the old sessions whose windows went with it; the resume tab has the picture.",
   shutdown_mid_run:"The bridge was shut down normally, but a loop was still running at that moment. Check the resume tab before continuing."};
 function $(q){return document.querySelector(q)}
 function $$(q){return [].slice.call(document.querySelectorAll(q))}
@@ -552,7 +552,7 @@ var STATES={
   idle:{c:"var(--dim)",sub:"nothing is running. start the pair from the launch window, then start the loop.",btns:[["start the loop","startloop"],["open launch","golaunch"]]},
   idleup:{c:"var(--verdigris)",sub:"both sessions are up and the loop is off. press start the loop first, then give the executor a task in its window - a turn that finishes before the loop is on gets no review.",btns:[["start the loop","startloop"],["open launch","golaunch"]]},
   paused:{c:"var(--sodium)",sub:"paused - reports are held, nothing is lost. leave a note below if you want the planner to read something first.",btns:[["resume","resume"],["stop the loop","stoploop"]],note:true},
-  recovered:{c:"var(--sodium)",sub:"work was interrupted mid-run. nothing was started automatically - review the resume tab first.",btns:[["open resume","goresume"],["dismiss - all fine","ack"]],alert:"",red:true},
+  recovered:{c:"var(--sodium)",sub:"work was interrupted mid-run. the old sessions are raised on their own - the resume tab has the details and a manual retry.",btns:[["open resume","goresume"],["dismiss - all fine","ack"]],alert:"",red:true},
   down:{c:"var(--red)",sub:"the bridge is fine, but a session window is gone. its transcript is intact - it can be restarted right where it stopped.",btns:[],alert:"",red:true},
   waiting:{c:"var(--blue)",sub:"a long process is running - review and rotation hold until it finishes.",btns:[["pause","pause"]]},
   needsyou:{c:"var(--sodium)",sub:"a session is waiting for your answer.",btns:[["pause","pause"]]}

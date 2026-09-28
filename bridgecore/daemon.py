@@ -32,6 +32,7 @@ import json
 import os
 import re
 import select
+import shlex
 import shutil
 import signal
 import socket
@@ -509,6 +510,11 @@ STATE_PATHS = {
     # A half's window asking a person for permission, one record per open
     # dialog, with its once-latch (note_permission_ask). -> DECISIONS.md 8.26
     "asks": "pair",
+    # A half whose window was up through the last restart and has not yet
+    # been told of it, nor finished a turn since (begin_run,
+    # restart_notice_for). Keyed by pair because the restart touched one
+    # window. -> DECISIONS.md 8.49
+    "restart_notice": "pair",
     # ...and the pair half of the twelve. `channels_view` is rebuilt from
     # CHANNELS on every /state, so re-keying it changes nothing that lasts -
     # it is here because the guard would otherwise report it as unlisted,
@@ -869,7 +875,39 @@ def migrate_ghost_records():
                         and path not in loops):
                     d.pop(key, None)
                     notes.append("%s[%s]" % (name, path))
-        if dropped or notes:
+        # A CHANNEL THAT WAS NEVER A PAIR'S, and the colour it was given.
+        # Registering a channel writes a "<role>:channel:<id>" record, and
+        # the first mention of a path gives it a colour in config.json's
+        # `marks`. Neither is a PATH_KEYED dictionary, so the sweep above did
+        # not see them: after 2026-09-28 it dropped the model probe's loop
+        # records and notes and left 12 such records and 16 colours for
+        # folders named "bridge-probe" in the test copies (8.55). Not a
+        # configured project, and either gone or under the temp folder - a
+        # real project's record, or one whose drive is away, has a config
+        # entry and stays.
+        tmp = os.path.normcase(os.path.abspath(tempfile.gettempdir()))
+
+        def _ghost(p):
+            if not p or norm(p) in configured:
+                return False
+            q = os.path.normcase(os.path.abspath(p))
+            return (not os.path.isdir(p)) or q == tmp or \
+                q.startswith(tmp + os.sep)
+
+        chans, colours = [], []
+        sess = STATE.get("sessions") or {}
+        for key in list(sess):
+            if ":channel:" in key and _ghost((sess.get(key) or {}).get("path")):
+                chans.append("%s (%s)" % (key, sess[key].get("path")))
+                sess.pop(key, None)
+        marks = CFG.get("marks") or {}
+        for key in list(marks):
+            if _ghost(key):
+                marks.pop(key, None)
+                colours.append(key)
+        if colours:
+            store.save_config(CFG)
+        if dropped or notes or chans:
             save_state()
     if dropped:
         store.journal("bridge", "Dropped %d loop record(s) for folders that "
@@ -880,6 +918,16 @@ def migrate_ghost_records():
         store.journal("bridge", "Dropped %d leftover note(s) about folders "
                       "that are gone and are not projects: %s"
                       % (len(notes), ", ".join(sorted(notes))), level="log")
+    if chans:
+        store.journal("bridge", "Dropped %d channel record(s) of folders that "
+                      "are not projects and are gone or under the temp "
+                      "folder: %s" % (len(chans), ", ".join(sorted(chans))),
+                      level="log")
+    if colours:
+        store.journal("bridge", "Dropped %d pair colour(s) given to folders "
+                      "that are not projects and are gone or under the temp "
+                      "folder: %s" % (len(colours), ", ".join(sorted(colours))),
+                      level="log")
     return dropped, notes
 
 
@@ -6672,6 +6720,100 @@ def remap_archive(path, why=""):
                       project_name(path), "", "log", project_dir=path)
 
 
+def had_finished_turn(sid):
+    """Does this session's transcript hold one finished turn? Read from the
+    end first - a working session ends turns all the time - and then from
+    the start, in chunks, so a long last turn does not hide the rest. No
+    transcript answers False: there is nothing to resume in it."""
+    try:
+        tp = sessions.transcript_of(sid)
+        if not tp or not os.path.isfile(tp):
+            return False
+        # the client writes it compact; json.dumps with its default
+        # separators - how a fixture writes one - puts a space after the colon
+        marks = (b'"stop_reason":"end_turn"', b'"stop_reason": "end_turn"')
+        size = os.path.getsize(tp)
+        with open(tp, "rb") as fh:
+            fh.seek(max(0, size - (2 << 20)))
+            last = fh.read()
+            if any(m in last for m in marks):
+                return True
+            if size <= (2 << 20):
+                return False
+            fh.seek(0)
+            tail = b""
+            while True:
+                chunk = fh.read(4 << 20)
+                if not chunk:
+                    return False
+                if any(m in tail + chunk for m in marks):
+                    return True
+                tail = chunk[-64:]
+    except Exception:
+        return False
+
+
+def resume_session_for(path, role):
+    """(sid, skipped) - the session a raise resumes: the half's newest one
+    that has ever FINISHED a turn.
+
+    WHY NOT last_session. On 2026-09-28 continue raised a pair's executor
+    with --resume of the /init session of an earlier raise, which had
+    ended before it answered anything, instead of the session its work
+    was in - so it came up with no memory of the work. The
+    newest session is often the one that failed. Candidates newest first:
+    the half's last session, then every window's session the bridge has on
+    record; one with no finished turn is skipped and named.
+    -> DECISIONS.md 8.56 (36.1)
+    """
+    key = "%s|%s" % (norm(path), role)
+    with _lock:
+        rows = sorted(((float((v or {}).get("at") or 0), (v or {}).get("sid"))
+                       for v in ((STATE.get("window_sessions") or {})
+                                 .get(key) or {}).values()), reverse=True)
+    order = []
+    for sid in [last_session_id(path, role)] + [s for _a, s in rows]:
+        if sid and sid not in order:
+            order.append(sid)
+    skipped = []
+    for sid in order:                                # file reads, no lock
+        if had_finished_turn(sid):
+            return sid, skipped
+        skipped.append(sid)
+    return None, skipped
+
+
+def live_window_of_half(path, role, dead_pid=None):
+    """A live window that holds this half other than the dead one, or None.
+
+    "If a new pair has started in the project, the old one is not raised"
+    (the owner, 2026-09-28). Two witnesses, each the window's own: its
+    channel's registration names the window as its parent, or its hooks
+    named it at a SessionStart (window_sessions). Either counts only while
+    that process is alive and is still the window it was written about
+    (record_alive, 8.46). -> DECISIONS.md 8.56 (36.3)
+    """
+    key = "%s|%s" % (norm(path), role)
+    with _lock:
+        ch = dict((STATE.get("channels") or {}).get(key) or {})
+        led = dict((STATE.get("window_sessions") or {}).get(key) or {})
+    seen = []
+    if ch.get("ppid"):
+        seen.append({"pid": ch.get("ppid"), "at": ch.get("at")})
+    for pid, v in led.items():
+        seen.append({"pid": pid, "at": (v or {}).get("at")})
+    for rec in seen:
+        try:
+            pid = int(rec.get("pid") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not pid or (dead_pid and str(pid) == str(dead_pid)):
+            continue
+        if record_alive({"pid": pid, "at": rec.get("at") or 0}):
+            return pid
+    return None
+
+
 def last_session_id(path, role):
     sid = (STATE.get("last_session") or {}).get("%s|%s" % (norm(path), role))
     if sid:
@@ -8225,6 +8367,10 @@ def handle_session_death(path, role, rec):
     _wdbg("hsd enter %s/%s rec=%s" % (path, role, bool(rec)))
     name = project_name(path)
     sid = (rec or {}).get("session_id") or         (STATE.get("pids", {}).get("%s|%s" % (path, role)) or {}).get("sid")
+    dead_pid = ((STATE.get("pids") or {}).get("%s|%s" % (path, role))
+                or {}).get("pid")
+    pconf = store.project_config(CFG, path)
+    raising = bool(pconf.get("auto_restart_dead_sessions"))
     with _lock:
         # A window that dies never fires SessionEnd, so nothing else drops
         # its remote-control link: it sat in the pinned message pointing at
@@ -8247,8 +8393,13 @@ def handle_session_death(path, role, rec):
         # on the machine because one window died in this one. The other
         # pairs were working, so nothing looked broken and nothing said why
         # their reports had stopped being carried.
+        # AND NOT AT ALL WHEN THE HALF IS RAISED (36.4): the pause said
+        # "nobody is here to review", and on the owner's word of 2026-09-28
+        # the half comes straight back with its own session - a pause would
+        # stop the loop for the length of a restart and wait for a person.
+        # A project that raises nothing on its own still pauses.
         died_mid_loop = bool(role == "executor" and lp and lp.get("active")
-                             and not paused_for(path))
+                             and not paused_for(path) and not raising)
         save_state()
     if died_mid_loop:
         pause_project(path, "its executor window died", by_death=True)
@@ -8263,20 +8414,32 @@ def handle_session_death(path, role, rec):
     store.journal("session_died", "%s / %s: the window process is gone"
                   % (name, role), name, role, "sound", project_dir=path)
     sync_links("a session died")
-    pconf = store.project_config(CFG, path)
     _wdbg("hsd auto=%s cfg_projects=%s" % (pconf.get("auto_restart_dead_sessions"), list((CFG.get("projects") or {}).keys())))
-    if pconf.get("auto_restart_dead_sessions"):
-        restart_session(path, role, auto=True)
+    if raising:
+        restart_session(path, role, auto=True, dead_pid=dead_pid)
     else:
         notify("session_died",
                "%s: the %s window is gone - the claude process (or its "
                "console host) died or was closed. The bridge itself is fine "
-               "and the session's transcript is intact; it can be brought "
-               "back exactly where it stopped." % (name, role),
+               "and the session's transcript is intact. Restart raises it "
+               "with --resume of its newest session that finished a turn."
+               % (name, role),
                buttons=["restart %s" % role, "status"], path=path)
 
 
-def restart_session(path, role, auto=False):
+def restart_session(path, role, auto=False, dead_pid=None, why=None):
+    """Raise a half whose window died - the OLD session, whichever half.
+
+    THE OWNER'S WORD, 2026-09-28: the old pairs are raised every time,
+    even when the windows were closed by accident - unless a new pair has
+    started in the project, and then the old one is not. Older than 8.9, which
+    raised the executor as a NEW session with /init: both halves now come
+    back with --resume of their own newest session that ever finished a
+    turn (resume_session_for), a half a live window already holds is left
+    alone, and a NEW session is the third try, not the first - two resumes
+    that end right after start may carry what kills them.
+    -> DECISIONS.md 8.56 (36.1, 36.3)
+    """
     _wdbg("rs enter %s/%s auto=%s" % (path, role, auto))
     path = norm(path)
     key = "%s|%s" % (path, role)
@@ -8286,17 +8449,38 @@ def restart_session(path, role, auto=False):
                  .setdefault(key, []) if now_ts - t < 600]
         STATE["restart_tries"][key] = tries
         save_state()
-    if auto and len(tries) >= 2:
+    if auto:
+        live = live_window_of_half(path, role, dead_pid)
+        if live:
+            # The dead window's record goes with it, as SessionEnd drops a
+            # dead window's (8.12): check_sessions walks STATE["pids"] and
+            # skips only what is in `down`, so a record left naming the
+            # dead pid with `down` cleared is the same death handled again
+            # at every tick.
+            with _lock:
+                (STATE.get("down") or {}).pop(key, None)
+                _rec = (STATE.get("pids") or {}).get(key) or {}
+                if dead_pid and str(_rec.get("pid")) == str(dead_pid):
+                    STATE["pids"].pop(key, None)
+                save_state()
+            store.journal("session_died", "The %s is not raised: a live "
+                          "window holds this half (pid %s)" % (role, live),
+                          project_name(path), role, "log", project_dir=path)
+            return {"ok": False,
+                    "error": "a live window holds this half (pid %s)" % live}
+    if auto and len(tries) >= 3:
         with _lock:
             STATE.setdefault("down", {}).setdefault(key, {})["giveup"] = True
             save_state()
         store.journal("session_died", "%s / %s keeps dying right after "
-                      "start - automatic retries stopped"
+                      "start - two resumes and a new session all ended; "
+                      "automatic retries stopped"
                       % (project_name(path), role), project_name(path), role,
                       "sound", project_dir=path)
         notify("session_died",
-               "%s: the %s keeps dying right after start - not retrying on "
-               "my own. Open the window by hand and look at the error it "
+               "%s: the %s keeps dying right after start - resumed twice "
+               "and started once as a new session, all ended. Not retrying "
+               "on my own. Open the window by hand and look at the error it "
                "prints." % (project_name(path), role), path=path)
         return {"ok": False, "error": "kept dying - retries stopped"}
     stop_reason = launch_guard(path, role)
@@ -8305,23 +8489,21 @@ def restart_session(path, role, auto=False):
                % (project_name(path), role, stop_reason), path=path)
         return {"ok": False, "error": stop_reason}
     d = (STATE.get("down") or {}).get(key) or {}
-    sid = d.get("sid") or (last_record(path, role) or {}).get("session_id")
-    _wdbg("rs sid=%s tries=%d" % (sid, len(tries)))
+    died = d.get("sid") or (last_record(path, role) or {}).get("session_id")
+    sid, skipped = resume_session_for(path, role)
+    _fresh = (auto and len(tries) >= 2) or not sid
+    fresh_why = ("the session resumed twice ended right after start"
+                 if auto and len(tries) >= 2 else
+                 "no session of this half has ever finished a turn")
+    _wdbg("rs sid=%s fresh=%s tries=%d" % (sid, _fresh, len(tries)))
     pconf = store.project_config(CFG, path)
     chain = pconf["chains"].get(role) or []
     req = chain[0] if chain else None
-    # NO --resume, AND THAT IS THE DECISION OF 2026-09-04. Resuming looks
-    # cheaper - the context is right there - but it hands the new window
-    # the same conversation that has just died, and if what killed it is
-    # in that conversation the window dies again. The protocol instead is
-    # V1: a NEW session, /init as its first act, and the thread rebuilt
-    # by the planner from the journal, which is a witness independent of
-    # the session that died (rule 30).
-    _fresh = role == "executor"
+    _init = _fresh and role == "executor"
     try:
         use_model = models.resolve(req, store.load_models())
         use_mode = mode_for(path, role)
-        _why = "restart after it died"
+        _why = why or "restart after it died"
         note_launch(path, role, _why, model=use_model, mode=use_mode)
         pid = sessions.launch(path, role,
                               resume_id=None if _fresh else sid,
@@ -8329,36 +8511,58 @@ def restart_session(path, role, auto=False):
                               permission_mode=use_mode,
                               disallow=disallow_for(path, role),
                               compact_pct=launch_pct(path),
-                              prompt=INIT_PROMPT if _fresh else None)
+                              prompt=INIT_PROMPT if _init else None)
     except Exception as exc:
         _wdbg("restart launch failed %s: %s" % (key, exc))
         notify("session_died", "%s: could not restart the %s: %s"
                % (project_name(path), role, exc), path=path)
         return {"ok": False, "error": str(exc)}
-    if _fresh:
-        # The hold starts HERE, not when the planner answers: a task that
-        # arrives while /init is still running is a task delivered into a
-        # turn that is about to end on something else.
-        note_init_pending(path, sid)
+    if _init:
+        # A NEW executor still gets the protocol of 8.9: /init, and the
+        # handoff the planner writes from the journal, held until the init
+        # ends. The hold starts HERE, not when the planner answers.
+        note_init_pending(path, died, pid)
         threading.Thread(
             target=tell_planner_to_write_the_handoff,
-            args=(path, sid, "died and its window is gone"),
+            args=(path, died, "died and its window is gone"),
             name="v1:tell-planner", daemon=True).start()
+    elif _fresh:
+        # a NEW planner rebuilds its thread from the pointers (8.9, V2)
+        with _lock:
+            lp = (STATE.get("loops") or {}).get(path) or {}
+            STATE.setdefault("planner_seed", {})[path] = {
+                "handoff": "(none - a new planner rebuilds the thread from "
+                           "the dialogue, the index and the open tasks)",
+                "feedback": "", "iteration": lp.get("iteration", 0),
+                "reason": "its window died and %s" % fresh_why,
+                "roles": ["planner"], "at": now_ts}
+            save_state()
     with _lock:
         # only automatic restarts count toward giving up - a human clicking
         # restart is a decision, not a symptom
         STATE["restart_tries"][key] = tries + ([now_ts] if auto else [])
         (STATE.get("down") or {}).pop(key, None)
         save_state()
-    reg_pid(path, role, pid, sid, model_req=req, why=_why)
+    reg_pid(path, role, pid, died if _fresh else sid, model_req=req,
+            why=_why)
     _wdbg("restarted %s -> pid %s" % (key, pid))
-    store.journal("session_died", "Restarting the %s where it stopped "
-                  "(same session)" % role, project_name(path), role, "log",
-                  project_dir=path)
-    notify("session_died", "%s: restarting the %s where it stopped (same "
-           "session, --resume)." % (project_name(path), role),
+    # THE WORDS FOLLOW WHAT WAS DONE (33.1), and name what was passed over
+    if _fresh:
+        how = "as a NEW session%s - %s" % (
+            ", /init its first act" if _init else "", fresh_why)
+    else:
+        how = "with --resume of session %s, its newest with a finished turn" \
+            % sid[:8]
+    if skipped:
+        how += " (passed over, no finished turn: %s)" % ", ".join(
+            s[:8] for s in skipped)
+    store.journal("session_died", "Raising the %s %s" % (role, how),
+                  project_name(path), role, "log", project_dir=path)
+    notify("session_died", "%s: raising the %s %s."
+           % (project_name(path), role, how),
            level="silent" if auto else None, path=path)
-    return {"ok": True, "pid": pid, "resumed": sid or ""}
+    return {"ok": True, "pid": pid, "resumed": "" if _fresh else sid,
+            "skipped": skipped}
 
 
 # ---------------------------------------------------------------------------
@@ -9497,7 +9701,7 @@ INIT_PROMPT = "/init"
 INIT_HOLD_MAX_SEC = HANDOFF_WAIT_MAX_SEC
 
 
-def note_init_pending(path, dead_sid):
+def note_init_pending(path, dead_sid, pid=None):
     """A replacement executor was raised and is running /init.
 
     What is written down is the sid that DIED, not the one coming up - the
@@ -9505,19 +9709,49 @@ def note_init_pending(path, dead_sid):
     fires on the first executor Stop that is not the dead session's, which
     is the honest test: a Stop still in flight from the corpse must not be
     read as "the init has finished".
+
+    AND THE WINDOW THAT WAS OPENED WITH /init, because the hold is about
+    that window and nothing else (init_window_replaced). -> DECISIONS.md
+    8.53 (33.3)
     """
     with _lock:
         STATE.setdefault("init_pending", {})[norm(path)] = {
-            "dead_sid": dead_sid or "", "at": time.time()}
+            "dead_sid": dead_sid or "", "at": time.time(),
+            "pid": pid or 0}
         save_state()
 
 
+def init_window_replaced(path, rec):
+    """The half is held by a window other than the one opened with /init.
+
+    2026-09-28: the /init window of 14:54:27 (pid 10128) ended within
+    seconds, the panel opened 13380 and then 1860 WITHOUT /init, and the
+    hold set for 10128 kept the planner's task of 15:04:31 from 1860 for
+    12.5 minutes - until 1860 happened to end a turn (J 28.09:3775, 3920).
+    A window with no /init has no init to wait for. A record from before
+    the window was written down answers False, as before.
+    """
+    want = (rec or {}).get("pid")
+    if not want:
+        return False
+    cur = (STATE.get("pids") or {}).get("%s|executor" % norm(path)) or {}
+    if not cur.get("pid") or str(cur.get("pid")) == str(want):
+        return False
+    # A LATER launch took the half. restart_session writes this record a
+    # moment before reg_pid writes the window's, so for that moment the
+    # half's record is still the dead window's - older, and not a taker.
+    return float(cur.get("at") or 0) >= float((rec or {}).get("at") or 0)
+
+
 def init_pending(path):
-    """The record, while it is still worth waiting for. Ages out."""
+    """The record, while it is still worth waiting for. Ages out, and ends
+    the moment another window holds the half."""
     rec = (STATE.get("init_pending") or {}).get(norm(path)) or {}
     if not rec:
         return {}
     if time.time() - float(rec.get("at") or 0) > INIT_HOLD_MAX_SEC:
+        return {}
+    if init_window_replaced(path, rec):
         return {}
     return rec
 
@@ -12410,6 +12644,17 @@ def session_gone(path, sid):
     channel's parent - NOT every pid window_sessions ever saw, because the
     first days of that ledger hold transient shell pids (15.1's correction),
     and a dead shell is not a dead window. -> DECISIONS.md 8.35
+
+    AND A WINDOW OF THIS HALF, AT ITS OWN TIME (37). The numbers were taken
+    from every window_log row, every pids record and every channel's
+    parent - any project, any role, any time - so a dead shell pid in this
+    half's ledger that had been, minutes before, another project's window
+    read as "its window is gone": 2026-09-28, a published run of
+    test_multipair 113 (f), pid 19892, the shell of (f) and earlier a
+    window of project beta. A number vouches only for the process it was
+    written about (8.46): this half's launch row (opened_by_bridge) or its
+    pids record, written no later than the session was seen in that number,
+    or the window holding this half's channel seat. -> DECISIONS.md 8.57
     """
     if not sid:
         return ""
@@ -12418,22 +12663,20 @@ def session_gone(path, sid):
         role = (((STATE.get("session_roles") or {}).get(sid) or {})
                 .get("role") or "executor")
         key = "%s|%s" % (p, role)
-        known = {int(r.get("pid") or 0)
-                 for r in (STATE.get("window_log") or [])
-                 if isinstance(r, dict)}
-        known |= {int((v or {}).get("pid") or 0)
-                  for v in (STATE.get("pids") or {}).values()
-                  if isinstance(v, dict)}
-        known |= {int((v or {}).get("ppid") or 0)
-                  for v in (STATE.get("channels") or {}).values()
-                  if isinstance(v, dict) and str((v or {}).get("ppid") or "")
-                  .isdigit()}
+        mine = (STATE.get("pids") or {}).get(key)
+        mine = dict(mine) if isinstance(mine, dict) else {}
+        seat = str(((STATE.get("channels") or {}).get(key) or {})
+                   .get("ppid") or "")
         led = dict((STATE.get("window_sessions") or {}).get(key) or {})
         wins = {int(w) for w, v in led.items()
                 if str(w).isdigit() and (v or {}).get("sid") == sid}
         recs = [dict(v) for v in (STATE.get("sessions") or {}).values()
                 if isinstance(v, dict) and v.get("session_id") == sid]
         cur = (STATE.get("last_session") or {}).get(key) or ""
+        # this half's launch row for every number this session was seen in
+        launched = {w: opened_by_bridge(w, p, role)
+                    for w in wins | {int(r.get("window_pid") or 0)
+                                     for r in recs} if w}
     # WHEN each window was known to be this session's: a number is only
     # that window while its process is no younger than that (pid_born_by,
     # 8.46) - a live stranger holding it kept a command "running" here
@@ -12444,7 +12687,18 @@ def session_gone(path, sid):
         if w:
             wins.add(w)
             when[w] = max(float(when.get(w) or 0), seen_at(r))
-    wins = sorted(w for w in wins if w and w in known)
+
+    def this_half(w):
+        seen = float(when.get(w) or 0) + PID_REUSE_SLACK_SEC
+        row = launched.get(w)
+        if row and float(row.get("at") or 0) <= seen:
+            return True
+        if str(mine.get("pid") or "") == str(w) and \
+                float(mine.get("at") or 0) <= seen:
+            return True
+        return seat == str(w)
+
+    wins = sorted(w for w in wins if w and this_half(w))
     if any(pid_born_by(w, when.get(w)) for w in wins):
         return ""
     if any(r.get("state") in ("ended", "died") for r in recs):
@@ -12510,6 +12764,75 @@ CALL_END_GRACE_SEC = 30
 CALL_SEARCH_BYTES = 64 * 1024 * 1024
 
 
+def agent_transcript(sid, agent):
+    """The transcript of subagent `agent` of session `sid`, or None.
+
+    The client keeps a session's subagents beside its transcript, in a
+    folder named after the session: subagents/agent-<id>.jsonl, and
+    subagents/workflows/<run>/agent-<id>.jsonl for a workflow's (both seen
+    on this machine; the path is the one SubagentStop names). None when
+    there is none - and then a subagent's call has no witness here.
+    """
+    try:
+        tp = sessions.transcript_of(sid)
+        if not tp or not agent:
+            return None
+        base = os.path.join(os.path.dirname(tp), str(sid), "subagents")
+        name = "agent-%s.jsonl" % agent
+        direct = os.path.join(base, name)
+        if os.path.isfile(direct):
+            return direct
+        found = glob.glob(os.path.join(base, "**", name), recursive=True)
+        return found[0] if found else None
+    except Exception:
+        return None
+
+
+# THE EDGES OF A HALF'S TURN, per session: when it last ended (Stop) and
+# when its own thread last did something (a call with no agent_id). A
+# subagent's call made after the Stop, with nothing of the half's own since,
+# is made while the half's turn is over - the only facts the installed hooks
+# give, since neither UserPromptSubmit nor SubagentStop is among them. In
+# memory: after a restart nothing is known, and a record is then read the
+# way it always was, as the half's own. -> DECISIONS.md 8.51
+TURN_EDGE = {}
+
+
+def note_turn_edge(path, role, event, name):
+    sid = str(event.get("session_id") or "")
+    if not sid:
+        return
+    k = "%s|%s|%s" % (norm(path), role, sid)
+    if name == "Stop":
+        TURN_EDGE.setdefault(k, {})["stop"] = time.time()
+    elif name in ("PreToolUse", "PostToolUse", "PostToolUseFailure",
+                  "SessionStart") and not event.get("agent_id"):
+        TURN_EDGE.setdefault(k, {})["main"] = time.time()
+
+
+def half_turn_over(path, role, sid):
+    edge = TURN_EDGE.get("%s|%s|%s" % (norm(path), role, sid or "")) or {}
+    return bool(edge.get("stop")) and \
+        float(edge.get("stop") or 0) >= float(edge.get("main") or 0)
+
+
+def background_like(meta):
+    """Nothing waits on this record the way the half waits on its own call:
+    a background job, or a SUBAGENT's call made while the half's turn is
+    over. The stuck watch skips it, the restart gate does not count it,
+    and it ages at BG_MAX_SEC; the half still counts as busy while it runs.
+
+    WHY. 2026-09-28 12:02:31, a watched project's executor had ended its
+    turn at 12:02:29 when a call arrived with its session's id and a
+    subagent's agent_id. Its result reached nothing the bridge reads, and
+    the record held the restart gate for 21 minutes, asked the pair whether
+    it was stuck at 12:07:51 and put it on the owner's phone at 12:17:56 -
+    about a call the half was not making. -> DECISIONS.md 8.51
+    """
+    m = meta or {}
+    return bool(m.get("bg") or (m.get("agent") and m.get("after_turn")))
+
+
 def call_outcome(meta):
     """The record's OWN call, in its session's transcript, by its id.
 
@@ -12535,7 +12858,15 @@ def call_outcome(meta):
     if not tid or not sid:
         return out
     try:
-        tp = sessions.transcript_of(sid)
+        # A SUBAGENT'S CALL IS IN THE SUBAGENT'S OWN TRANSCRIPT, not its
+        # parent's: the parent's never holds it. Where, is what the client
+        # itself names in SubagentStop's `agent_transcript_path` (recorded
+        # 2026-09-23): <session dir>/subagents/agent-<agent_id>.jsonl, and
+        # under subagents/workflows/<run>/ for a workflow's. -> 8.51
+        if (meta or {}).get("agent"):
+            tp = agent_transcript(sid, meta.get("agent"))
+        else:
+            tp = sessions.transcript_of(sid)
         if not tp or not os.path.isfile(tp):
             return out
         # The client writes compact JSON; the spaced form is accepted too,
@@ -12700,8 +13031,128 @@ def migrate_ended_calls():
     return n
 
 
+_KEY_INTERPRETERS = ("py", "python", "python3", "pythonw", "bash", "sh",
+                     "zsh", "node", "deno", "pwsh", "powershell", "cmd",
+                     "perl", "ruby")
+_KEY_WRAPPERS = ("timeout", "nice", "env", "time", "nohup", "stdbuf",
+                 "command", "exec", "xargs")
+_KEY_SKIP = ("cd", "pushd", "popd", "export", "set", "unset", "source", ".",
+             "true", ":")
+_KEY_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _key_name(tok):
+    base = os.path.basename((tok or "").replace("\\", "/")).lower()
+    for ext in (".exe", ".cmd", ".bat"):
+        if base.endswith(ext):
+            base = base[:-len(ext)]
+    return base
+
+
+def command_key(cmd):
+    """What a command actually runs - the key of "how long does it usually
+    take". `sh run_quiet.sh`, `py night_gates_sweep.py`, `godot`, `grep`.
+
+    WHY. The history was kept under the command's FIRST WORD, and every
+    command of one watched project began `cd /c/projects/...;` - so a grep
+    of one second and an engine run of ten minutes were one command, "cd",
+    whose usual was 1-38 s. Every engine run past 311 s woke the planner as
+    stuck: 28 times 22-28.09, 11 of them to a person. Replayed on that
+    history, this key alone keeps 4 of the 9 real long runs among them
+    quiet; the rest is call_working's. -> DECISIONS.md 8.50
+
+    Line by line, and a heredoc's BODY is skipped - it is text handed to a
+    command, not a command (the line that opens it still counts, up to the
+    `<<`). A command that starts `cd …` on a line of its own and runs its
+    program on the next is keyed by that program, not by `cd`. Segments
+    split on ; && || | & and parentheses; one that only changes directory or
+    sets variables is skipped, and so are leading VAR=value words and
+    wrappers with their options (`timeout 900`, `env`, `nice`). An
+    interpreter or a shell is keyed WITH its script's file name, because
+    `py` alone is every Python program there is; `py -`, `py -c` and
+    `py -m <module>` keep that marker. Never raises: an unparsable command
+    is keyed by its first word, which is what the history always was.
+    """
+    try:
+        toks, end = [], None
+        for line in (cmd or "").splitlines():
+            if end is not None:
+                if line.strip() == end:
+                    end = None
+                continue
+            m = re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?", line)
+            if m:
+                end = m.group(1)
+                line = line[:m.start()]
+            try:
+                lex = shlex.shlex(line, posix=True,
+                                  punctuation_chars=";&|(){}")
+                lex.whitespace_split = True
+                lex.commenters = ""
+                toks += list(lex) + [";"]
+            except ValueError:
+                toks += line.replace(";", " ; ").split() + [";"]
+        segs, seg = [], []
+        for t in toks + [";"]:
+            if set(t) <= set(";&|(){}"):
+                if seg:
+                    segs.append(seg)
+                seg = []
+            else:
+                seg.append(t)
+        for seg in segs:
+            # a redirection is not a word of the command: `2>`, `>>`,
+            # `2>/dev/null`, and the target after a bare operator
+            clean, skip = [], False
+            for t in seg:
+                if skip:
+                    skip = False
+                    continue
+                if re.match(r"^\d*[<>]{1,2}$", t):
+                    skip = True
+                    continue
+                if re.match(r"^\d*[<>]", t) or re.match(r"^\d+$", t):
+                    continue
+                clean.append(t)
+            seg = clean
+            i = 0
+            while i < len(seg) and _KEY_ASSIGN.match(seg[i]):
+                i += 1
+            if i >= len(seg):
+                continue
+            prog = _key_name(seg[i])
+            if prog in _KEY_SKIP:
+                continue
+            while prog in _KEY_WRAPPERS and i + 1 < len(seg):
+                i += 1
+                while i < len(seg) and (seg[i].startswith("-")
+                                        or _KEY_ASSIGN.match(seg[i])
+                                        or re.match(r"^\d+[smhd]?$", seg[i])):
+                    i += 1
+                if i >= len(seg):
+                    break
+                prog = _key_name(seg[i])
+            if prog in _KEY_INTERPRETERS or prog.startswith("python"):
+                j = i + 1
+                while j < len(seg):
+                    a = seg[j]
+                    if a in ("-", "-c", "-m"):
+                        more = (" " + seg[j + 1]) if a == "-m" \
+                            and j + 1 < len(seg) else ""
+                        return ("%s %s%s" % (prog, a, more))[:60]
+                    if a.startswith("-"):
+                        j += 2 if a in ("-X", "-W", "-O") else 1
+                        continue
+                    return ("%s %s" % (prog, _key_name(a)))[:60]
+                return prog[:60]
+            return prog[:60]
+        return (toks[0] if toks else "bash")[:40]
+    except Exception:
+        return (cmd.split()[0][:40] if (cmd or "").split() else "bash")
+
+
 def proc_key(cmd, tid, bg):
-    """The key a tracked command's record is kept under, and its first word.
+    """The key a tracked command's record is kept under, and its history key.
 
     THE CALL'S OWN ID, WHEN THE CLIENT SENDS ONE. The key used to be the
     first word of the command, so two calls sharing it were one record: a
@@ -12714,10 +13165,11 @@ def proc_key(cmd, tid, bg):
     PostToolUseFailure alike (recorded from real hooks, client 2.1.280), so
     each end now finds the record its own call opened and no other.
 
-    The first word is still returned and still kept on the record: it is
-    what the history of "how long does this usually take" is grouped by,
-    which is a question about a command and not about one call of it. And
-    it is the key when there is no id at all - an older client - because
+    The second value is kept on the record as `sig`: it is what the history
+    of "how long does this usually take" is grouped by, which is a question
+    about a command and not about one call of it - and since 8.50 it is
+    command_key, what the command runs, not its first word. With no id at
+    all - an older client - the record key stays the first word, because
     the old behaviour is the only one that client can be given.
 
     A background launch keeps the "bg:" prefix, which is load-bearing: its
@@ -12725,13 +13177,14 @@ def proc_key(cmd, tid, bg):
     to reach the record by it - the job is still running when that call
     returns. -> DECISIONS.md 8.24
     """
-    sig = cmd.split()[0][:40] if cmd else "bash"
+    first = cmd.split()[0][:40] if (cmd or "").split() else "bash"
+    sig = command_key(cmd) if cmd else "bash"
     if tid:
         return ("bg:%s" % tid) if bg else tid, sig
     if bg:
-        return "bg:%s:%s" % (sig, hashlib.sha256(
+        return "bg:%s:%s" % (first, hashlib.sha256(
             cmd.encode("utf-8", "replace")).hexdigest()[:8]), sig
-    return sig, sig
+    return first, sig
 
 
 def note_duration(path, key, meta, secs, failed):
@@ -12824,7 +13277,7 @@ def close_at_stop(path, role, event):
         rows = dict((STATE.get("inflight") or {}).get(path) or {})
     for k, m in list((PROCTRACK.get(path) or {}).items()):
         rows.setdefault(k, m)
-    closed, ended = [], []
+    closed, ended, marked = [], [], []
     for key, meta in rows.items():
         if not isinstance(meta, dict):
             continue
@@ -12842,8 +13295,23 @@ def close_at_stop(path, role, event):
             if not mine:
                 continue
             if agent and (listed is None or agent in listed):
+                # the half's turn has ended and its subagent still runs:
+                # from here this call is not the half's own (8.51)
+                if not meta.get("after_turn"):
+                    marked.append(key)
                 continue
             closed.append((key, meta))
+    if marked:
+        for key in marked:
+            m = (PROCTRACK.get(path) or {}).get(key)
+            if isinstance(m, dict):
+                m["after_turn"] = True
+        with _lock:
+            live = (STATE.get("inflight") or {}).get(path) or {}
+            for key in marked:
+                if isinstance(live.get(key), dict):
+                    live[key]["after_turn"] = True
+            save_state()
     if not closed and not ended:
         return
     for key, _ in closed + ended:
@@ -13232,6 +13700,16 @@ def transcript_frozen(path, role, quiet):
         with _lock:
             was = dict((STATE.get("tscript") or {}).get(key) or {})
         now_ts = time.time()
+        # THE QUIET BELONGS TO THIS SESSION. The record is kept per pair, and
+        # a new session's transcript with nothing in it newer than the old
+        # anchor inherited the old session's silence: at 15:13:13 on
+        # 2026-09-28 (J 28.09:3874) a session sixteen minutes old was told
+        # "nothing written for 75 minutes", counted from the last write of
+        # the session that died with the power at 13:58. A session the
+        # record was not taken on is first sight, whatever the size says.
+        # -> DECISIONS.md 8.53 (33.4)
+        if was.get("sid") != sid:
+            was = {}
         since_at = float(was.get("at") or 0)
         if was.get("size") == st.st_size:
             since = now_ts - (since_at or now_ts)
@@ -13240,13 +13718,15 @@ def transcript_frozen(path, role, quiet):
             # First sight of this file: nothing to judge the growth against.
             with _lock:
                 STATE.setdefault("tscript", {})[key] = {"size": st.st_size,
-                                                        "at": now_ts}
+                                                        "at": now_ts,
+                                                        "sid": sid}
                 save_state()
             return False, 0
         alive = transcript_moved_after(tp, since_at)      # no lock held
         with _lock:
             STATE.setdefault("tscript", {})[key] = {
-                "size": st.st_size, "at": now_ts if alive else since_at}
+                "size": st.st_size, "at": now_ts if alive else since_at,
+                "sid": sid}
             save_state()
         if alive:
             return False, 0
@@ -13351,7 +13831,7 @@ def record_expired(meta, now_ts=None):
     """
     if not isinstance(meta, dict):
         return False
-    limit = BG_MAX_SEC if meta.get("bg") else INFLIGHT_MAX_SEC
+    limit = BG_MAX_SEC if background_like(meta) else INFLIGHT_MAX_SEC
     # A record with NO `started` is treated as having started NOW, which is
     # what inflight_live has always done and what two cases in
     # test_handover pin: a fixture writes the record it cares about and
@@ -14863,9 +15343,13 @@ def hand_over_held_tasks(path, tasks):
         if ok:
             note_task_sent(path, t.get("text") or "", mid)
             sent += 1
-            store.journal("task", "Task delivered to the executor - it was "
-                          "kept while the limit lasted", project_name(path),
-                          "executor", "log", project_dir=path)
+            store.journal("task", ("Task kept while the limit lasted is now "
+                                   "held until the executor's /init ends"
+                                   if why == "held-for-init" else
+                                   "Task delivered to the executor - it was "
+                                   "kept while the limit lasted"),
+                          project_name(path), "executor", "log",
+                          project_dir=path)
         else:
             inbox = store.inbox_write(path, 0, "TASK\n\n"
                                       + (t.get("text") or ""))
@@ -15675,7 +16159,74 @@ def check_seat(path):
 def run_check(path, suite=None):
     """Run the acceptance for this project's own code. Returns a dict."""
     path = norm(path)
-    project = project_name(path)
+    answer = _check_admit(path, suite)
+    if answer is not None:
+        return answer
+    return _check_execute(path, suite, _check_folder(path))
+
+
+def start_check(path, suite=None):
+    """The same run, answered AT ONCE with its folder and start time.
+
+    WHY. The channel waited for the whole run on one HTTP call, and a run
+    that outlived that call's timeout was reported as "CHECK FAILED ...
+    nothing ran ... artefacts: -": the planner's check of 15:19:01 on
+    2026-09-28 passed at 15:48:36 (its planner_check line; folder
+    2026-09-28_151901-planner-check) while the tool had already said it
+    failed and ran nothing. A run may not hang on the lifetime of one
+    request: the start is answered here, the run goes on in a thread, and
+    check_status says how it ended. The refusals and the "nothing to run"
+    answer are given before anything starts, exactly as run_check gives
+    them. -> DECISIONS.md 8.53 (33.6)
+    """
+    path = norm(path)
+    answer = _check_admit(path, suite)
+    if answer is not None:
+        return answer
+    artefacts = _check_folder(path)
+    since = check_running_since(path) or time.time()
+    threading.Thread(target=_check_in_background,
+                     args=(path, suite, artefacts),
+                     name="check:%s" % project_name(path), daemon=True).start()
+    return {"ok": None, "started": True, "dir": artefacts, "since": since,
+            "suite": suite or "all"}
+
+
+def _check_in_background(path, suite, artefacts):
+    """The run, with a broken run recorded as one - a status poll must get
+    an answer, never silence."""
+    try:
+        _check_execute(path, suite, artefacts)
+    except Exception as exc:
+        rows = [{"what": "the run itself", "exit": -1,
+                 "tail": [str(exc)[:300]]}]
+        with _lock:
+            STATE.setdefault("checks", {})[path] = {
+                "at": time.time(), "ok": False, "rows": rows,
+                "dir": artefacts, "suite": suite or "all"}
+            save_state()
+        store.journal("planner_check", "check FAILED: the run itself broke "
+                      "- %s" % exc, project_name(path), "planner", "warn",
+                      project_dir=path)
+
+
+def check_status(path, artefacts):
+    """How the run that writes into `artefacts` stands: done with its rows,
+    still running since when, or neither - ended with no record."""
+    path = norm(path)
+    rec = (STATE.get("checks") or {}).get(path) or {}
+    if artefacts and rec.get("dir") == artefacts:
+        return {"done": True, "ok": bool(rec.get("ok")),
+                "rows": rec.get("rows") or [], "dir": artefacts,
+                "suite": rec.get("suite"), "at": rec.get("at")}
+    since = check_running_since(path)
+    return {"done": False, "running": bool(since), "since": since or 0,
+            "dir": artefacts}
+
+
+def _check_admit(path, suite):
+    """The answers given before anything runs, or None - and then the seat
+    is taken and the caller owes the run."""
     if suite is not None and suite not in CHECK_SUITES:
         return {"ok": False, "refused": True,
                 "why": ("there is no suite called %r. The ones that exist "
@@ -15698,7 +16249,11 @@ def run_check(path, suite=None):
     seated, why = check_seat(path)
     if not seated:
         return {"ok": False, "refused": True, "why": why}
+    return None
 
+
+def _check_folder(path):
+    """Where this run's artefacts go."""
     stamp = time.strftime("%Y-%m-%d_%H%M%S")
     # Beside the project that was checked, not beside this source tree. For
     # the bridge's own project those are the same folder, which is why the
@@ -15707,7 +16262,12 @@ def run_check(path, suite=None):
     # to that copy, outside the suite's temp directory. A suite that writes
     # outside TMP is the defect; keying the location to the project fixes it
     # and is what several pairs at once would need anyway.
-    artefacts = os.path.join(path, "test-results", "%s-planner-check" % stamp)
+    return os.path.join(path, "test-results", "%s-planner-check" % stamp)
+
+
+def _check_execute(path, suite, artefacts):
+    """The run itself, on a seat _check_admit has taken."""
+    project = project_name(path)
     rows, tmp = [], None
     try:
         os.makedirs(artefacts, exist_ok=True)
@@ -17154,11 +17714,24 @@ def release_stranded_init_holds():
             continue                     # still worth waiting for
         if not (STATE.get("after_init") or {}).get(p):
             continue
-        store.journal("rotation",
-                      "The replacement's /init has not finished in %d min; "
-                      "handing over what the planner wrote anyway"
-                      % (INIT_HOLD_MAX_SEC // 60),
-                      project_name(p), "executor", "warn", project_dir=p)
+        _rec = (STATE.get("init_pending") or {}).get(p) or {}
+        if _rec and init_window_replaced(p, _rec):
+            # not an init that failed to finish: another window holds the
+            # half, opened without /init, and it is owed what was held
+            # -> DECISIONS.md 8.53 (33.3)
+            store.journal("rotation",
+                          "The /init hold was set for window %s, but the "
+                          "executor is now held by window %s, opened without "
+                          "/init - handing over what the planner wrote"
+                          % (_rec.get("pid"), ((STATE.get("pids") or {})
+                             .get("%s|executor" % p) or {}).get("pid")),
+                          project_name(p), "executor", "log", project_dir=p)
+        else:
+            store.journal("rotation",
+                          "The replacement's /init has not finished in %d "
+                          "min; handing over what the planner wrote anyway"
+                          % (INIT_HOLD_MAX_SEC // 60),
+                          project_name(p), "executor", "warn", project_dir=p)
         with _lock:
             (STATE.get("init_pending") or {}).pop(p, None)
             save_state()
@@ -18009,9 +18582,16 @@ def handle_event(event):
     # BEFORE ANY BRANCH CAN RETURN: a call finishing, a turn or a session
     # ending is what says a dialog of this half is over. -> DECISIONS.md 8.26
     permission_witness(name, path, role, event)
+    # ...and the edges of this half's turn, for a subagent's call (8.51)
+    note_turn_edge(path, role, event, name)
 
     if name == "Stop":
         note_stop_seen(path, role)
+        # A turn finished after a restart is the half's own word that it
+        # lived through it; its next start - a compaction, hours on - is not
+        # told of it. First, before any branch below can return.
+        # -> DECISIONS.md 8.49
+        end_restart_notice(path, role, "it finished a turn after it")
         # FIRST, before any branch below can return: the turn is over, so
         # this session's foreground calls are over too, whatever their own
         # events did or did not say. Every role, because the record is
@@ -18846,6 +19426,11 @@ def handle_event(event):
             # background subagent's call outlives the parent's turn.
             if event.get("agent_id"):
                 rec["agent"] = str(event.get("agent_id"))
+                # made while the half's own turn is over: not its call
+                # (background_like, 8.51)
+                if half_turn_over(path, role,
+                                  str(event.get("session_id") or "")):
+                    rec["after_turn"] = True
             if bg:
                 rec["bg"] = True
                 # THE WATERMARK IS AFTER THE LINE, NOT BEFORE IT - measured.
@@ -18871,7 +19456,14 @@ def handle_event(event):
                     = dict(rec)
                 save_state()
             touch_session(event, state="waiting on a process")
-            store.journal("process", "Started: %s" % cmd[:120], project, role,
+            # WHOSE CALL, in the line itself: the record knows its agent
+            # and a census reads the journal - 28.09 an alarm's call could
+            # not be told apart afterwards because only the record had it.
+            store.journal("process", "Started: %s%s" % (
+                cmd[:120], (" [subagent %s%s]" % (
+                    rec.get("agent"), ", after the half's turn"
+                    if rec.get("after_turn") else "")) if rec.get("agent")
+                else ""), project, role,
                           "log", project_dir=path)
         return None, None
 
@@ -19161,18 +19753,15 @@ def handle_event(event):
         # 16:12:22 was told the machine had stopped without shutting down
         # cleanly. Same fix as the notification, the other exit.
         # -> DECISIONS.md 8.17
-        if STATE.get("mode") == "recovered":
-            if (STATE.get("recovered_reason") or "") in QUIET_REASONS:
-                parts.append("The bridge was restarted while this loop was "
-                             "running - it shut down properly and nothing "
-                             "was lost. A turn in flight was cut off at the "
-                             "restart, so check the working tree before "
-                             "redoing anything.")
-            else:
-                parts.append("The machine stopped without shutting down "
-                             "cleanly. Files may have changed after your "
-                             "last recorded turn - check the working tree "
-                             "before redoing anything.")
+        # AND ONLY TO A WINDOW THE STOP TOUCHED, ONCE. This read
+        # STATE["mode"], the panel's acknowledgement, which a restart
+        # through the gate leaves "recovered" for the daemon's whole life -
+        # so a compaction two hours later was told of a turn cut off by a
+        # restart it had worked straight through. -> DECISIONS.md 8.49
+        _restart = restart_notice_for(path, role,
+                                      event.get("session_id") or "")
+        if _restart:
+            parts.append(_restart)
         # Read, not taken: a session starting is not the note's delivery -
         # the report is (run_review). Taking it here would mean a rotation
         # swallowed the line the human wrote for the review.
@@ -19210,6 +19799,27 @@ def handle_event(event):
         _cur_sid = last_session_id(path, role) or ""
         _is_current = (not (_ended_sid and _cur_sid)
                        or _ended_sid == _cur_sid)
+        # THE CLIENT SAYS WHY, and it was thrown away. Six sessions opened
+        # 14:54-14:56 on 2026-09-28 ended within seconds; five left no
+        # transcript and no session folder, and the one field that would
+        # have named the cause - the hook's own `reason` - was never
+        # written down. Now it is, with the window's age. -> DECISIONS.md
+        # 8.56 (36.0)
+        try:
+            _wrec = (STATE.get("pids") or {}).get(
+                "%s|%s" % (norm(path), role)) or {}
+            _age = (time.time() - float(_wrec.get("at") or 0)) \
+                if _wrec.get("at") else None
+            store.journal("session", "the %s session %s ended - the "
+                          "client's reason: %s%s"
+                          % (role, _ended_sid[:8] or "?",
+                             event.get("reason") or "none given",
+                             "; its window (pid %s) was opened %d s before"
+                             % (_wrec.get("pid"), int(_age))
+                             if _age is not None else ""),
+                          project, role, "log", project_dir=path)
+        except Exception:
+            pass
         # JUDGED BY THE WINDOW THE SESSION RAN IN, where that is known. The
         # sid test asks `last_session`, which names whichever window of the
         # half spoke last - 2026-09-26 18:41:22: the session of window
@@ -19396,6 +20006,16 @@ def deliver_task_later(path, text, tries=3):
             return True
         if ok:
             note_task_sent(path, text, mid)
+        if ok and why == "held-for-init":
+            # HELD IS NOT DELIVERED. deliver_ex answers ok for a task it
+            # keeps until the replacement's /init ends, and this line read
+            # that as "Task delivered" - J 28.09:3775 at 15:04:31, while the
+            # task sat in the hold until 15:17:06. -> DECISIONS.md 8.53
+            store.journal("task", "Task held until the executor's /init "
+                          "ends - it goes over at the first Stop of that "
+                          "window, in one delivery", project_name(path),
+                          "executor", "log", project_dir=path)
+            return True
         if ok:
             store.journal("task", "Task delivered to the executor%s"
                           % ("" if attempt == 1 else
@@ -19646,6 +20266,26 @@ def handle_status(body):
 
 def probe_models(aliases):
     import tempfile
+    # THE PROBE STARTS THE REAL CLIENT, so it asks the one gate every start
+    # of it asks (sessions.real_client_refused, 8.11). It ran `claude -p`
+    # through subprocess.run with nothing in between: on 2026-09-28 a
+    # suite's `/session` launch reached maybe_auto_probe, and in the copies
+    # the sabotage runs made inside the bridge's own project folder each
+    # probe's client found that folder's .mcp.json, whose bridge server pins
+    # BRIDGE_PORT 8765 - so 62 channels named "bridge-probe" registered with
+    # the LIVE
+    # daemon, 16:30:12-17:06:50, and each left a record and a colour in
+    # its state and config. A suite, which keeps BRIDGE_DATA under the temp
+    # folder, is refused here and nothing starts; BRIDGE_REAL_CLIENT=1
+    # means it. -> DECISIONS.md 8.55
+    why = sessions.real_client_refused(["claude"])
+    if why:
+        with _lock:
+            STATE["model_probe_running"] = False
+            save_state()
+        store.journal("model_dropped", "Model probe refused - nothing was "
+                      "started: %s" % why, level="log")
+        return {}
     tmp = os.path.join(tempfile.gettempdir(), "bridge-probe")
     os.makedirs(tmp, exist_ok=True)
     found = {}
@@ -19748,6 +20388,130 @@ def stuck_limit(usual):
     return max(floor, (usual * 3) if usual else 900)
 
 
+# WHAT COUNTS AS WORK in a command's own process tree, measured 2026-09-28
+# over one 30 s window (DECISIONS.md 8.50): a sleeping `bash -c "sleep 90"`
+# used 0.00 s of CPU, a background shell polling every 30 s 0.02 s, a busy
+# loop 30.5 s, a live chain of eight engine copies 183.5 s. Growth of at
+# least CPU_WORK_EPS between two looks is work; below it, the tree stands.
+CPU_WORK_EPS = 0.1
+# How long a command's tree may stand without CPU before it is called stuck.
+# Measured the same day: a live engine chain sampled every 5.6 s for 180 s
+# never had one interval without CPU (32 of 32, the least 34.9 s), while a
+# sleeping tree has none at all. The watch looks once per 30 s tick, so the
+# threshold is four looks with no growth - an order of magnitude above any
+# gap a working tree was seen with, and a fifth of the 600 s the client
+# itself gives a foreground call. `cpu_idle_sec` in the config overrides
+# it; a suite sets seconds.
+CPU_IDLE_MEASURED = 120.0
+
+
+def call_window(path, meta):
+    """The window whose session made this call: the ledger's window holding
+    the record's session, vouched alive and still that window - else the
+    executor's recorded window, by the one definition. None when neither is.
+    """
+    key = "%s|executor" % norm(path)
+    sid = (meta or {}).get("session") or ""
+    with _lock:
+        led = dict((STATE.get("window_sessions") or {}).get(key) or {})
+    for w, v in led.items():
+        try:
+            if sid and (v or {}).get("sid") == sid and \
+                    pid_born_by(int(w), float((v or {}).get("at") or 0)):
+                return int(w)
+        except (TypeError, ValueError):
+            continue
+    return live_pid_of(path, "executor")
+
+
+def call_tree(path, meta, table):
+    """The pids of THIS call's own shell and everything under it, or None.
+
+    Not the window's tree: the client itself and its console host burn CPU
+    whatever happens (2.4 s and 0.3 s in 30 s, measured), so "the window is
+    using CPU" is always true and says nothing. The call's shell is the
+    shell child of the window born within seconds of the call's PreToolUse;
+    it is found once and then held by pid AND birth time, so a reused number
+    is never mistaken for it.
+    """
+    if not table:
+        return None
+    shell = (meta or {}).get("shell")
+    if shell:
+        born = proc_started(shell)
+        if born is None or abs(born - float(meta.get("shell_born") or 0)) \
+                > 1.0 or shell not in table:
+            return None
+    else:
+        window = call_window(path, meta)
+        if not window:
+            return None
+        started = float((meta or {}).get("started") or 0)
+        best = None
+        for pid, (ppid, name) in table.items():
+            if ppid != window or not name.startswith(sessions.SHELLS):
+                continue
+            born = proc_started(pid)
+            if born is None or not (started - 5 <= born <= started + 60):
+                continue
+            if best is None or born < best[1]:
+                best = (pid, born)
+        if not best:
+            return None
+        shell = best[0]
+        meta["shell"], meta["shell_born"] = best
+    kids = {}
+    for pid, (ppid, _n) in table.items():
+        kids.setdefault(ppid, []).append(pid)
+    # A CHILD IS ONLY ONE IF IT WAS BORN AFTER ITS PARENT. Windows keeps a
+    # dead parent's pid in the snapshot, so an older process whose parent
+    # died can name a number our shell was later given - and its CPU would
+    # be read as this call's work.
+    seen, stack = [], [(shell, proc_started(shell))]
+    while stack:
+        x, born = stack.pop()
+        if x in seen:
+            continue
+        seen.append(x)
+        for c in kids.get(x, []):
+            cb = proc_started(c)
+            if born is not None and cb is not None and cb >= born - 1:
+                stack.append((c, cb))
+    return seen
+
+
+def call_working(path, meta, table, now_ts=None):
+    """Is this call's own process tree doing work? True, False, or None.
+
+    POSITIVE EVIDENCE ONLY. Its CPU is summed on every look; growth of at
+    least CPU_WORK_EPS since the last look is work, and the time of it is
+    kept. True while the last work is younger than the idle threshold;
+    False once the tree has stood without CPU longer than that; None when
+    the tree cannot be found or read - and None means the watch behaves as
+    it did before this existed, never quieter. -> DECISIONS.md 8.50
+    """
+    now_ts = now_ts or time.time()
+    tree = call_tree(path, meta, table)
+    if not tree:
+        return None
+    vals = [sessions.proc_cpu(p) for p in tree]
+    vals = [v for v in vals if v is not None]
+    if not vals:
+        return None
+    total = sum(vals)
+    prev = meta.get("cpu_total")
+    meta["cpu_total"] = total
+    if prev is None:
+        meta["cpu_busy_at"] = now_ts      # nothing is claimed before a look
+        meta["cpu_last"] = 0.0
+    elif total - float(prev) >= CPU_WORK_EPS:
+        meta["cpu_busy_at"] = now_ts
+        meta["cpu_last"] = total - float(prev)
+    idle = float((CFG.get("thresholds") or {}).get("cpu_idle_sec",
+                                                   CPU_IDLE_MEASURED))
+    return (now_ts - float(meta.get("cpu_busy_at") or now_ts)) < idle
+
+
 def process_watch():
     """The loop. All the deciding is in check_processes, so it can be run.
 
@@ -19795,6 +20559,7 @@ def inherited_jobs_over(path, procs):
 
 def check_processes():
     close_answered_asks()           # 8.42: a dialog asks its own call
+    table = [None]                  # one process snapshot per tick, if needed
     for path, procs in list(PROCTRACK.items()):
         inherited_jobs_over(path, procs)
         close_gone_session_records(path)
@@ -19823,7 +20588,7 @@ def check_processes():
             # the latch is the RECORD's own field rather than a container in
             # STATE - the episode ends when the command ends, and so does
             # the latch, with no key left behind to migrate or to drop.
-            if (not meta.get("bg") and not meta.get("self_blocked")
+            if (not background_like(meta) and not meta.get("self_blocked")
                     and run > INFLIGHT_MAX_SEC):
                 meta["self_blocked"] = True
                 notify("needs_you",
@@ -19850,11 +20615,23 @@ def check_processes():
             # hung one strands nobody; it still ages out at BG_MAX_SEC with
             # the warn inflight_live already prints, and the job's own
             # script is what watches it.
-            if meta.get("bg"):
+            if background_like(meta):
                 continue
-            # The history is the COMMAND's, kept under its first word; the
-            # record's own key is the call's id and has no history at all.
-            # A failed run is in it and is counted aloud (note_duration).
+            # THE CALL'S OWN TREE, LOOKED AT ON EVERY TICK - so that by the
+            # time the limit is passed there are looks to compare. A tree
+            # using CPU is working, whatever its history says; asking anybody
+            # whether it is stuck is a planner's turn spent for nothing.
+            # -> DECISIONS.md 8.50
+            if table[0] is None:
+                table[0] = sessions.process_table() or {}
+            try:
+                working = call_working(path, meta, table[0])
+            except Exception:
+                working = None
+            # The history is the COMMAND's, kept under what it runs
+            # (command_key, 8.50); the record's own key is the call's id and
+            # has no history at all. A failed run is in it and is counted
+            # aloud (note_duration).
             hist = DURATIONS.get((path, meta.get("sig") or sig), [])
             usual = (sum(h[0] for h in hist) / len(hist)) \
                 if len(hist) >= 5 else None
@@ -19864,6 +20641,23 @@ def check_processes():
             limit = stuck_limit(usual)
             grace = float((CFG.get("thresholds") or {})
                           .get("stuck_planner_grace", 600))
+            if run > limit and not meta.get("flagged") and working:
+                # Past the limit and still using CPU: work, not a hang. Said
+                # once per call, and looked at again on every tick - the
+                # moment the tree stands, the pair is asked as before.
+                if not meta.get("cpu_quiet_told"):
+                    meta["cpu_quiet_told"] = True
+                    store.journal("process",
+                                  "A process has run %.0f min (usual: %s), "
+                                  "and its own tree is still using CPU - "
+                                  "not asking anybody; looked at again every "
+                                  "tick: %s"
+                                  % (run / 60, ("%.0fs" % usual) if usual
+                                     else "no history",
+                                     brief(meta.get("cmd"), 60)),
+                                  project_name(path), "planner", "log",
+                                  project_dir=path)
+                continue
             if run > limit and not meta.get("flagged"):
                 # Step one: the pair. Its planner holds the project, has
                 # `wait` and `task`, and can decide this without waking
@@ -19901,6 +20695,10 @@ def check_processes():
                     and not meta.get("told_human")
                     and (time.time() - asked_at >= grace
                          or not meta.get("asked_pair"))):
+                # A person only if the tree STILL stands: one that went back
+                # to work after the pair was asked is not a person's business.
+                if working:
+                    continue
                 meta["told_human"] = True
                 notify("process_stuck",
                        "%s: \"%s\" has been running %.0f min (usually "
@@ -20087,7 +20885,7 @@ def pairs_view():
                 # makes a job a background one, not two.
                 # -> DECISIONS.md 8.10 part D, 8.12
                 "inflight_bg": len([m for m in (inflight_live(path) or [])
-                                    if (m or {}).get("bg")]),
+                                    if background_like(m)]),
                 # AND WHICH ONES, because two exclusions over one set are
                 # a union and not a sum: the gate's own restart is itself
                 # usually a background job, so counts alone made it
@@ -20099,7 +20897,8 @@ def pairs_view():
                 # most of the long-running ones.
                 "inflight_bg_cmds": [((m or {}).get("cmd") or "")[:160]
                                      for m in (inflight_live(path) or [])
-                                     if isinstance(m, dict) and m.get("bg")],
+                                     if isinstance(m, dict)
+                                     and background_like(m)],
                 # THE COMMANDS, not only how many. The restart gate needs
                 # them to recognise ITSELF: a `relayout --now` launched in
                 # the background is tracked like any other job, so on
@@ -20759,6 +21558,12 @@ def do_resume(body):
         ["executor", "planner"]
     started = []
     skipped = []
+    # EVERY REFUSAL IS WRITTEN DOWN AND EVERY ROLE IS ASKED. A refusal went
+    # only into the panel's alert and ended the loop, so the planner was
+    # never looked at: four presses of continue on 2026-09-28, 14:54:42 to
+    # 14:56:08 (J 28.09:3634, 3661, 3662, 3668), left four "Resume check"
+    # lines and no reason at all. -> DECISIONS.md 8.53 (33.2)
+    refused = []
     for role in roles:
         if not role:
             continue
@@ -20772,12 +21577,23 @@ def do_resume(body):
                           % (role, up), project_name(path), role, "log",
                           project_dir=path)
             continue
-        sid = last_session_id(path, role)
+        # the newest session of the half that ever FINISHED a turn - not
+        # the last one, which after a failed raise is the failure (36.1)
+        sid, passed = resume_session_for(path, role)
+        store.journal("session", "Resume takes the %s's session %s%s"
+                      % (role, (sid or "-")[:8] if sid else
+                         "- none has finished a turn, so a NEW one",
+                         "; passed over, no finished turn: %s"
+                         % ", ".join(s[:8] for s in passed) if passed else ""),
+                      project_name(path), role, "log", project_dir=path)
         try:
             stop_reason = launch_guard(path, role)
             if stop_reason:
-                return {"ok": False, "error": stop_reason,
-                        "started": started}
+                store.journal("session", "Resume refused the %s: %s"
+                              % (role, stop_reason), project_name(path), role,
+                              "warn", project_dir=path)
+                refused.append("%s: %s" % (role, stop_reason))
+                continue
             # NO MODEL IS NAMED HERE, and the line says so rather than
             # guessing one: a resume has always left the model to the
             # client, and naming the chain's head would be a claim about a
@@ -20792,12 +21608,23 @@ def do_resume(body):
             reg_pid(path, role, pid, sid, why=_why)
             started.append(role)
         except Exception as exc:
-            return {"ok": False, "error": str(exc), "started": started}
+            store.journal("session", "Resume could not start the %s: %s"
+                          % (role, exc), project_name(path), role, "warn",
+                          project_dir=path)
+            refused.append("%s: %s" % (role, exc))
+    if refused:
+        return {"ok": False, "started": started, "skipped": skipped,
+                "refused": refused,
+                "error": "Not started - %s%s" % (
+                    "; ".join(refused),
+                    (". Started: %s." % ", ".join(started)) if started
+                    else "")}
     with _lock:
         STATE["mode"] = "running"
         (STATE.get("inflight") or {}).pop(path, None)
         save_state()
-    return {"ok": True, "started": started, "skipped": skipped}
+    return {"ok": True, "started": started, "skipped": skipped,
+            "refused": []}
 
 
 # ---------------------------------------------------------------------------
@@ -21502,6 +22329,13 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": True,
                     "pending": relayout.pending(),
                     "message": "stopping now - the helper has its own window"})
+            if p.startswith("/check-status"):
+                # How a run started by /check with "async" stands. Before
+                # /check, which is a prefix of it. -> DECISIONS.md 8.53
+                if self.headers.get("X-Bridge-Secret") != SECRET:
+                    return self._send(403, {"error": "bad secret"})
+                return self._send(200, check_status(body.get("project"),
+                                                    body.get("dir") or ""))
             if p.startswith("/check"):
                 # The planner's own run. Secret-guarded like /verdict and
                 # /task, because it acts: it spawns processes and writes a
@@ -21522,6 +22356,10 @@ class Handler(BaseHTTPRequestHandler):
                     suite = str(suite).strip().lower()
                     suite = suite[5:] if suite.startswith("test_") else suite
                     suite = suite[:-3] if suite.endswith(".py") else suite
+                # "async": answered at once, the run goes on (33.6); an
+                # older channel sends no such field and waits, as before
+                if body.get("async"):
+                    return self._send(200, start_check(path, suite))
                 return self._send(200, run_check(path, suite))
             if p.startswith("/loop"):
                 return self._send(200, handle_loop(body))
@@ -22206,11 +23044,13 @@ def handle_telegram(step, body):
 # ---------------------------------------------------------------------------
 
 REASONS = {
+    # The start raises what the stop took down (8.56, 36.2), so these two no
+    # longer say "Nothing was restarted on its own": report_startup appends
+    # what was raised, as a list, or that there was nothing to raise.
     "reboot": "Power was lost or the machine restarted while work was in "
-              "flight. Nothing was restarted on its own.",
+              "flight.",
     "killed": "The bridge was ended the hard way - window closed or process "
-              "killed - while work was in flight. Nothing was restarted on "
-              "its own.",
+              "killed - while work was in flight.",
     "shutdown_mid_run": "The bridge was shut down normally, but a loop was "
                         "still running at that moment.",
 }
@@ -22228,11 +23068,16 @@ REASONS = {
 QUIET_REASONS = ("shutdown_mid_run",)
 
 
-def report_startup(reason, prev_clean):
+def report_startup(reason, prev_clean, raised=None):
     """Say what the last stop was; ring a person only for a real loss.
 
     Split out of main() so it can be run at all - the same reason
     check_processes was. Returns the reason it reported, or "".
+
+    `raised` is what raise_after_stop did, one entry per half: after a stop
+    that took windows down the message says which old sessions are being
+    raised - never "Nothing was restarted on its own" while it restarts
+    them (8.53, 8.56).
     """
     if not reason:
         if not prev_clean:
@@ -22243,12 +23088,349 @@ def report_startup(reason, prev_clean):
             store.journal("bridge", "Bridge started.", level="log")
         return ""
     quiet = reason in QUIET_REASONS
-    store.journal("recovery", REASONS[reason] + " Open the resume tab.",
-                  level="log" if quiet else "sound")
+    what = REASONS[reason]
+    if reason in REBOOT_HOLD_REASONS:
+        what += (" Raising the old sessions: %s." % "; ".join(raised)
+                 if raised else " No window died with it, so nothing is "
+                 "raised.")
+    store.journal("recovery", what + " The resume tab is there for a "
+                  "manual retry.", level="log" if quiet else "sound")
     if not quiet:
-        notify("crash", REASONS[reason] +
+        notify("crash", what +
                " Open the bridge - the resume tab has the picture.")
     return reason
+
+
+def begin_run(reason):
+    """Arm this run, and write down which windows the stop just touched.
+
+    Lifted out of main() unchanged but for the last key, so a case can run
+    the start the daemon actually runs - a restart cannot be run inside a
+    suite, the step it performs can.
+
+    WHY THE LAST KEY. The seed told every session that started in this run
+    about the restart, for as long as STATE["mode"] said "recovered" - and
+    that is a PERSON's acknowledgement (the panel's "all sorted" button),
+    which after a restart through the gate nobody presses. 2026-09-28 the
+    daemon came up at 06:04:01; the executor, whose own turn had run the
+    restart, finished several turns after it, and at 08:07:57 a compaction
+    in the same window was told "The bridge was restarted ... A turn in
+    flight was cut off at the restart". The session reported a restart in
+    the middle of its turn that had not happened. A flag of the whole
+    daemon was read as a fact about one window. `mode` stays what it is,
+    the panel's; the seed reads restart_notice, which is about the windows
+    that were up through the stop and ends by what those windows do.
+    -> DECISIONS.md 8.49
+    """
+    touched = restart_touched(reason)
+    dead = reboot_dead(reason)
+    with _lock:
+        STATE["clean_shutdown"] = False       # armed only now, after bind
+        STATE["last_stop_mid_run"] = False
+        STATE["started_at"] = time.time()
+        STATE["alive_at"] = time.time()
+        STATE["mode"] = "recovered" if reason else "running"
+        STATE["recovered_reason"] = reason
+        STATE["restart_notice"] = touched
+        # 33.7's hold is gone (8.56); a book an older daemon left goes too
+        STATE.pop("reboot_held", None)
+        store.save_state(STATE)
+    STOP_DEAD.clear()
+    STOP_DEAD.update(dead)
+    return touched
+
+
+# The two stops that take windows down with them: the machine went, or the
+# bridge was killed and its windows went with it.
+REBOOT_HOLD_REASONS = ("reboot", "killed")
+
+# The windows the last stop took down, found by begin_run before anything
+# else looks at the records, raised by raise_after_stop. In memory: it is
+# about this start only.
+STOP_DEAD = {}
+
+
+def reboot_dead(reason):
+    """{"<path>|<role>": record} - windows the stop took down with it.
+
+    33.7 held these until the resume tab answered; the owner's word of
+    2026-09-28 is that the old pairs come back every time, so they are
+    raised at the start instead (raise_after_stop). Every start replaces
+    the whole set. Liveness is asked outside the lock.
+    -> DECISIONS.md 8.53 (33.7), 8.56 (36.2)
+    """
+    if reason not in REBOOT_HOLD_REASONS:
+        return {}
+    with _lock:
+        recs = {k: dict(v or {}) for k, v in
+                (STATE.get("pids") or {}).items()}
+    stamp = time.time()
+    out = {}
+    for key, rec in recs.items():
+        _path, _, role = key.rpartition("|")
+        if role not in MANAGED_ROLES or not rec.get("pid"):
+            continue
+        stopped = bool(rec.get("stopped_at")) and \
+            str(rec.get("stopped_pid", rec.get("pid"))) == str(rec.get("pid"))
+        if stopped or record_alive(rec):
+            continue
+        out[key] = {"pid": rec.get("pid"), "at": stamp, "reason": reason}
+    return out
+
+
+def raise_after_stop(reason):
+    """Raise, now, every half whose window the stop took down - ["<project>
+    <role>: what was done", ...] for the start's own message.
+
+    THE OWNER'S WORD, 2026-09-28: the old pairs are raised every time.
+    The start said "Nothing was restarted on its own" and the death watch
+    then raised the windows anyway, two and a half minutes later (8.53);
+    33.7 held them until the resume tab answered. Now the start raises them
+    itself, the way a death is raised (restart_session: --resume of the
+    half's newest session with a finished turn, never over a live window),
+    and says which. The resume tab stays for a manual retry.
+    -> DECISIONS.md 8.56 (36.2)
+    """
+    out = []
+    for key, rec in sorted(STOP_DEAD.items()):
+        path, _, role = key.rpartition("|")
+        if role not in MANAGED_ROLES or path not in {
+                norm(p) for p in (CFG.get("projects") or {})}:
+            continue
+        name = project_name(path)
+        if not store.project_config(CFG, path).get(
+                "auto_restart_dead_sessions"):
+            store.journal("session", "The %s is not raised after the %s: "
+                          "this project does not raise its halves on its "
+                          "own" % (role, reason), name, role, "log",
+                          project_dir=path)
+            out.append("%s %s: not raised (the project says not to)"
+                       % (name, role))
+            continue
+        try:
+            res = restart_session(path, role, auto=True,
+                                  dead_pid=rec.get("pid"),
+                                  why="its window died with the %s" % reason)
+        except Exception as exc:
+            res = {"ok": False, "error": str(exc)}
+        out.append("%s %s: %s" % (name, role, (
+            "resumed %s" % res.get("resumed")[:8] if res.get("resumed")
+            else "a new session" if res.get("ok")
+            else "not raised - %s" % res.get("error"))))
+    STOP_DEAD.clear()
+    return out
+
+
+def restart_touched(reason):
+    """{"<path>|<role>": record} - the halves the last stop touched.
+
+    A half is touched when its pair's loop was on and its window was up
+    through the stop: alive now and still that window (record_alive), or,
+    after a power loss, on record and never stopped - the machine took it
+    down with everything else. The session is the one the window's own
+    hooks named (window_sessions); "" when none did. A window that died
+    before the stop is not touched by it - its half is raised by the death
+    protocol, which says what it has to say itself.
+
+    Every start replaces the whole book: one restart's notice is never
+    carried into the next run. Liveness is asked outside the lock.
+    """
+    if not reason:
+        return {}
+    with _lock:
+        recs = {k: dict(v or {}) for k, v in
+                (STATE.get("pids") or {}).items()}
+        loops = {k: dict(v or {}) for k, v in
+                 (STATE.get("loops") or {}).items()}
+        led = {k: dict(v or {}) for k, v in
+               (STATE.get("window_sessions") or {}).items()}
+        # What the stop wrote about a turn in flight (note_stop_evidence),
+        # honoured only if it was written after the run it ended had started:
+        # a daemon killed outright writes nothing, and the book it leaves
+        # holds an older stop's words. -> DECISIONS.md 8.49 (32b)
+        prev_start = float(STATE.get("started_at") or 0)
+        left = {k: dict(v or {}) for k, v in
+                (STATE.get("restart_notice") or {}).items()}
+    stamp = time.time()
+    out = {}
+    for key, rec in recs.items():
+        path, _, role = key.rpartition("|")
+        if role not in MANAGED_ROLES or not rec.get("pid"):
+            continue
+        if not (loops.get(path) or {}).get("active"):
+            continue
+        alive = record_alive(rec)
+        stopped = bool(rec.get("stopped_at")) and \
+            str(rec.get("stopped_pid", rec.get("pid"))) == str(rec.get("pid"))
+        if not alive and (reason != "reboot" or stopped):
+            continue
+        sid = ((led.get(key) or {}).get(str(rec.get("pid"))) or {}) \
+            .get("sid") or ""
+        ev = left.get(key) or {}
+        cut = ((ev.get("cut") or "")
+               if float(ev.get("stop_at") or 0) >= prev_start else "")
+        out[key] = {"at": stamp, "reason": reason, "pid": rec.get("pid"),
+                    "sid": sid, "alive": alive, "cut": cut}
+    return out
+
+
+def note_stop_evidence():
+    """At the stop: which halves had a turn in flight. Written now, read at
+    the next start - never guessed there.
+
+    WHY. The seed told every touched session "A turn in flight was cut off
+    at the restart", unconditionally, and after a restart through the gate
+    that is almost never true: the gate lets a restart through only when
+    every pair is idle. So the sentence is said only where the stop had a
+    witness for it, taken while the daemon still knows it:
+      - a report of this pair waiting in PENDING - its Stop hook is about to
+        return with no verdict (the same dict note_waiters_lost counts);
+      - a tracked FOREGROUND command still running - a Bash call, and only
+        the executor has Bash (disallow_for). A background job is not a
+        turn in flight: nothing waits on it.
+    The whole book is replaced: what a start left untold is about the stop
+    before this one. `stop_at` is what lets the next start tell these words
+    from an older stop's. -> DECISIONS.md 8.49 (32b)
+    """
+    stamp = time.time()
+    book = {}
+    for path, w in list(PENDING.items()):
+        rep = ((w or {}).get("meta") or {}).get("report") or "?"
+        book["%s|executor" % norm(path)] = {
+            "cut": "its report %s was waiting for a verdict" % rep,
+            "stop_at": stamp}
+    with _lock:
+        running = [(p, dict(m or {})) for p, recs in
+                   (STATE.get("inflight") or {}).items()
+                   for m in (recs or {}).values()]
+    for path, meta in running:
+        if meta.get("bg") or record_expired(meta, stamp):
+            continue
+        book.setdefault("%s|executor" % norm(path), {
+            "cut": "a tracked command was still running: %s"
+                   % brief(meta.get("cmd"), 80),
+            "stop_at": stamp})
+    with _lock:
+        STATE["restart_notice"] = book
+        save_state()
+    for key, ev in book.items():
+        path, _, role = key.rpartition("|")
+        try:
+            store.journal("recovery", "At the stop the %s had a turn in "
+                          "flight - %s. Its first start after the restart "
+                          "is told so." % (role, ev["cut"]),
+                          project_name(path), role, "log", project_dir=path)
+        except Exception:
+            pass
+    return book
+
+
+def restart_sentence(reason, cut=""):
+    """What a touched session is told, by the reason the stop had.
+
+    The turn-in-flight sentence only with the stop's own witness for it
+    (note_stop_evidence), and naming it. -> DECISIONS.md 8.49 (32b)
+    """
+    if (reason or "") in QUIET_REASONS:
+        said = ("The bridge was restarted while this loop was running - it "
+                "shut down properly and nothing was lost.")
+        if cut:
+            said += (" A turn in flight was cut off at the restart - %s - "
+                     "so check the working tree before redoing anything."
+                     % cut)
+        return said
+    return ("The machine stopped without shutting down cleanly. Files may "
+            "have changed after your last recorded turn - check the working "
+            "tree before redoing anything.")
+
+
+def restart_notice_for(path, role, sid):
+    """The restart sentence for this SessionStart, or "" - and it is said once.
+
+    Said to the half the stop touched, at its first start since, and only
+    to the session its window held; a different session in a window that
+    was up through the stop was not touched by it. Saying it ends the
+    record, and so does the half finishing a turn first
+    (end_restart_notice): a session that has worked past the restart has
+    nothing left to learn about it, and a compaction hours later is not the
+    moment to hear of it. -> DECISIONS.md 8.49
+    """
+    key = "%s|%s" % (norm(path), role)
+    other = False
+    with _lock:
+        rec = dict((STATE.get("restart_notice") or {}).get(key) or {})
+        # A record with no reason is the stop's evidence, written in the
+        # seconds before the process exits - not a notice yet.
+        if not rec or not rec.get("reason"):
+            return ""
+        if rec.get("alive") and rec.get("sid") and sid \
+                and sid != rec.get("sid"):
+            other = True
+        else:
+            STATE["restart_notice"].pop(key, None)
+            save_state()
+    when = time.strftime("%H:%M:%S", time.localtime(rec.get("at") or 0))
+    if other:
+        try:
+            store.journal("recovery",
+                          "Session %s started in this half, but the window "
+                          "that was up through the restart at %s held "
+                          "session %s - not told about the restart."
+                          % (sid[:8], when, rec.get("sid", "")[:8]),
+                          project_name(path), role, "log", project_dir=path)
+        except Exception:
+            pass
+        return ""
+    # THE WORDS BY WHAT HAPPENED TO THE WINDOW. "its window was up through
+    # it" was written for every notice, and after the power cut of
+    # 2026-09-28 no window was up through anything: J 28.09:3600, 3605,
+    # 3693, 3700 said it of four sessions whose windows the machine had
+    # taken down and a person had opened again. The record knows which it
+    # was (`alive`, restart_touched). -> DECISIONS.md 8.53 (33.5)
+    if rec.get("alive"):
+        what = ("its window was up through it, and this is its first start "
+                "since")
+    elif rec.get("reason") == "reboot":
+        what = ("the machine restarted - the bridge came back at %s - and "
+                "the window this half had did not survive it: this window "
+                "is new" % when)
+    else:
+        what = ("the window this half had did not survive it: this window "
+                "is new")
+    try:
+        store.journal("recovery",
+                      "Told session %s about the restart at %s (%s): %s. "
+                      "A turn cut off by the stop: %s."
+                      % ((sid or "?")[:8], when, rec.get("reason"), what,
+                         rec.get("cut") or "none at the stop"),
+                      project_name(path), role, "log", project_dir=path)
+    except Exception:
+        pass
+    return restart_sentence(rec.get("reason"), rec.get("cut") or "")
+
+
+def end_restart_notice(path, role, why):
+    """The half has lived past the restart: nothing is left to tell it."""
+    key = "%s|%s" % (norm(path), role)
+    with _lock:
+        book = STATE.get("restart_notice") or {}
+        # the stop's own evidence is not spent by a turn ending on the way
+        # out - only a notice, which a start writes, is
+        if not (book.get(key) or {}).get("reason"):
+            return False
+        rec = book.pop(key)
+        save_state()
+    try:
+        store.journal("recovery",
+                      "The restart at %s is behind this half - %s - so no "
+                      "later start of it is told about it."
+                      % (time.strftime("%H:%M:%S",
+                                       time.localtime(rec.get("at") or 0)),
+                         why),
+                      project_name(path), role, "log", project_dir=path)
+    except Exception:
+        pass
+    return True
 
 
 def farewell(mid_run, live_roles):
@@ -22294,6 +23476,12 @@ def shutdown(*_):
         if _said_goodbye[0]:
             return
         _said_goodbye[0] = True
+    # What had a turn in flight, while PENDING and the records still say
+    # so - the next start's seed reads this, and nothing else. 8.49 (32b)
+    try:
+        note_stop_evidence()
+    except Exception:
+        pass
     with _lock:
         mid = any(lp.get("active") for lp in
                   STATE.get("loops", {}).values()) or \
@@ -22396,14 +23584,7 @@ def main():
               % port)
         raise SystemExit(1)
 
-    with _lock:
-        STATE["clean_shutdown"] = False       # armed only now, after bind
-        STATE["last_stop_mid_run"] = False
-        STATE["started_at"] = time.time()
-        STATE["alive_at"] = time.time()
-        STATE["mode"] = "recovered" if reason else "running"
-        STATE["recovered_reason"] = reason
-        store.save_state(STATE)
+    begin_run(reason)
 
     migrate_note()
     migrate_held_container()
@@ -22473,7 +23654,9 @@ def main():
                       % (len(gone), "" if len(gone) == 1 else "s",
                          ", ".join(gone)), level="log")
 
-    report_startup(reason, prev_clean)
+    # 8.56 (36.2): what the stop took down comes back now, with its own
+    # sessions, and the start's message says which
+    report_startup(reason, prev_clean, raise_after_stop(reason))
 
     def _baseline():
         # A rollback point for the repair button. It runs in the background:

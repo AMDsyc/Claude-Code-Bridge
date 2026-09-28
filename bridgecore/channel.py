@@ -364,6 +364,45 @@ def post_daemon(path, payload, timeout=8):
         return {"_unreachable": str(exc)}
 
 
+# How the planner's `check` waits for a run it has started (8.53, 33.6).
+# One call is short; the whole wait is the bound the single call used to
+# have, which is known to be one the client sits through.
+CHECK_CALL_TIMEOUT = 30
+CHECK_POLL_SEC = 5.0
+CHECK_WAIT_MAX_SEC = 1500
+CHECK_MISSES_MAX = 6
+
+
+def wait_for_check(start):
+    """Ask how the run named by `start` stands until it ends or the wait is
+    over. -> the daemon's final record, or {"pending": True, ...}."""
+    since = float(start.get("since") or time.time())
+    folder = start.get("dir") or ""
+    end = time.time() + CHECK_WAIT_MAX_SEC
+    misses = 0
+    while time.time() < end:
+        time.sleep(max(0.05, min(CHECK_POLL_SEC, end - time.time())))
+        st = post_daemon("/check-status", {"project": PROJECT, "dir": folder},
+                         timeout=CHECK_CALL_TIMEOUT)
+        if not st or st.get("_unreachable"):
+            misses += 1
+            if misses >= CHECK_MISSES_MAX:
+                return {"pending": True, "since": since, "dir": folder,
+                        "why": "The bridge stopped answering while it ran "
+                               "(%s)." % (st or {}).get("_unreachable")}
+            continue
+        misses = 0
+        if st.get("done"):
+            return st
+        if not st.get("running"):
+            return {"pending": True, "since": since, "dir": folder,
+                    "why": "The bridge has no run going for this project "
+                           "and no record of how this one ended - it may "
+                           "have been restarted."}
+    return {"pending": True, "since": since, "dir": folder,
+            "why": "It had not ended after %d s." % CHECK_WAIT_MAX_SEC}
+
+
 # ---- inbound HTTP: the daemon delivers reports here -----------------------
 
 class Inbound(BaseHTTPRequestHandler):
@@ -614,15 +653,49 @@ def handle_request(msg):
         if params.get("name") == "check":
             args = params.get("arguments") or {}
             suite = args.get("suite")
-            # A whole acceptance run is minutes, not seconds. The timeout is
-            # the daemon's own limit plus room, because giving up early here
-            # would report a passing run as unreachable.
-            out = post_daemon("/check", {"project": PROJECT,
-                                         "suite": suite}, timeout=1500)
-            if not out:
-                text = ("no answer from the bridge, so the check did NOT "
+            # THE RUN DOES NOT HANG ON ONE REQUEST. This used to be one call
+            # with a 1500 s timeout, and a run longer than that came back as
+            # {"_unreachable": ...} - a non-empty answer with no rows, which
+            # the text below turned into "CHECK FAILED ... nothing ran ...
+            # artefacts: -" about a run that went on and passed (2026-09-28,
+            # started 15:19:01, passed 15:48:36). Now the start is answered
+            # at once and the run is asked about in short calls. A daemon
+            # that predates "async" runs it on this call as before, which is
+            # why that call still gets the whole wait. -> DECISIONS.md 8.53
+            out = post_daemon("/check", {"project": PROJECT, "suite": suite,
+                                         "async": True},
+                              timeout=CHECK_WAIT_MAX_SEC)
+            if out and out.get("started"):
+                out = wait_for_check(out)
+            unreach = str((out or {}).get("_unreachable") or "")
+            if not out or (unreach and "timed out" not in unreach.lower()):
+                # refused, reset, no daemon: the start never happened
+                text = ("no answer from the bridge%s, so the check did NOT "
                         "run. Nothing was verified - do not accept anything "
-                        "on the strength of this call.")
+                        "on the strength of this call."
+                        % ((" (%s)" % unreach) if unreach else ""))
+            elif out.get("pending") or unreach:
+                # Not a result, and not a failure: nothing here knows how the
+                # run ended. The gate reads the run's own record, not this
+                # text, so an early return costs no acceptance.
+                since = float(out.get("since") or 0)
+                text = ("%s - this is not a result, and nothing may be "
+                        "accepted on it. %s The result will come as a "
+                        "planner_check line in the bridge's journal, and the "
+                        "verdict gate reads it from there. artefacts: %s"
+                        % (("the check is RUNNING since %s" % time.strftime(
+                            "%H:%M:%S", time.localtime(since))) if since
+                           else "the check has NO RESULT on this call",
+                           out.get("why") or (
+                               "The bridge did not answer the start within "
+                               "%d s (%s); a bridge older than this channel "
+                               "runs the check on that very call, so it may "
+                               "still be going." % (CHECK_WAIT_MAX_SEC,
+                                                     unreach)),
+                           out.get("dir") or "-"))
+                return {"jsonrpc": "2.0", "id": mid,
+                        "result": {"content": [{"type": "text",
+                                                "text": text}]}}
             elif out.get("refused"):
                 text = "the check was not run: %s" % out.get("why")
             else:

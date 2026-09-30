@@ -115,7 +115,7 @@ def _bridge_root():
 
 
 def build_command(project, role, resume_id=None, permission_mode=None,
-                  model=None, disallow=None, prompt=None):
+                  model=None, disallow=None, prompt=None, effort=None):
     """The command line for one window.
 
     `prompt` is the client's positional [prompt] - "claude --help" calls it
@@ -135,6 +135,11 @@ def build_command(project, role, resume_id=None, permission_mode=None,
     cmd += ["--dangerously-load-development-channels", "server:bridge"]
     if model:
         cmd += ["--model", model]
+    # the effort level of this window's session, when the bridge names one
+    # (daemon.effort_for - the planner's is max, 8.60); a flag, so it is
+    # this window's and no other session's, and --resume takes it too
+    if effort:
+        cmd += ["--effort", effort]
     if disallow:
         # a deny beats every permission mode, so this holds whatever mode
         # the window was started in
@@ -307,7 +312,7 @@ def real_client_refused(cmd):
 
 
 def launch(project, role, resume_id=None, permission_mode=None, model=None,
-           disallow=None, compact_pct=None, prompt=None):
+           disallow=None, compact_pct=None, prompt=None, effort=None):
     """Start a session in its own minimised console. Returns pid."""
     if not os.path.isdir(project):
         raise ValueError("no such folder: %s" % project)
@@ -331,7 +336,7 @@ def launch(project, role, resume_id=None, permission_mode=None, model=None,
         env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(applied)
 
     cmd = build_command(project, role, resume_id, permission_mode, model,
-                        disallow, prompt)
+                        disallow, prompt, effort=effort)
     why = real_client_refused(cmd)
     if why:
         raise RuntimeError(why)

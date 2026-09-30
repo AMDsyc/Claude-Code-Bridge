@@ -3633,7 +3633,8 @@ def ensure_session(path, role, why="a session was needed"):
                               model=use_model,
                               permission_mode=use_mode,
                               disallow=disallow_for(path, role),
-                              compact_pct=launch_pct(path))
+                              compact_pct=launch_pct(path),
+                              effort=effort_for(path, role))
         # ...and write down that it was passed. Five of the six launch paths
         # recorded it; this one did not, so a window the bridge opened itself
         # reported its compaction point as unknown ever after - which is how
@@ -6658,6 +6659,24 @@ def warn_config_handedits(being_set):
     return lost
 
 
+def effort_for(path, role):
+    """The effort level this role's window is started with, or None.
+
+    The owner's word, 2026-09-30: the planner always starts with max effort.
+    A project that names its own in projects[path]["effort"] wins; otherwise
+    the bridge-wide role_effort (DEFAULT_CONFIG: planner max). None - the
+    executor's answer - means no flag at all: the client decides. Every
+    launch path passes this and nothing else (test_multipair case 147
+    guards the calls), so one answer reaches every window. -> 8.60
+    """
+    pc = (CFG.get("projects") or {}).get(norm(path)) or {}
+    own = (pc.get("effort") or {}).get(role) if isinstance(
+        pc.get("effort"), dict) else None
+    if own:
+        return own
+    return (CFG.get("role_effort") or {}).get(role) or None
+
+
 def mode_for(path, role):
     """The permission mode this role's window is started in.
 
@@ -6756,7 +6775,8 @@ def reg_pid(path, role, pid, sid=None, model_req=None, why=""):
             # for positive evidence and this is it. -> DECISIONS 8.16
             "why": why,
             "autocompact": sessions.compact_pct_for(path, launch_pct(path)),
-            "compact_window": sessions.project_compact_window(path)}
+            "compact_window": sessions.project_compact_window(path),
+            "effort": effort_for(path, role)}
         save_state()
 
 
@@ -7315,10 +7335,12 @@ def note_launch(path, role, why="unspecified", model=None, mode=None):
                      "why": why, "model": model or "", "mode": mode or ""})
         del hist[:-40]
         save_state()
-    store.journal("session", "Opening a %s window %s (mode %s): %s"
+    _eff = effort_for(path, role)
+    store.journal("session", "Opening a %s window %s (mode %s%s): %s"
                   % (role, ("on %s" % model) if model
                      else "with no model named - the client picks",
-                     mode or "not named - the client's default", why),
+                     mode or "not named - the client's default",
+                     (", effort %s" % _eff) if _eff else "", why),
                   project_name(path), role, "log", project_dir=path)
 
 
@@ -8643,7 +8665,8 @@ def restart_session(path, role, auto=False, dead_pid=None, why=None):
                               permission_mode=use_mode,
                               disallow=disallow_for(path, role),
                               compact_pct=launch_pct(path),
-                              prompt=INIT_PROMPT if _init else None)
+                              prompt=INIT_PROMPT if _init else None,
+                              effort=effort_for(path, role))
     except Exception as exc:
         _wdbg("restart launch failed %s: %s" % (key, exc))
         notify("session_died", "%s: could not restart the %s: %s"
@@ -8791,7 +8814,8 @@ def rotate_executor(path, reason, next_model=None):
                               model=use_model,
                               permission_mode=use_mode,
                               disallow=disallow_for(path, "executor"),
-                              compact_pct=launch_pct(path))
+                              compact_pct=launch_pct(path),
+                              effort=effort_for(path, "executor"))
         reg_pid(path, "executor", pid, model_req=model, why="rotate")
         notify("rotation_name",
                "%s: new executor session '%s' is up (%s). The handoff went "
@@ -10388,7 +10412,8 @@ def handover(path, reason, roles=("executor", "planner"), own_handoff="",
                 path, role, model=use_model,
                 permission_mode=use_mode,
                 disallow=disallow_for(path, role),
-                compact_pct=launch_pct(path))
+                compact_pct=launch_pct(path),
+                effort=effort_for(path, role))
             reg_pid(path, role, pid, model_req=req, why="handover")
             started.append(role)
         except Exception as exc:
@@ -21773,7 +21798,8 @@ def do_resume(body):
             pid = sessions.launch(path, role, resume_id=sid,
                                   permission_mode=use_mode,
                                   disallow=disallow_for(path, role),
-                              compact_pct=launch_pct(path))
+                                  compact_pct=launch_pct(path),
+                                  effort=effort_for(path, role))
             reg_pid(path, role, pid, sid, why=_why)
             started.append(role)
         except Exception as exc:
@@ -21845,7 +21871,8 @@ def do_repair():
                          "plan, have it written to data/fix-plan.md."}
     try:
         pid = sessions.launch(ROOT, "executor", permission_mode="acceptEdits",
-                              compact_pct=launch_pct(ROOT))
+                              compact_pct=launch_pct(ROOT),
+                              effort=effort_for(ROOT, "executor"))
         return {"ok": True, "pid": pid,
                 "note": "A repair session opened in the bridge folder with "
                         "the plan. It commits when done."}
@@ -23025,7 +23052,8 @@ def handle_session(body):
                                   model=use_model,
                                   permission_mode=use_mode,
                                   disallow=disallow_for(project, role),
-                              compact_pct=launch_pct(project))
+                                  compact_pct=launch_pct(project),
+                                  effort=effort_for(project, role))
             reg_pid(project, role, pid, body.get("resume_id"),
                     model_req=body.get("model"), why=_why)
         except Exception as exc:

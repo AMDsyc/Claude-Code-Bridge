@@ -13699,9 +13699,10 @@ try:
                                                _pa102)]
     _ask102(_named_hs, "the panel's start does not pass the model and mode, "
             "see the gate above",
-            "(c) the line reads 'on opus (mode plan)'",
-            bool(_lo) and "Opening a planner window on opus (mode plan): "
-            "you pressed start in the panel" in _lo[-1], True)
+            # it names the effort too since 2026-09-30 (8.60)
+            "(c) the line reads 'on opus (mode plan, effort max)'",
+            bool(_lo) and "Opening a planner window on opus (mode plan, "
+            "effort max): you pressed start in the panel" in _lo[-1], True)
     _ll = [e for e in (daemon.STATE.get("launch_log") or [])
            if e.get("role") == "planner"
            and e.get("project") == daemon.project_name(_pa102)]
@@ -20467,6 +20468,106 @@ finally:
         daemon.CFG["projects"] = _saved146[1]
         daemon.store.save_config(daemon.CFG)
     daemon.store.save_profiles(_saved146[2])
+    post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+print("\n147. the planner's window starts with --effort max on every launch path;")
+print("     the executor's with none, and a project's own level wins")
+print("     The owner's word, 2026-09-30: the planner always starts with max")
+print("     effort. The client takes --effort <level> for the session it")
+print("     starts or resumes (2.1.285). Real order: a launch through")
+print("     /session, what the stub window was given, the record, the line.")
+print("     -> DECISIONS.md 8.60")
+_p147 = os.path.join(TMP, "planner-effort-147")
+os.makedirs(_p147, exist_ok=True)
+_k147 = canon(_p147)
+_ef147 = need78(daemon, "effort_for", None)
+
+
+def _argv147(role, since):
+    rows = [r for r in launches()[since:]
+            if canon(r.get("cwd") or "") == _k147 and r.get("role") == role]
+    return list((rows[-1] if rows else {}).get("argv") or []) if rows else None
+
+
+def _flag147(argv, flag):
+    argv = argv or []
+    return argv[argv.index(flag) + 1] if flag in argv[:-1] else None
+
+
+try:
+    print("   (a) the defaults")
+    check("(a) the bridge-wide level of the planner",
+          daemon.store.DEFAULT_CONFIG.get("role_effort"), {"planner": "max"})
+    check("(a) and none for the executor - the client decides",
+          _ef147(_p147, "executor"), None)
+
+    print("   (b) the real launch path")
+    post("/config", {"projects": {A: {}, B: {}, C: {}, _p147: {}}})
+    _l0 = len(launches())
+    post("/session", {"action": "launch", "project": _p147,
+                      "role": "planner"})
+    check("PRECONDITION: the planner's window was opened",
+          until(lambda: _argv147("planner", _l0) is not None, 20), True)
+    check("(b) it was given --effort max",
+          _flag147(_argv147("planner", _l0), "--effort"), "max")
+    _l1 = len(launches())
+    post("/session", {"action": "launch", "project": _p147,
+                      "role": "executor"})
+    check("PRECONDITION: the executor's window was opened",
+          until(lambda: _argv147("executor", _l1) is not None, 20), True)
+    check("(b) the executor's was given no --effort",
+          "--effort" in (_argv147("executor", _l1) or []), False)
+    check("(b) the record says what the planner was given",
+          ((daemon.STATE.get("pids") or {}).get("%s|planner" % _k147)
+           or {}).get("effort"), "max")
+    check("(b) and so does the line a person reads",
+          [r for r in daemon.store.recent_events(200, project=_p147)
+           if "Opening a planner window" in (r.get("text") or "")
+           and "effort max" in (r.get("text") or "")] != [], True)
+
+    print("   (c) CONTROL: a project that names its own level wins")
+    post("/config", {"projects": {A: {}, B: {}, C: {},
+                                  _p147: {"effort": {"planner": "high"}}}})
+    with daemon._lock:
+        (daemon.STATE.get("pids") or {}).pop("%s|planner" % _k147, None)
+        daemon.save_state()
+    _l2 = len(launches())
+    post("/session", {"action": "launch", "project": _p147,
+                      "role": "planner"})
+    check("PRECONDITION: opened again",
+          until(lambda: _argv147("planner", _l2) is not None, 20), True)
+    check("(c) --effort high", _flag147(_argv147("planner", _l2), "--effort"),
+          "high")
+
+    print("   (d) every launch path passes the one answer, and none names a")
+    print("   level itself - a resume too, since the flag rides with --resume")
+    import ast as _ast147
+    _tree147 = _ast147.parse(inspect.getsource(daemon))
+    _calls147 = [n for n in _ast147.walk(_tree147)
+                 if isinstance(n, _ast147.Call)
+                 and isinstance(n.func, _ast147.Attribute)
+                 and n.func.attr == "launch"
+                 and isinstance(n.func.value, _ast147.Name)
+                 and n.func.value.id == "sessions"]
+
+    def _passes147(call):
+        for kw in call.keywords:
+            if kw.arg == "effort":
+                v = kw.value
+                return (isinstance(v, _ast147.Call)
+                        and isinstance(v.func, _ast147.Name)
+                        and v.func.id == "effort_for")
+        return False
+
+    check("(d) there are launch calls to look at", len(_calls147) >= 7, True)
+    check("(d) each passes effort=effort_for(...)",
+          [c.lineno for c in _calls147 if not _passes147(c)], [])
+    _cmd147 = daemon.sessions.build_command(_p147, "planner", resume_id="r147",
+                                            effort="max")
+    check("(d) a resumed window is given the flag as well",
+          ("--resume" in _cmd147, _flag147(_cmd147, "--effort")),
+          (True, "max"))
+finally:
     post("/config", {"projects": {A: {}, B: {}, C: {}}})
 
 for _si in STAND_INS:

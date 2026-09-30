@@ -180,6 +180,13 @@ DEFAULT_CONFIG = {
     # verdict tool ran (8.26). migrate_planner_mode moves the saved defaults
     # of the day once. -> DECISIONS.md 8.59
     "role_modes": {"executor": "bypassPermissions", "planner": "auto"},
+    # THE PLANNER'S EFFORT - the owner's word, 2026-09-30: the planner
+    # always starts with max effort. Handed to the client as --effort
+    # (2.1.285: "Effort level for the current session (low, medium, high,
+    # xhigh, max)"). The executor has no entry: the client decides, as it
+    # always has. A project may name its own in projects[path]["effort"].
+    # -> DECISIONS.md 8.60
+    "role_effort": {"planner": "max"},
     "thresholds": {
         "handoff_at": 75,
         "warn_at": 85,

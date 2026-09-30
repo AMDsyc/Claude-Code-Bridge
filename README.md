@@ -479,6 +479,7 @@ figures say.
 | `port` | `8765` | the local port |
 | `projects` | `{}` | watched projects, keyed by path |
 | `role_modes` | `executor: bypassPermissions`, `planner: auto` | permission mode per role. A project can override it |
+| `role_effort` | `planner: max` | effort level a role's window starts with, passed as `--effort`; a role not named starts at the client's own level. A project can override it in `projects[path].effort` |
 | `telegram` | empty | token and chat id |
 | `thresholds.idle_hold` | `1200` | how long an idling pair is held rather than answered, in seconds. `0` disables |
 | `thresholds.review_timeout` | `1200` | how long a report may wait for a verdict |
@@ -666,6 +667,9 @@ Newest first. Short on purpose — what changed, not why in detail.
   are now allowed by name beside `verdict` and `task`, and a project missing
   one is repaired the next time a window of it starts: a reviewer used to
   stop and ask a person before running its own acceptance check.
+- **The reviewing half starts with `max` effort**, on every path that opens
+  its window - a start, a restart after a death, a replacement, a resume.
+  The working half starts at the client's own level, as before.
 - **A short command leaves no lines in the log.** Every command used to
   write a start and an end line, and most take a second or two. A command
   still running after 30 seconds is written when the watch sees it, with how

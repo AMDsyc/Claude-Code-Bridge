@@ -373,7 +373,10 @@ def run_seed(seed):
     plan = scenario(seed)
 
     with daemon._lock:
-        daemon.CFG.setdefault("projects", {})[key] = {}
+        # every command line is written: the economy check below counts
+        # the Finished lines of short simulated commands (35.1)
+        daemon.CFG.setdefault("projects", {})[key] = {
+            "journal_short_commands_sec": 0}
         daemon.save_state()
 
     # both halves come up and register a channel - FROM A WINDOW. The

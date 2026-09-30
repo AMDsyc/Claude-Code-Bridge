@@ -13024,7 +13024,11 @@ _i101 = os.path.join(TMP, "install-101")
 for _d in (_p101, _s101, _n101, os.path.join(_i101, ".claude")):
     os.makedirs(_d, exist_ok=True)
 _k101, _ks101, _kn101 = canon(_p101), canon(_s101), canon(_n101)
-post("/config", {"projects": {A: {}, B: {}, C: {}, _p101: {}, _s101: {},
+# every command line is written here: this case is about the RECORD and
+# reads the line it always wrote (35.1 made short ones silent by default)
+post("/config", {"projects": {A: {}, B: {}, C: {},
+                              _p101: {"journal_short_commands_sec": 0},
+                              _s101: {},
                               _n101: {}}})
 # The first eight characters of a session id are its record's key, so
 # every id here differs within them.
@@ -19030,7 +19034,10 @@ print("    watch's ticks, and the restart gate itself (relayout.busy_now).")
 print("    -> DECISIONS.md 8.51")
 _p132 = os.path.join(TMP, "sub-call")
 os.makedirs(_p132, exist_ok=True)
-post("/config", {"projects": {A: {}, B: {}, C: {}, _p132: {}}})
+# every command line is written here: (a) reads the subagent's Started
+# line of a short call (35.1 made short ones silent by default)
+post("/config", {"projects": {A: {}, B: {}, C: {},
+                              _p132: {"journal_short_commands_sec": 0}}})
 _k132 = canon(_p132)
 _thr132 = dict(daemon.CFG.get("thresholds") or {})
 _tof132 = sessions.transcript_of
@@ -20065,6 +20072,402 @@ check("CONTROL: running it again drops nothing more",
       daemon.migrate_ghost_records(), ([], []))
 post("/config", {"projects": {A: {}, B: {}, C: {}}})
 
+
+print("\n142. a short command leaves no Started/Finished lines; a long one is")
+print("     told by the watch, a background job at once")
+print("     2026-09-28: every foreground call wrote two journal lines, most of")
+print("     them for a call of a second or two, so the journal was a copy of")
+print("     the transcript. The threshold is 30 s, a project setting, and 0")
+print("     writes every line. Real order: PreToolUse, the watch's tick,")
+print("     PostToolUse. -> DECISIONS.md 8.58 (35.1)")
+_p142 = os.path.join(TMP, "short-cmd-142")
+os.makedirs(_p142, exist_ok=True)
+_k142 = canon(_p142)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p142: {}}})
+post_rc("/event", {"hook_event_name": "SessionStart", "role": "executor",
+                   "session_id": "s142-exec", "project_dir": _p142,
+                   "cwd": _p142})
+
+
+def _pre142(cmd, tid, bg=False):
+    tin = {"command": cmd}
+    if bg:
+        tin["run_in_background"] = True
+    post_rc("/event", {"hook_event_name": "PreToolUse", "role": "executor",
+                       "session_id": "s142-exec", "project_dir": _p142,
+                       "cwd": _p142, "tool_name": "Bash",
+                       "tool_use_id": tid, "tool_input": tin})
+
+
+def _post142(cmd, tid):
+    post_rc("/event", {"hook_event_name": "PostToolUse", "role": "executor",
+                       "session_id": "s142-exec", "project_dir": _p142,
+                       "cwd": _p142, "tool_name": "Bash",
+                       "tool_use_id": tid, "tool_input": {"command": cmd},
+                       "tool_response": {"stdout": "", "stderr": ""}})
+
+
+def _said142(cmd):
+    return [r.get("text") or "" for r in
+            daemon.store.recent_events(800, project=_p142)
+            if (r.get("text") or "").endswith(": " + cmd)]
+
+
+try:
+    print("   (a) a command of a second: no line at its start, none at its end")
+    _pre142("make build", "t142a")
+    check("PRECONDITION: the command is tracked",
+          "t142a" in (daemon.PROCTRACK.get(_k142) or {}), True)
+    check("(a) no Started line", _said142("make build"), [])
+    _post142("make build", "t142a")
+    check("PRECONDITION: its record is closed by its own PostToolUse",
+          "t142a" in (daemon.PROCTRACK.get(_k142) or {}), False)
+    check("(a) and no Finished line", _said142("make build"), [])
+
+    print("   (b) a command still running past the threshold is told by the")
+    print("   watch, once, and its end is told too")
+    _pre142("make all", "t142b")
+    check("(b) not told at its start", _said142("make all"), [])
+    _mb = (daemon.PROCTRACK.get(_k142) or {}).get("t142b") or {}
+    _mb["started"] = time.time() - 45          # the only thing moved: its clock
+    daemon.check_processes()
+    daemon.check_processes()
+    _sb = _said142("make all")
+    check("(b) the watch tells it, once, with how long it has run",
+          (len(_sb), bool(re.match(r"^Started 4\d+s ago: make all$",
+                                   (_sb or [""])[0]))), (1, True))
+    _post142("make all", "t142b")
+    check("(b) and its end is told",
+          [t for t in _said142("make all") if t.startswith("Finished in 4")]
+          != [], True)
+
+    print("   (c) the project says 0: every line, as before")
+    post("/config", {"projects": {A: {}, B: {}, C: {},
+                                  _p142: {"journal_short_commands_sec": 0}}})
+    _pre142("make dist", "t142c")
+    check("(c) Started at once", _said142("make dist"),
+          ["Started: make dist"])
+    _post142("make dist", "t142c")
+    check("(c) and Finished", len([t for t in _said142("make dist")
+                                   if t.startswith("Finished in ")]), 1)
+
+    print("   (d) a background job is told at its start whatever the setting:")
+    print("   it is meant to run long, and its call returns at once")
+    post("/config", {"projects": {A: {}, B: {}, C: {}, _p142: {}}})
+    _pre142("make watch", "t142d", bg=True)
+    check("(d) Started at once", _said142("make watch"),
+          ["Started: make watch"])
+    check("(e) 30 s is the bridge's default for every project",
+          daemon.store.PROJECT_DEFAULTS.get("journal_short_commands_sec"), 30)
+finally:
+    with daemon._lock:
+        (daemon.STATE.get("inflight") or {}).pop(_k142, None)
+        daemon.save_state()
+    daemon.PROCTRACK.pop(_k142, None)
+    post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n143. two pairs never share a colour: a colour is taken only by a")
+print("     configured project, and a shared one is told apart at start")
+print("     2026-09-28: two watched pairs were both purple - sixteen")
+print("     test folders a probe had registered held all four colours, and")
+print("     mark_for counted every entry as taken. Real order: the config the")
+print("     start reads, the separation main() runs, then a new project's")
+print("     first colour. -> DECISIONS.md 8.58 (35.2)")
+_p143a = canon(os.path.join(TMP, "colour-a-143"))
+_p143b = canon(os.path.join(TMP, "colour-b-143"))
+_p143y = canon(os.path.join(TMP, "colour-y-143"))
+_ghosts143 = [canon(os.path.join(TMP, "ghost-%d-143" % _i)) for _i in range(4)]
+_sep143 = need78(daemon, "separate_pair_colours", [])
+_saved143 = (dict(daemon.CFG.get("marks") or {}),
+             dict(daemon.CFG.get("projects") or {}))
+_told143 = []
+_notify143o = daemon.notify
+try:
+    daemon.notify = lambda kind, text, **kw: _told143.append(
+        (kind, kw.get("path"), text))
+    with daemon._lock:
+        # the start reads this config: two pairs on one colour, the later
+        # one second, and four folders that are not projects on all four
+        daemon.CFG["projects"] = {_p143a: {}, _p143b: {}}
+        daemon.CFG["marks"] = {g: daemon.PAIR_MARKS[_i]
+                               for _i, g in enumerate(_ghosts143)}
+        daemon.CFG["marks"][_p143a] = daemon.PAIR_MARKS[3]
+        daemon.CFG["marks"][_p143b] = daemon.PAIR_MARKS[3]
+    _sep143()
+    _mk143 = daemon.CFG.get("marks") or {}
+    check("(a) the earlier pair keeps its colour",
+          _mk143.get(_p143a), daemon.PAIR_MARKS[3])
+    check("(a) the later one is told apart - a colour that folders which are "
+          "not projects hold is free",
+          (_mk143.get(_p143b) != daemon.PAIR_MARKS[3],
+           _mk143.get(_p143b) in daemon.PAIR_MARKS), (True, True))
+    check("(a) one journal line says so",
+          len([r for r in daemon.store.recent_events(400, project=_p143b)
+               if "shared the pair colour" in (r.get("text") or "")]), 1)
+    check("(a) and one chat line, of a kind the chat lets through",
+          ([k for k, _p, _t in _told143],
+           "pair_colour" in daemon.TELEGRAM_KINDS), (["pair_colour"], True))
+    _sep143()
+    check("(a) run again, nothing more moves and nothing more is said",
+          len(_told143), 1)
+    check("(b) main() runs the separation at every start",
+          calls_in_main("separate_pair_colours"), True)
+
+    print("   (c) a new project's first colour is one no configured project")
+    print("   holds - the four folders that are not projects do not count")
+    with daemon._lock:
+        daemon.CFG["projects"] = {_p143a: {}, _p143y: {}}
+        # the colour the old rule would hand it: its own slot
+        _slot143 = daemon.PAIR_MARKS[daemon.zlib.crc32(_p143y.encode("utf-8"))
+                                     % len(daemon.PAIR_MARKS)]
+        daemon.CFG["marks"] = {g: daemon.PAIR_MARKS[_i]
+                               for _i, g in enumerate(_ghosts143)}
+        daemon.CFG["marks"][_p143a] = _slot143
+    check("(c) not the colour of the project already configured",
+          daemon.mark_for(_p143y) != _slot143, True)
+finally:
+    daemon.notify = _notify143o
+    with daemon._lock:
+        daemon.CFG["marks"] = _saved143[0]
+        daemon.CFG["projects"] = _saved143[1]
+        daemon.store.save_config(daemon.CFG)
+    post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n144. lines a project carries with no path are said once per number,")
+print("     not at every start")
+print("     2026-09-28: three warn lines at every start - 7 685, 583 and 2")
+print("     carried lines from before rows had a path, the same numbers each")
+print("     time. Real order: the carrier on disk, the merge a start runs,")
+print("     again, then one more old row. -> DECISIONS.md 8.58 (35.3)")
+_p144 = os.path.join(TMP, "carried-144")
+_d144 = os.path.join(_p144, "bridge-logs", "2026-07-27")
+os.makedirs(_d144, exist_ok=True)
+_k144 = canon(_p144)
+
+
+def _write144(n):
+    with open(os.path.join(_d144, "events.jsonl"), "w",
+              encoding="utf-8") as _fh:
+        for _i in range(n):
+            _fh.write(json.dumps({"at": "2026-07-27T10:00:%02d" % _i,
+                                  "kind": "loop", "text": "old line %d" % _i,
+                                  "project": "carried-144"}) + "\n")
+
+
+def _warned144():
+    return [r.get("text") or "" for r in
+            daemon.store.recent_events(800, project=_p144)
+            if "carried line" in (r.get("text") or "")
+            and "named no project" in (r.get("text") or "")]
+
+
+try:
+    post("/config", {"projects": {A: {}, B: {}, C: {}, _p144: {}}})
+    _write144(3)
+    _w0 = len(_warned144())
+    daemon.merge_carried_history("a start", only=_p144)
+    check("(a) the first start says it", len(_warned144()) - _w0, 1)
+    daemon.merge_carried_history("a start", only=_p144)
+    check("(a) the next start, same number, says nothing",
+          len(_warned144()) - _w0, 1)
+    _write144(5)
+    daemon.merge_carried_history("a start", only=_p144)
+    _w144 = _warned144()
+    check("(b) a new number is said again, with the new number",
+          # recent_events is newest first
+          (len(_w144) - _w0, bool(_w144) and _w144[0].startswith("5 carried")),
+          (2, True))
+    check("(c) the book is in the inventory of path containers",
+          daemon.STATE_PATHS.get("carried_nopath"), "path")
+finally:
+    post("/config", {"projects": {A: {}, B: {}, C: {}}})
+    with daemon._lock:
+        (daemon.STATE.get("carried_nopath") or {}).pop(_k144, None)
+        daemon.save_state()
+
+
+print("\n145. a session's end records the client's own reason and its window's")
+print("     age - the witness 36.0 lacked")
+print("     2026-09-28 14:54-14:56: six sessions ended within seconds, and the")
+print("     one field that would have named why, the hook's `reason`, was not")
+print("     written down. Real order: the window's record, SessionStart, then")
+print("     SessionEnd with and without a reason. -> DECISIONS.md 8.56, 8.58")
+_p145 = os.path.join(TMP, "session-end-145")
+os.makedirs(_p145, exist_ok=True)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p145: {}}})
+try:
+    _w145 = stand_in(_p145, "executor")
+    for _s145 in ("s145-one", "s145-two"):
+        post_rc("/event", {"hook_event_name": "SessionStart",
+                           "role": "executor", "session_id": _s145,
+                           "project_dir": _p145, "cwd": _p145,
+                           "window_pid": _w145})
+    post_rc("/event", {"hook_event_name": "SessionEnd", "role": "executor",
+                       "session_id": "s145-one", "project_dir": _p145,
+                       "cwd": _p145, "window_pid": _w145,
+                       "reason": "prompt_input_exit"})
+    _e145 = [r.get("text") or "" for r in
+             daemon.store.recent_events(400, project=_p145)
+             if "the client's reason" in (r.get("text") or "")]
+    _m145 = re.search(r"the executor session s145-one ended - the client's "
+                      r"reason: prompt_input_exit; its window \(pid %s\) was "
+                      r"opened (\d+) s before" % _w145, " ".join(_e145))
+    check("(a) the line names the session, the client's reason and the "
+          "window with its age", bool(_m145) and 0 <= int(_m145.group(1)) < 120,
+          True)
+    post_rc("/event", {"hook_event_name": "SessionEnd", "role": "executor",
+                       "session_id": "s145-two", "project_dir": _p145,
+                       "cwd": _p145, "window_pid": _w145})
+    check("(b) no reason given is said as such",
+          any("the executor session s145-two ended - the client's reason: "
+              "none given" in (r.get("text") or "")
+              for r in daemon.store.recent_events(400, project=_p145)), True)
+finally:
+    post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+print("\n146. the planner starts in auto - by default, after the start moves the")
+print("     saved defaults of the day, and on the real launch path")
+print("     The owner's word, 2026-09-30: planners always start in auto mode,")
+print("     here and in the public version. The default alone would move")
+print("     nothing live: the panel writes both modes into a project at every")
+print("     launch, so every project carried planner = plan. Real order: the")
+print("     config the start reads, the migration main() runs, a launch")
+print("     through /session. -> DECISIONS.md 8.59")
+_p146a = os.path.join(TMP, "planner-auto-146a")
+_p146b = os.path.join(TMP, "planner-auto-146b")
+for _d in (_p146a, _p146b):
+    os.makedirs(_d, exist_ok=True)
+_k146a, _k146b = canon(_p146a), canon(_p146b)
+_mig146 = need78(daemon, "migrate_planner_mode", ([], []))
+_saved146 = (dict(daemon.CFG.get("role_modes") or {}),
+             json.loads(json.dumps(daemon.CFG.get("projects") or {})),
+             json.loads(json.dumps(daemon.store.load_profiles() or {})))
+
+
+def _said146():
+    return [r.get("text") or "" for r in daemon.store.recent_events(400)
+            if "The planner starts in auto" in (r.get("text") or "")]
+
+
+try:
+    print("   (a) the defaults")
+    check("(a) the bridge-wide default",
+          daemon.store.DEFAULT_CONFIG["role_modes"]["planner"], "auto")
+    check("(a) the executor keeps bypassPermissions (2.1)",
+          daemon.store.DEFAULT_CONFIG["role_modes"]["executor"],
+          "bypassPermissions")
+    check("(a) the launcher's own fallback",
+          daemon.sessions.ROLE_DEFAULTS["planner"]["permission_mode"], "auto")
+    check("(a) every preset",
+          sorted({p.get("planner_mode") for p in
+                  daemon.store.DEFAULT_PROFILES.values()}), ["auto"])
+
+    print("   (b) the start moves what the panel wrote as the default of the")
+    print("   day, once, and leaves a choice alone and names it")
+    post("/config", {"projects": {A: {}, B: {}, C: {},
+                                  _p146a: {}, _p146b: {}}})
+    with daemon._lock:
+        daemon.CFG["role_modes"] = {"executor": "bypassPermissions",
+                                    "planner": "plan"}
+        daemon.CFG["projects"][_k146a] = {"modes": {
+            "executor": "bypassPermissions", "planner": "plan"}}
+        daemon.CFG["projects"][_k146b] = {"modes": {"planner": "default"}}
+    _prof146 = json.loads(json.dumps(_saved146[2] or {}))
+    _prof146["mine-146"] = {"executor_mode": "auto", "planner_mode": "plan",
+                            "rc": True, "admin": False}
+    daemon.store.save_profiles(_prof146)
+    _n0 = len(_said146())
+    _mig146()
+    check("(b) the bridge-wide value is auto",
+          (daemon.CFG.get("role_modes") or {}).get("planner"), "auto")
+    check("(b) the saved plan of the day is gone, so the default applies",
+          daemon.mode_for(_p146a, "planner"), "auto")
+    check("(b) and the executor's saved mode is not touched",
+          daemon.mode_for(_p146a, "executor"), "bypassPermissions")
+    check("(b) a mode somebody chose is left",
+          daemon.mode_for(_p146b, "planner"), "default")
+    check("(b) the saved profile moves too",
+          (daemon.store.load_profiles().get("mine-146") or {})
+          .get("planner_mode"), "auto")
+    _s146 = _said146()
+    check("(b) one line, with the owner's word, naming what was left",
+          (len(_s146) - _n0, bool(_s146) and "by the owner's word 2026-09-30"
+           in _s146[0] and "planner-auto-146b (default)" in _s146[0]),
+          (1, True))
+    _again146 = _mig146()
+    check("(b) run again, nothing more moves and nothing is said",
+          ((_again146[0] if isinstance(_again146, tuple) else _again146),
+           len(_said146()) - _n0), ([], 1))
+    check("(b) main() runs it at every start",
+          calls_in_main("migrate_planner_mode"), True)
+
+    print("   (c) the real launch path: the planner's window is started with")
+    print("   --permission-mode auto")
+    _l146 = len(launches())
+    post("/session", {"action": "launch", "project": _p146a,
+                      "role": "planner"})
+
+    def _row146():
+        rows = [r for r in launches()[_l146:]
+                if canon(r.get("cwd") or "") == _k146a
+                and r.get("role") == "planner"]
+        return rows[-1] if rows else None
+
+    check("PRECONDITION: the planner's window was opened",
+          until(lambda: _row146() is not None, 20), True)
+    _a146 = list((_row146() or {}).get("argv") or [])
+    check("(c) --permission-mode auto",
+          _a146[_a146.index("--permission-mode") + 1]
+          if "--permission-mode" in _a146[:-1] else None, "auto")
+    check("(c) and its edit tools and shell are still denied outright",
+          "--disallowedTools" in _a146, True)
+
+    print("   (d) the bridge tools a planner calls are allowed by name - check")
+    print("   and loop beside verdict and task, not Monitor - and a project")
+    print("   installed before is named at launch and repaired by a merge")
+    from bridgecore import install as _in146
+    _p146i = os.path.join(TMP, "planner-auto-146i")
+    os.makedirs(_p146i, exist_ok=True)
+    _in146.install(_p146i, "executor")
+    _sp146 = os.path.join(_p146i, ".claude", "settings.json")
+
+    def _allow146():
+        try:
+            d = json.load(open(_sp146, encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        return list((d.get("permissions") or {}).get("allow") or [])
+
+    def _allowgap146():
+        return [g for g in _in146.marks_missing(_p146i)
+                if "permissions.allow" in g]
+
+    check("(d) install allows the four bridge tools",
+          [n for n in ("mcp__bridge__verdict", "mcp__bridge__task",
+                       "mcp__bridge__check", "mcp__bridge__loop")
+           if n not in _allow146()], [])
+    check("(d) and not Monitor, which runs any command",
+          "Monitor" in _allow146(), False)
+    _old146 = json.load(open(_sp146, encoding="utf-8"))
+    _old146["permissions"]["allow"] = ["mcp__bridge__verdict",
+                                       "mcp__bridge__task", "Read(mine)"]
+    with open(_sp146, "w", encoding="utf-8") as _fh:
+        json.dump(_old146, _fh)
+    check("(d) a project installed before is named by marks_missing",
+          [g for g in _allowgap146()
+           if "lacks mcp__bridge__check, mcp__bridge__loop" in g] != [], True)
+    _in146.install(_p146i, "executor")     # what ensure_marks runs at launch
+    check("(d) the install at its launch repairs it, and keeps what it found",
+          (_allowgap146(), "Read(mine)" in _allow146()), ([], True))
+finally:
+    with daemon._lock:
+        daemon.CFG["role_modes"] = _saved146[0]
+        daemon.CFG["projects"] = _saved146[1]
+        daemon.store.save_config(daemon.CFG)
+    daemon.store.save_profiles(_saved146[2])
+    post("/config", {"projects": {A: {}, B: {}, C: {}}})
 
 for _si in STAND_INS:
     try:

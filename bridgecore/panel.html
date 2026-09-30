@@ -260,7 +260,7 @@ details .inner{padding:4px 14px 14px;color:var(--label);line-height:1.6}
       <label class="row" style="margin-top:10px"><input type="checkbox" id="adminPlan"> <span>run as administrator (UAC will ask once)</span></label>
       <label class="row" style="margin-top:6px"><input type="checkbox" id="roPlan"> <span>never let the reviewer touch the project - denies its edit tools, its shell and the way out of plan mode, so work can only happen through the executor</span></label>
       <div class="danger" id="dangerPlan"></div>
-      <div class="dim" style="margin-top:10px;line-height:1.5">plan keeps the reviewer unable to write, which is the point of having one - but the choice is yours. In plan mode the client can still stop and ask a person before the verdict tool runs: on 2026-09-23 a planner stood 62 minutes on that question with reports queued behind it. The bridge recognises such a dialog when the client reports it and calls you at once; it never presses anything in it.</div>
+      <div class="dim" style="margin-top:10px;line-height:1.5">auto is the default since 2026-09-30: the reviewer is kept unable to write by the switch above, which denies its edit tools and its shell whatever the mode - but the choice is yours. In plan mode the client can still stop and ask a person before the verdict tool runs: on 2026-09-23 a planner stood 62 minutes on that question with reports queued behind it. The bridge recognises such a dialog when the client reports it and calls you at once; it never presses anything in it.</div>
     </div>
   </div>
   <div class="card">
@@ -1165,7 +1165,7 @@ $("#addBtn").onclick=function(){post("/add-project",{path:$("#addPath").value}).
   $("#addMsg").innerHTML=r.ok?'<div class="msgok">Watching '+esc(r.path)+'.</div>':'<div class="msgerr">'+esc(r.error)+'</div>';tick().then(loadProjects);})};
 
 /* ---------- launch ---------- */
-var CHAINS={executor:["opus","sonnet"],planner:["fable","opus"]},MODE={executor:"auto",planner:"plan",admin:false,adminPlan:false};
+var CHAINS={executor:["opus","sonnet"],planner:["fable","opus"]},MODE={executor:"auto",planner:"auto",admin:false,adminPlan:false};
 function projConf(){var pc=((D.config||{}).projects||{})[CUR]||{};return pc}
 function renderLaunch(){
   /* The chain on screen is re-read from the saved config on every render,

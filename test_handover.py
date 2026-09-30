@@ -1354,8 +1354,8 @@ print("    measured against a real client it answers 'denied (don't-ask")
 print("    mode)' and writes nothing - no questions AND no work")
 check("the bridge-wide default is the one that does both",
       store.DEFAULT_CONFIG["role_modes"]["executor"], "bypassPermissions")
-check("and the planner is left in plan",
-      store.DEFAULT_CONFIG["role_modes"]["planner"], "plan")
+check("and the planner starts in auto - the owner's word of 2026-09-30 "
+      "(it was plan)", store.DEFAULT_CONFIG["role_modes"]["planner"], "auto")
 daemon.CFG["role_modes"] = dict(store.DEFAULT_CONFIG["role_modes"])
 daemon.CFG["projects"] = {daemon.norm(PATH): {}}
 check("a project that names nothing gets the default",
@@ -3071,16 +3071,23 @@ _inst.install(_whole, "executor")
 
 _blind = os.path.join(TMP, "blind_project")
 os.makedirs(os.path.join(_blind, ".claude"), exist_ok=True)
-# exactly what uninstall() leaves behind: the bridge's own allow entry
-# survives, every mark that makes the pair work does not
+# what an older uninstall() left behind: one of the bridge's allow entries
+# survived, every mark that makes the pair work did not
 _io.open(os.path.join(_blind, ".claude", "settings.json"), "w",
          encoding="utf-8").write(
     u'{"permissions": {"allow": ["mcp__bridge__task"]}}')
 _io.open(os.path.join(_blind, ".mcp.json"), "w", encoding="utf-8").write(
     u'{"mcpServers": {"aftereffects": {"command": "node", "args": ["x"]}}}')
 _gaps = _inst.marks_missing(_blind)
+# seven since 2026-09-30: the bridge tools allowed by name are a mark too,
+# because a planner in auto stops on one that is missing (8.59)
 check("a stripped project reports every kind of missing mark",
-      len(_gaps), 6)
+      len(_gaps), 7)
+check("the allow gap names the tools it lacks, and not the one it has",
+      [g for g in _gaps if "permissions.allow lacks" in g and
+       "mcp__bridge__check" in g and "mcp__bridge__loop" in g and
+       "mcp__bridge__verdict" in g and "mcp__bridge__task" not in g] != [],
+      True)
 check("the hooks gap names the settings file it is about",
       any("settings.json" in g and "no bridge hook" in g for g in _gaps), True)
 check("and it names every one of the eight events, not just the first",

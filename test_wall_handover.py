@@ -1223,8 +1223,8 @@ lr = (_lrs2[-1] if len(_lrs2) > before
       else {"argv": [], "role": "", "cwd": "", "autocompact": "?"})
 note("the stub's argv", " ".join(lr["argv"]))
 check("it is the planner", lr["role"], "planner")
-check("started in plan mode",
-      argof(lr, "--permission-mode"), "plan")
+check("started in the default mode, auto - the owner's word of 2026-09-30 "
+      "(it was plan)", argof(lr, "--permission-mode"), "auto")
 check("with the first model of the planner chain",
       argof(lr, "--model"), "fable")
 check("and the editing tools denied outright",

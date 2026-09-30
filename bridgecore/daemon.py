@@ -419,7 +419,7 @@ STATE_PATHS = {
     "last_feedback": "path", "paused": "path", "note": "path",
     "idle_spin": "path", "noart": "path", "frames": "path", "debt": "path",
     "unanswered": "path", "checks": "path", "handover_failed": "path",
-    "carried_found": "path",
+    "carried_found": "path", "carried_nopath": "path",
     # Every window the bridge has opened, newest last, bounded. A row per
     # LAUNCH rather than one per half, because `pids` keeps only the
     # current window and a leftover's row is overwritten the moment its
@@ -774,6 +774,54 @@ def migrate_executor_mode():
                       "alone." % (len(moved), ", ".join(sorted(moved))),
                       level="log")
     return moved
+
+
+def migrate_planner_mode():
+    """Move the planner onto `auto`, once - the owner's word of 2026-09-30:
+    planners always start in auto mode.
+
+    The default alone would change nothing live: config.json keeps
+    role_modes.planner = "plan", and the panel writes BOTH modes into a
+    project at every launch, so every project carried modes.planner =
+    "plan" beside executor = "bypassPermissions" - the defaults of the day,
+    written down, not chosen (the class of migrate_executor_mode). So the
+    bridge-wide value "plan" becomes "auto", a project's saved "plan" is
+    dropped so the default applies, and a profile's planner_mode "plan"
+    becomes "auto". Any other value was set on purpose: it is left and
+    named. -> DECISIONS.md 8.59
+    """
+    moved, kept = [], []
+    with _lock:
+        rm = CFG.setdefault("role_modes", {})
+        if rm.get("planner") == "plan":
+            rm["planner"] = "auto"
+            moved.append("the bridge-wide default")
+        for key, pc in (CFG.get("projects") or {}).items():
+            modes = (pc or {}).get("modes") or {}
+            if modes.get("planner") == "plan":
+                modes.pop("planner", None)
+                moved.append(project_name(key))
+            elif modes.get("planner"):
+                kept.append("%s (%s)" % (project_name(key), modes["planner"]))
+        if moved:
+            store.save_config(CFG)
+    profiles = store.load_profiles() or {}
+    changed = [n for n, p in profiles.items()
+               if isinstance(p, dict) and p.get("planner_mode") == "plan"]
+    for n in changed:
+        profiles[n]["planner_mode"] = "auto"
+    if changed:
+        store.save_profiles(profiles)
+        moved.append("profile(s) %s" % ", ".join(sorted(changed)))
+    # said when something MOVED, naming what was left in the same line: a
+    # choice left alone is not news at every start (the class of 35.3)
+    if moved:
+        store.journal("bridge", "The planner starts in auto by the owner's "
+                      "word 2026-09-30: moved from plan - %s%s"
+                      % (", ".join(moved) or "nothing",
+                         "; left as set, a choice: %s" % ", ".join(kept)
+                         if kept else ""), level="log")
+    return moved, kept
 
 
 def migrate_project_keys():
@@ -1255,6 +1303,9 @@ TELEGRAM_KINDS = (
     # needs a human
     "needs_you", "crash", "session_died", "process_stuck", "rotation_name",
     "limit_low",
+    # the phone's own key changed: a pair's colour, which is how a person
+    # tells the pairs apart in this chat (35.2)
+    "pair_colour",
     # the work is over
     "run_finished",
 )
@@ -1370,7 +1421,12 @@ def mark_for(path):
     marks = CFG.setdefault("marks", {})
     if marks.get(key):
         return marks[key]
-    taken = set(marks.values())
+    # TAKEN MEANS TAKEN BY A PROJECT (35.2). Every path ever mentioned gets
+    # an entry here, and `taken` was all of them: sixteen test folders a
+    # probe had registered held all four colours, so the next real project
+    # was handed one another real project already had - two watched pairs
+    # were both purple on 2026-09-28. -> DECISIONS.md 8.58
+    taken = set(pair_colours_in_use(key).values())
     start = zlib.crc32(key.encode("utf-8")) % len(PAIR_MARKS)
     pick = None
     for i in range(len(PAIR_MARKS)):
@@ -1392,6 +1448,57 @@ def mark_for(path):
     except Exception:
         pass
     return pick
+
+
+def pair_colours_in_use(but=""):
+    """{project: colour} for the configured projects that have one, but
+    `but` - the colours a new or moved pair may not take."""
+    configured = {norm(p) for p in (CFG.get("projects") or {})}
+    marks = CFG.get("marks") or {}
+    return {k: v for k, v in marks.items()
+            if k in configured and k != but and v}
+
+
+def separate_pair_colours():
+    """Two configured pairs sharing a colour are told apart again, once, at
+    start: the LATER entry takes a colour no configured pair holds, and it
+    is said in one journal line and one chat line. More pairs than colours
+    is left as it is - mark_for has already said so. [(path, old, new)].
+    -> DECISIONS.md 8.58 (35.2)"""
+    moved = []
+    with _lock:
+        configured = {norm(p) for p in (CFG.get("projects") or {})}
+        marks = CFG.setdefault("marks", {})
+        first = {}
+        for key in [k for k in marks if k in configured]:
+            old = marks.get(key)
+            if not old:
+                continue
+            if old not in first:
+                first[old] = key
+                continue
+            held = set(first)
+            start = zlib.crc32(key.encode("utf-8")) % len(PAIR_MARKS)
+            free = [PAIR_MARKS[(start + i) % len(PAIR_MARKS)]
+                    for i in range(len(PAIR_MARKS))
+                    if PAIR_MARKS[(start + i) % len(PAIR_MARKS)] not in held]
+            if not free:
+                continue
+            marks[key] = free[0]
+            first[free[0]] = key
+            moved.append((key, old, free[0], first[old]))
+        if moved:
+            try:
+                store.save_config(CFG)
+            except Exception:
+                pass
+    for key, old, new, other in moved:
+        text = ("%s shared the pair colour %s with %s; it is %s from now on"
+                % (project_name(key), old, project_name(other), new))
+        store.journal("bridge", text, project_name(key), "", "log",
+                      project_dir=key)
+        notify("pair_colour", text, path=key)
+    return [(k, o, n) for k, o, n, _x in moved]
 
 
 CHAT_BRIEF = 160
@@ -1960,6 +2067,30 @@ def note_carried_paths(path):
     return others
 
 
+def note_carried_nopath(path, n):
+    """Is `n` carried lines with no path a number not yet said for this
+    project? The book of what was said, kept like note_carried_paths's.
+
+    The carrier is never rewritten, so the same old rows were counted and
+    warned about at every start - three warn lines per restart, for lines
+    written before rows had a path at all (the last of them 2026-08-19).
+    What is new is a different number. OUT of merge_carried_history on
+    purpose: that one is file work and touches no STATE (case 45), and
+    this takes the lock only for the book, after the files are read.
+    -> DECISIONS.md 8.58 (35.3)
+    """
+    key = norm(path)
+    with _lock:
+        book = STATE.setdefault("carried_nopath", {})
+        was = book.get(key)
+        if n:
+            book[key] = n
+        else:
+            book.pop(key, None)
+        save_state()
+    return bool(n) and n != was
+
+
 def merge_carried_history(why, only=None):
     """Read back the journal a project folder carried here, once.
 
@@ -2012,7 +2143,8 @@ def merge_carried_history(why, only=None):
                           "could not be read and were skipped: %s"
                           % (project_name(path), "; ".join(got["errors"][:3])),
                           project_name(path), "", "warn", project_dir=path)
-        if got.get("no_path"):
+        # SAID WHEN THE NUMBER CHANGES, like note_carried_paths (35.3)
+        if note_carried_nopath(path, int(got.get("no_path") or 0)):
             # A pathless row passes EVERY project's feed filter, so letting
             # imported ones through would flood every pair's feed at once.
             store.journal("bridge", "%d carried line%s of %s named no "
@@ -19420,7 +19552,7 @@ def handle_event(event):
             key, first = proc_key(cmd, tid, bg)
             rec = {"cmd": cmd[:160], "started": time.time(),
                    "session": event.get("session_id", ""),
-                   "sig": first, "tid": tid}
+                   "sig": first, "tid": tid, "told": False, "role": role}
             # A SUBAGENT'S CALL SAYS SO: `agent_id` rides with it, beside
             # the parent's session id. close_at_stop needs it, because a
             # background subagent's call outlives the parent's turn.
@@ -19456,15 +19588,12 @@ def handle_event(event):
                     = dict(rec)
                 save_state()
             touch_session(event, state="waiting on a process")
-            # WHOSE CALL, in the line itself: the record knows its agent
-            # and a census reads the journal - 28.09 an alarm's call could
-            # not be told apart afterwards because only the record had it.
-            store.journal("process", "Started: %s%s" % (
-                cmd[:120], (" [subagent %s%s]" % (
-                    rec.get("agent"), ", after the half's turn"
-                    if rec.get("after_turn") else "")) if rec.get("agent")
-                else ""), project, role,
-                          "log", project_dir=path)
+            # A SHORT COMMAND WRITES NO LINE (35.1): a foreground call is
+            # told only once it has run journal_short_commands_sec, by the
+            # process watch; a background job is told now, because it is
+            # meant to run long and its call returns at once.
+            if bg or short_command_sec(path) <= 0:
+                tell_started(path, project, role, key)
         return None, None
 
     elif name == "PostToolUse":
@@ -19535,9 +19664,12 @@ def handle_event(event):
             # instead of finishing is still caught. Removing a wake-up is
             # not the same as removing a detector, and only the first was
             # done here.
-            store.journal("process", "Finished in %.0fs: %s"
-                          % (dur, tracked["cmd"]), project, role, "log",
-                          project_dir=path)
+            # after a start that was told, or a run past the threshold
+            # that ended between two ticks of the watch (35.1)
+            if tracked.get("told", True) or dur >= short_command_sec(path):
+                store.journal("process", "Finished in %.0fs: %s"
+                              % (dur, tracked["cmd"]), project, role, "log",
+                              project_dir=path)
         return None, None
 
     elif name == "PostToolUseFailure":
@@ -19670,8 +19802,8 @@ def handle_event(event):
                 "human it is on its way. When a report arrives, answer with "
                 "the bridge tool 'verdict': continue with what to fix, done "
                 "to accept, wait if a long process is still running. There "
-                "is no need to leave plan mode; nothing you do requires "
-                "it.\n\n"
+                "is no need to change the permission mode; nothing you do "
+                "requires it.\n\n"
                 "Before you accept a report that changed code, call the "
                 "bridge tool 'check'. The bridge runs this project's own "
                 "acceptance for you - in an isolated copy, touching nothing "
@@ -20557,6 +20689,39 @@ def inherited_jobs_over(path, procs):
                       project_dir=path)
 
 
+def short_command_sec(path):
+    """journal_short_commands_sec of this project: a command shorter than
+    this leaves no Started/Finished lines; 0 writes all. -> 8.58 (35.1)"""
+    try:
+        return max(0.0, float(store.project_config(CFG, path).get(
+            "journal_short_commands_sec", 30)))
+    except (TypeError, ValueError):
+        return 30.0
+
+
+def tell_started(path, project, role, key, ran=None):
+    """The Started line of the record `key`, once. `ran` is how long it
+    has already run when the watch tells it; None is the PreToolUse itself.
+    WHOSE CALL, in the line itself: the record knows its agent and a census
+    reads the journal - 28.09 an alarm's call could not be told apart
+    afterwards because only the record had it."""
+    meta = (PROCTRACK.get(path) or {}).get(key)
+    if not meta or meta.get("told"):
+        return
+    meta["told"] = True
+    with _lock:
+        rec = ((STATE.get("inflight") or {}).get(path) or {}).get(key)
+        if isinstance(rec, dict):
+            rec["told"] = True
+        save_state()
+    store.journal("process", "Started%s: %s%s" % (
+        "" if ran is None else " %.0fs ago" % ran,
+        (meta.get("cmd") or "")[:120], (" [subagent %s%s]" % (
+            meta.get("agent"), ", after the half's turn"
+            if meta.get("after_turn") else "")) if meta.get("agent")
+        else ""), project, role, "log", project_dir=path)
+
+
 def check_processes():
     close_answered_asks()           # 8.42: a dialog asks its own call
     table = [None]                  # one process snapshot per tick, if needed
@@ -20580,6 +20745,10 @@ def check_processes():
             # "too long to be real", not two: the same constant decides.
             if record_expired(meta):
                 continue
+            # ITS START IS TOLD NOW THAT IT IS NOT SHORT (35.1)
+            if meta.get("told") is False and run >= short_command_sec(path):
+                tell_started(path, project_name(path),
+                             meta.get("role") or "executor", sig, run)
             # A COMMAND PAST THE HOUR THAT IS STILL OPEN IS A PAIR BLOCKING
             # ITSELF, and it gets said once. record_expired now keeps such a
             # record instead of writing it off (see there), which would
@@ -23592,6 +23761,7 @@ def main():
     migrate_ended_calls()           # 8.37: a record whose call has ended
     migrate_project_keys()
     migrate_ghost_records()
+    separate_pair_colours()         # 35.2: after the ghosts' colours go
     # The retired tree stays on disk by the owner's decision, but
     # nothing is meant to USE it. Saying so in a document is not a
     # check: the first census found a live process running out of it.
@@ -23612,6 +23782,7 @@ def main():
                                               for r in _back[:6])),
                       level="warn")
     migrate_executor_mode()
+    migrate_planner_mode()          # 8.59: the planner in auto
     migrate_hint_lists()
     migrate_notify_levels()
     migrate_compaction_points()

@@ -135,7 +135,7 @@ do. If you believe a rotation is genuinely needed sooner than the bridge
 would do it, say so to the human and let them decide - do not act as the
 bridge yourself.
 
-There is nothing you need plan mode for, so do not ask to leave it.
+Nothing you do needs another permission mode, so do not ask to change it.
 
 Events arriving as <channel source="bridge" kind="..."> come from the bridge:
 kind="report" is an executor report and needs a verdict, kind="info" is

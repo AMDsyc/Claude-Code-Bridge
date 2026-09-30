@@ -38,8 +38,9 @@ SW_SHOWMINNOACTIVE = 7
 
 ROLE_DEFAULTS = {
     "executor": {"permission_mode": "auto", "title": "Executor"},
-    # plan is only the default - the panel can set any mode for either role
-    "planner": {"permission_mode": "plan", "title": "Planner"},
+    # auto is only the default - the panel can set any mode for either role;
+    # it was plan until 2026-09-30 (DECISIONS 8.59)
+    "planner": {"permission_mode": "auto", "title": "Planner"},
 }
 
 # (project, role) -> Popen, and the project is store.norm'd - the same key

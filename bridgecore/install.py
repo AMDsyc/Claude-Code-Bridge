@@ -190,6 +190,19 @@ def _merge_approval(path, backup=False):
     return True
 
 
+# THE BRIDGE TOOLS A WINDOW CALLS WITHOUT ASKING, by exact name - never the
+# whole server. `check` and `loop` joined verdict and task on 2026-09-30:
+# the planner runs in `auto` since then (8.59), and a planner stood 6.4
+# minutes on "asking for permission (to use bridge - check (MCP))" on
+# 2026-09-30 14:24:28 - check was never on this list. marks_missing asks
+# for every one of them, so ensure_marks repairs a project at its next
+# launch. Monitor is deliberately NOT here: it runs any shell command, and
+# allowing it in a project's settings would let the planner run commands
+# with nobody asked - the thing its deny list exists to prevent.
+BRIDGE_TOOLS_ALLOWED = ("mcp__bridge__verdict", "mcp__bridge__task",
+                        "mcp__bridge__check", "mcp__bridge__loop")
+
+
 def allow_verdict_tool(project):
     """Let the planner call the bridge's verdict tool without asking.
 
@@ -209,7 +222,7 @@ def allow_verdict_tool(project):
     allow = perms.get("allow")
     if not isinstance(allow, list):
         allow = []
-    for name in ("mcp__bridge__verdict", "mcp__bridge__task"):
+    for name in BRIDGE_TOOLS_ALLOWED:
         if name not in allow:
             allow.append(name)
     perms["allow"] = allow
@@ -593,6 +606,14 @@ def marks_missing(project):
         if "bridge" not in json.dumps(cfg.get("statusLine", "")):
             gone.append("%s: no bridge status line" % s_path)
 
+        # the bridge tools allowed by name (8.59): a planner in auto that
+        # meets one missing here stops and asks a person
+        allowed = set((cfg.get("permissions") or {}).get("allow") or [])
+        short = [n for n in BRIDGE_TOOLS_ALLOWED if n not in allowed]
+        if short:
+            gone.append("%s: permissions.allow lacks %s"
+                        % (s_path, ", ".join(short)))
+
         env = cfg.get("env") or {}
         # normcase, because this is a Windows path and the same folder
         # arrives spelled several ways - the one comparison in the package
@@ -830,9 +851,9 @@ def uninstall(project):
 
             perms = cfg.get("permissions") or {}
             allow = [a for a in (perms.get("allow") or [])
-                     if a != "mcp__bridge__verdict"]
+                     if a not in BRIDGE_TOOLS_ALLOWED]
             if allow != (perms.get("allow") or []):
-                removed.append("verdict permission")
+                removed.append("bridge tool permissions")
             if allow:
                 perms["allow"] = allow
             else:

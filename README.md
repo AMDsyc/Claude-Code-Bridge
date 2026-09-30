@@ -157,7 +157,8 @@ What it writes into the project:
 
 - `.claude/settings.json` — the bridge's hooks and its status line
 - `.mcp.json` — the `bridge` channel server
-- approvals for `mcp__bridge__verdict` and `mcp__bridge__task`
+- approvals, by exact name, for the bridge's own tools: `mcp__bridge__verdict`,
+  `mcp__bridge__task`, `mcp__bridge__check` and `mcp__bridge__loop`
 - two environment entries: `PYTHONPATH`, pointing at the bridge, and
   `PYTHONSAFEPATH=1`. The second keeps the working directory off `sys.path`:
   the hooks run as `python -m bridgecore.hook`, and with `-m` Python puts the
@@ -477,7 +478,7 @@ figures say.
 |---|---|---|
 | `port` | `8765` | the local port |
 | `projects` | `{}` | watched projects, keyed by path |
-| `role_modes` | `executor: bypassPermissions`, `planner: plan` | permission mode per role. A project can override it |
+| `role_modes` | `executor: bypassPermissions`, `planner: auto` | permission mode per role. A project can override it |
 | `telegram` | empty | token and chat id |
 | `thresholds.idle_hold` | `1200` | how long an idling pair is held rather than answered, in seconds. `0` disables |
 | `thresholds.review_timeout` | `1200` | how long a report may wait for a verdict |
@@ -653,6 +654,31 @@ running has to be available to them. It cannot be closed up and resold.
 ## Changes
 
 Newest first. Short on purpose — what changed, not why in detail.
+
+**2026-09-30 — what is new since the evening release of 2026-09-28 (0e00027)**
+
+- **The reviewing half starts in `auto`, not `plan`.** It is kept from
+  writing by what was always its real protection: its edit tools and its
+  shell are denied outright, and a deny outranks every mode. At start the
+  bridge moves a saved `plan` that was only the default of its day - the
+  bridge-wide setting, a project's saved mode, a preset - and leaves any
+  other choice alone, naming it. The bridge's own `check` and `loop` tools
+  are now allowed by name beside `verdict` and `task`, and a project missing
+  one is repaired the next time a window of it starts: a reviewer used to
+  stop and ask a person before running its own acceptance check.
+- **A short command leaves no lines in the log.** Every command used to
+  write a start and an end line, and most take a second or two. A command
+  still running after 30 seconds is written when the watch sees it, with how
+  long it has run, and its end is written too; a background job and a
+  failure are always written. A project can set the threshold, or 0 to write
+  every line as before.
+- **Two pairs never share a colour.** A colour counts as taken only when a
+  configured project holds it, not when a folder that is no project does;
+  two configured pairs found sharing one are told apart at start, and the
+  chat is told once.
+- **An old number is said once.** Lines a project carries from before log
+  lines named their project are counted, and the count is said only when it
+  changes, not at every start.
 
 **2026-09-28, evening — what is new since the morning release (b300e42)**
 

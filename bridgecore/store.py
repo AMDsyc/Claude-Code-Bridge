@@ -172,7 +172,14 @@ DEFAULT_CONFIG = {
     # executor in this mode can read and write outside its project, which
     # was confirmed in the same test rather than assumed. It is here, in
     # the config, so it can be changed back without touching code.
-    "role_modes": {"executor": "bypassPermissions", "planner": "plan"},
+    #
+    # THE PLANNER IN `auto` - the owner's word, 2026-09-30: planners always
+    # start in auto mode, here and in the public version. Its protection was never
+    # its mode: disallow_for denies its edit tools and its shell, and a deny
+    # outranks every mode. What plan mode added was a person asked before the
+    # verdict tool ran (8.26). migrate_planner_mode moves the saved defaults
+    # of the day once. -> DECISIONS.md 8.59
+    "role_modes": {"executor": "bypassPermissions", "planner": "auto"},
     "thresholds": {
         "handoff_at": 75,
         "warn_at": 85,
@@ -303,6 +310,13 @@ PROJECT_DEFAULTS = {
     # without questions so it can carry on. A project that wants the old
     # behaviour sets this to false deliberately. -> DECISIONS.md 8.8
     "auto_restart_dead_sessions": True,
+    # A COMMAND SHORTER THAN THIS WRITES NO Started/Finished LINES (35.1).
+    # Every foreground call used to write two, and most take a second or
+    # two: the journal was mostly a copy of the transcript. A command still
+    # running at this age gets its Started line from the process watch, and
+    # its Finished line with it; a failure and a background job are always
+    # written. 0 writes every one, as before. -> DECISIONS.md 8.58
+    "journal_short_commands_sec": 30,
     # There was an "autocompact_pct" here, 70 since 2026-08-21, and the
     # bridge handed it to every window it opened as
     # CLAUDE_AUTOCOMPACT_PCT_OVERRIDE. It is gone (2026-09-01, the owner's
@@ -903,9 +917,12 @@ def merge_day(project, day):
     - REFUSED IF PATHLESS. `_feed_rows` lets a row with no path through
       EVERY project's filter, because a pathless line is about the bridge
       itself. An imported row must therefore never be pathless, or one
-      import would flood every feed at once. Today none can be - only rows
-      that had a project_dir reach the carrier - but the rule is written
-      down and counted rather than left to that.
+      import would flood every feed at once. Such rows EXIST: the carrier
+      holds every line written before rows had a `path` at all (the last
+      of them 2026-08-19 - 7 685 in one project, 583 in another), and they
+      are counted and left where they are. This said "today none can be"
+      until 2026-09-28, which was never true of an old carrier.
+      -> DECISIONS.md 8.58
 
     The day comes from the FOLDER NAME, never from a row's `at`: two
     machines' clocks drift, and taking the day from the stamp would scatter
@@ -1208,11 +1225,12 @@ def models_sub(req, got_id, got_display):
 # ---- profiles -------------------------------------------------------------
 
 DEFAULT_PROFILES = {
-    "endless run": {"executor_mode": "auto", "planner_mode": "plan",
+    # the planner in auto in every preset, as everywhere else (8.59)
+    "endless run": {"executor_mode": "auto", "planner_mode": "auto",
                     "rc": True, "admin": False},
-    "debugging": {"executor_mode": "default", "planner_mode": "plan",
+    "debugging": {"executor_mode": "default", "planner_mode": "auto",
                   "rc": True, "admin": False},
-    "one-off repair": {"executor_mode": "acceptEdits", "planner_mode": "plan",
+    "one-off repair": {"executor_mode": "acceptEdits", "planner_mode": "auto",
                        "rc": True, "admin": False},
 }
 

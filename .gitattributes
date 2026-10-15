@@ -1,0 +1,5 @@
+# bridge.command is the Mac's launcher, a shell script, and sh reads a CR as
+# part of the word. A clone or a git archive made where core.autocrlf is on -
+# the Windows default - would hand it out with CRLF ends, and the Mac could
+# not run it. Every other file keeps whatever the reader's git does.
+bridge.command text eol=lf

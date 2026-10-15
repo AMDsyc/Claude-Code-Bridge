@@ -198,6 +198,7 @@ details .inner{padding:4px 14px 14px;color:var(--label);line-height:1.6}
         <button class="btn" id="feedAll">all</button>
       </div>
     </div>
+    <div class="dim" id="feedHistory" style="display:none"></div>
     <div class="feed" id="feed"></div>
   </div>
   <div class="dim" id="footPaths"></div>
@@ -1111,6 +1112,15 @@ function renderPanel(){
   $("#feedMine").className="btn"+(FEEDALL?"":" on");
   $("#feedAll").className="btn"+(FEEDALL?" on":"");
   var pairsBy=D.pairs||{};
+  /* a project whose carried history is still being read on the daemon's
+     history thread: its feed may lack the lines another machine wrote,
+     and saying so is the difference between "not yet" and "never" (8.144) */
+  var hp=(D.history_pending||[]).filter(function(p){return FEEDALL||p===CUR});
+  var hn=hp.map(function(p){return (pairsBy[p]&&pairsBy[p].name)||p});
+  $("#feedHistory").style.display=hp.length?"":"none";
+  $("#feedHistory").textContent=hp.length?("still reading the history "+
+    hn.join(", ")+" carried from another machine - lines written there "+
+    "may be missing below until it is done"):"";
   $("#feed").innerHTML=(D.events||[]).map(function(e){
     var who="";
     if(FEEDALL&&e.path&&pairsBy[e.path])

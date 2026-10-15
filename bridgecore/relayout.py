@@ -549,6 +549,51 @@ def port_open(port=None, host="127.0.0.1", timeout=1.5):
         s.close()
 
 
+def state_answers(port=None, timeout=None):
+    """True only when GET /state comes back 200 with a JSON object.
+
+    An open port is not an answering bridge. daemon.main() binds its server
+    first and serves only after the start's migrations, so for that stretch
+    the kernel accepts a connection nobody reads - on the Mac on 2026-10-15
+    a restart said "the bridge is answering again" at 07:55:02 while GET /
+    timed out for a minute after it, the first 200 at 07:56:07. A pair that
+    takes that line at its word talks to a bridge that is not there yet.
+    -> DECISIONS.md 8.143"""
+    url = "http://127.0.0.1:%d/state" % (port or PORT)
+    try:
+        with urllib.request.urlopen(url, timeout=timeout or ASK) as resp:
+            if resp.status != 200:
+                return False
+            return isinstance(json.loads(resp.read().decode("utf-8")), dict)
+    except Exception:
+        return False
+
+
+def wait_answering(port, wait, pause):
+    """Wait up to `wait` s for state_answers. (answered, port_seen_open).
+
+    The second half keeps a port that opened and never answered apart from
+    a port that never opened: one is a bridge stuck before it serves, the
+    other one that did not start."""
+    end = time.time() + wait
+    seen = False
+    while time.time() < end:
+        if port_open(port):
+            seen = True
+            left = end - time.time()
+            if left > 0 and state_answers(port, timeout=min(ASK, left)):
+                return True, True
+        time.sleep(pause)
+    return False, seen
+
+
+def not_answered(port, wait, seen):
+    if seen:
+        return ("port %d opened but /state did not answer within %ds"
+                % (port or PORT, wait))
+    return "it did not answer within %ds" % wait
+
+
 def pid_on_port(port=None):
     """The pid listening on the port, from netstat. None if nobody is.
 
@@ -961,12 +1006,10 @@ def _start_posix(base, wait, port, how=None):
         except OSError as exc:
             return False, "could not start it: %s" % exc
         started = "started without a window"
-    end = time.time() + wait
-    while time.time() < end:
-        if port_open(port):
-            return True, "the bridge is answering again (%s)" % started
-        time.sleep(1)
-    return False, "it did not answer within %ds (%s)" % (wait, started)
+    answered, seen = wait_answering(port, wait, 1)
+    if answered:
+        return True, "the bridge is answering again (%s)" % started
+    return False, "%s (%s)" % (not_answered(port, wait, seen), started)
 
 
 def start_daemon(base=None, wait=180, port=None):
@@ -1006,12 +1049,10 @@ def start_daemon(base=None, wait=180, port=None):
                          env=clean)
     except OSError as exc:
         return False, "could not start it: %s" % exc
-    end = time.time() + wait
-    while time.time() < end:
-        if port_open(port):
-            return True, "the bridge is answering again"
-        time.sleep(2)
-    return False, "it did not answer within %ds" % wait
+    answered, seen = wait_answering(port, wait, 2)
+    if answered:
+        return True, "the bridge is answering again"
+    return False, not_answered(port, wait, seen)
 
 
 def restore(base, kept, out=say):

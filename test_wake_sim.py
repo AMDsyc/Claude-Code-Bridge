@@ -95,6 +95,13 @@ os.environ["BRIDGE_GRACE_SEC"] = "1"
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# NOTHING THIS RUN DOES REACHES PAST THIS MACHINE (DECISIONS.md 8.142): the
+# fence refuses it and writes it down, and the last check fails on what it
+# wrote. The Bot API is a recorder on 127.0.0.1, put up before the
+# package reads BRIDGE_TELEGRAM_API.
+from bridgecore import netfence                # noqa: E402
+netfence.fence(os.path.join(TMP, "netfence.jsonl"))
+TGAPI = netfence.telegram()
 from bridgecore import daemon, sessions, store, telegram          # noqa: E402
 
 SABOTAGE = os.environ.get("BRIDGE_SIM_SABOTAGE", "")
@@ -967,6 +974,9 @@ if TMUX_HOME:
           "them still listens there (8.103)",
           (bool(owntemp.tmux_made(TMUX_HOME)) or not sessions.tmux_command(),
            owntemp.tmux_left(TMUX_HOME, 5)), (True, []))
+check("nothing this run did reached past this machine: the fence was up, "
+      "and it refused nothing (netfence.py, 8.142)",
+      (netfence.up(), netfence.refused()), (True, []))
 owntemp.finish(TMP, bool(FAILED))
 if TMUX_HOME:
     owntemp.finish(TMUX_HOME, bool(FAILED))

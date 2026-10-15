@@ -89,6 +89,13 @@ os.environ["BRIDGE_GRACE_SEC"] = "1"
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# NOTHING THIS RUN DOES REACHES PAST THIS MACHINE (DECISIONS.md 8.142): the
+# fence refuses it and writes it down, and the last check fails on what it
+# wrote. The Bot API is a recorder on 127.0.0.1, put up before the
+# package reads BRIDGE_TELEGRAM_API.
+from bridgecore import netfence                # noqa: E402
+netfence.fence(os.path.join(TMP, "netfence.jsonl"))
+TGAPI = netfence.telegram()
 from bridgecore import daemon, sessions, store, telegram          # noqa: E402
 
 OUTDIR = os.environ.get("BRIDGE_SIM_OUT", "")
@@ -1205,12 +1212,24 @@ if TMUX_HOME:
         say("its windows' tmux servers bound in its own folder, and none of "
             "them still listens there (8.103)")
 
+# nothing any run did reached past this machine (netfence.py, 8.142)
+_net_bad = [] if netfence.up() else ["the network fence was never put up"]
+_net_bad += ["refused %s %s at %s" % (r.get("what"), r.get("target"),
+                                      r.get("where"))
+             for r in netfence.refused()]
+for _one in _net_bad:
+    say("FAIL %s" % _one)
+if not _net_bad:
+    say("nothing in any run reached past this machine: the fence was up, "
+        "and it refused nothing (8.142)")
+
 if OUTDIR:
     os.makedirs(OUTDIR, exist_ok=True)
     with io.open(os.path.join(OUTDIR, "summary.txt"), "w",
                  encoding="utf-8") as fh:
         fh.write("\n".join(LOG))
-        fh.write("\nEXIT=%d\n" % (1 if _failed_runs or _tmux_bad else 0))
+        fh.write("\nEXIT=%d\n" % (1 if _failed_runs or _tmux_bad or _net_bad
+                                   else 0))
 
 # The last seed's stub windows sleep 30 s with their working folder in
 # the seed's project, and a folder that is a live process's working
@@ -1218,9 +1237,9 @@ if OUTDIR:
 # first, waited on, and nothing else is touched. -> DECISIONS.md 8.45
 for _kid in sessions.child_pids(os.getpid(), names=()) or []:
     sessions.terminate_and_wait(_kid)
-owntemp.finish(TMP, bool(_failed_runs or _tmux_bad))
+owntemp.finish(TMP, bool(_failed_runs or _tmux_bad or _net_bad))
 if TMUX_HOME:
-    owntemp.finish(TMUX_HOME, bool(_failed_runs or _tmux_bad))
+    owntemp.finish(TMUX_HOME, bool(_failed_runs or _tmux_bad or _net_bad))
 say("=" * 70)
 if _failed_runs:
     say("NOT TEN OF TEN: %d run(s) failed - %s"
@@ -1229,5 +1248,9 @@ if _failed_runs:
 if _tmux_bad:
     say("every run passed, but its tmux servers were not its own: %s"
         % "; ".join(_tmux_bad))
+    sys.exit(1)
+if _net_bad:
+    say("every run passed, but something reached past this machine: %s"
+        % "; ".join(_net_bad))
     sys.exit(1)
 say("ten of ten: every situation passed in every run")

@@ -499,33 +499,33 @@ running has to be available to them. It cannot be closed up and resold.
 
 Newest first. Short on purpose — what changed, not why in detail.
 
-**2026-10-15 — what is new since the release of 2026-10-13**
+**2026-10-16 — what is new since the morning release of 2026-10-15 (67112c0)**
 
-- **A Mac on a PC's network share waits on it less.** Hooks, the status
-  line and the channel run by path; such a project gets
-  `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1` and `MCP_TIMEOUT=120000`; a
-  slow project folder no longer holds a reply; a port's owner comes from
-  netstat. The archive map reads only what changed and is not built on a
-  share: a search there reads the latest records and says why.
-- **A slow share is waited out**: the restart gate asks again when the
-  bridge answered late, and a commit killed for time names every
-  iteration not saved.
-- **A replacement is handed the thread only once its client listens**,
-  and one that reports late still closes the window it replaced.
-- **needs_you reaches you without Telegram**, in the panel; its tone is
-  `panel_sound`, off on a Mac.
-- **Fewer false calls**: a `wait` on a background task, or a helper stuck
-  on the share, calls nobody.
-- **The Bypass Permissions screen** is named with its keys, never answered.
-- **A saved executor mode stays**, the last run's Terminal window closes
-  after a restart, and `bridge.command` keeps LF in a Windows clone.
-- **A replaced window's jobs outlive it on a Mac too**: it is killed
-  alone, as `/F` does on Windows. The journal says they keep running only
-  when its shells answer 10 s later.
-- **The handoff a wall asks for** is the file the last one went into, else
-  one the project's rules name - never the root's freshest.
-- **A replaced channel no longer takes its successor's seat.**
-- **The public scan's private words live outside the repository.**
+- **A Mac mounts the PC's share without a password dialog.**
+  `bridge.command` asks the keychain first and opens the share by name
+  or by a proven address, whichever holds the password; with none it
+  says how to mount it once and starts anyway. A share mounted by address
+  counts as its server's, and one that drops while the bridge runs is
+  mounted back.
+- **needs_you finds a person**: the planner of `home_pair`, the pair you
+  talk to, hears every call of another pair the chat did not carry; a
+  call about a planner never goes into that planner's own channel; an
+  optional Mac notification (`mac_notify`), with no sound. A call that
+  closes within 45 s goes no further than the chat and the panel.
+- **A turn running over 45 minutes is told to its planner**, as news.
+- **Nothing waits on the network at the wrong moment**: a hook's reply
+  no longer waits on Telegram, a restart calls back only once the bridge
+  answers, and moved history is read on its own thread.
+- **A project on a network volume is not committed unless asked**
+  (`commit_on_share`), and a commit with no author set goes as
+  `bridge <bridge@invalid>`. `/config` says what it changed.
+- **A helper's compaction is not the window's**, and a routine
+  compaction does not lower the ceiling.
+- **A job handed to a new window at a swap is not ended by that
+  window's Stop**, so a `wait` calls nobody while the old window's run
+  goes on.
+- **No wall replacement for a pair nobody works**: with the loop off or
+  paused it is asked again at the next Stop with the loop on.
 
 <!-- rule 36: the index's own lines, not the record -->
 Older entries, newest first, back to the first release of 2026-08-18:

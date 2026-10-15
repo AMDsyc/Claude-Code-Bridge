@@ -51,6 +51,13 @@ os.environ["BRIDGE_CLAUDE_SETTINGS"] = os.path.join(TMP, "user-settings.json")
 os.environ["PYTHONUTF8"] = "1"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# NOTHING THIS RUN DOES REACHES PAST THIS MACHINE (DECISIONS.md 8.142): the
+# fence refuses it and writes it down, and the last check fails on what it
+# wrote. The Bot API is a recorder on 127.0.0.1, put up before the
+# package reads BRIDGE_TELEGRAM_API.
+from bridgecore import netfence                # noqa: E402
+netfence.fence(os.path.join(TMP, "netfence.jsonl"))
+TGAPI = netfence.telegram()
 from bridgecore import daemon, store            # noqa: E402
 
 PATH = os.path.join(TMP, "proj")
@@ -1038,8 +1045,15 @@ check("taking it hands it over once", daemon.take_note(PATH),
 check("and only once", daemon.take_note(PATH), "")
 print("   a session starting reads the note, it does not eat it - a")
 print("   rotation must not swallow the line written for the review")
-esrc = inspect.getsource(daemon.handle_event)
+# 8.148: the restart notice, the note and the thread moved into
+# landing_parts, which the branch calls - one spelling for the landing and
+# for the thread held at an unsure one. The start path is both.
+esrc = (inspect.getsource(daemon.handle_event)
+        + inspect.getsource(daemon.landing_parts))
 check("the seed reads", "note_for(path)" in esrc, True)
+check("and the branch calls what reads it",
+      "parts.extend(landing_parts(" in inspect.getsource(
+          daemon.handle_event), True)
 check("and does not take", "take_note" in esrc, False)
 check("the report is what takes it",
       "take_note(path)" in inspect.getsource(daemon.run_review), True)
@@ -1535,7 +1549,7 @@ check("for both managed roles, not just the planner",
       "if canon and managed(role):" in esrc47, True)
 check("and it is not inside the planner-only branch",
       esrc47.index("canon = honesty_text()") >
-      esrc47.index('note = note_for(path)'), True)
+      esrc47.index("parts.extend(landing_parts("), True)
 print("   the channel carries it too, read from the same file rather than")
 print("   copied - one text, and editing the file changes both")
 csrc47 = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -10746,12 +10760,15 @@ def _try140(found, keyed, appears):
         return up[0] <= 0
     if _rm140 is None:
         return None, [], []
+    # the name leads to the address found (132a): asked by name, as before
+    _kw140 = ({"lookup": lambda *a: [(2, 1, 6, "", ("192.0.2.9", 445))]}
+              if "lookup" in inspect.signature(_rm140).parameters else {})
     got = _rm140("/Volumes/X Projects", dict(_rec140),
                  finder=lambda name, last, say=None: (
                      ("192.0.2.9", "") if found else ("", "%s not found" % name)),
                  run=run, ismount=ismount, wait=0.3,
                  sleep=lambda s: time.sleep(0.05),
-                 say=lambda t, lv: said.append((lv, t)))
+                 say=lambda t, lv: said.append((lv, t)), **_kw140)
     opened = [c[1:] for c in _asked140 if c[0] == _ns140.OPEN]
     return got[0], opened, said
 
@@ -11060,6 +11077,19 @@ if _ml143 is not None:
            _gone_run143, [l for l in _said143 if l.startswith("Missing: ")]
            != []), (1, [], True))
 
+    def _query143(cmd, timeout=None):
+        # the system the launcher asks before a mount (132b): the PC says
+        # it is WORKPC, and the keychain holds its password under the name
+        if cmd[1:2] == ["status"]:
+            return subprocess.CompletedProcess(cmd, 0, "Server: WORKPC\n", "")
+        return subprocess.CompletedProcess(
+            cmd, 0 if "find-internet-password" in cmd
+            and "WORKPC.local" in cmd else 1, "", "")
+    # WORKPC.local leads to the PC's (documentation) address
+    _seam143 = {"query": _query143,
+                "lookup": lambda *a: [(2, 1, 6, "", ("192.0.2.5", 445))]} \
+        if "query" in inspect.signature(_ml143.main).parameters else {}
+
     def _main143(argv, now, runs, answers=(), tty=True, started=None):
         it = iter(answers)
         out = []
@@ -11068,7 +11098,7 @@ if _ml143 is not None:
             run=runs.append, ask=lambda q: next(it), say=out.append,
             tty=tty, start=lambda src, env, rest: (started.append(
                 (src, env["PATH"].split(os.pathsep)[0], rest))
-                if started is not None else None) or 0)
+                if started is not None else None) or 0, **_seam143)
         return code, out
 
     _runs143 = []
@@ -11871,6 +11901,20 @@ def _gone146(pid):
     return not st or st.startswith("Z")
 
 
+def _own146(pid, marks):
+    """Whether pid's environment names this case's folder - read of the
+    process itself (/proc on Linux, ps -E on a Mac), so a stranger that
+    holds one of the case's ports is named and never killed."""
+    try:
+        with open("/proc/%d/environ" % pid, "rb") as fh:
+            env = fh.read().decode("utf-8", "replace")
+    except OSError:
+        env = subprocess.run(["ps", "-E", "-ww", "-o", "command=", "-p",
+                              str(pid)], capture_output=True,
+                             text=True).stdout
+    return any(m in env for m in marks)
+
+
 def _journal146(data):
     out = ""
     for day in sorted(os.listdir(os.path.join(data, "logs"))
@@ -12078,18 +12122,39 @@ else:
                 os.environ.pop(_k, None)
             else:
                 os.environ[_k] = _v
-        for _pid in _lsof146(_port146):
-            try:
-                os.kill(_pid, signal.SIGKILL)
-            except OSError:
-                pass
         for _p in _launched146:
             try:
                 _p.kill()
             except OSError:
                 pass
             _p.wait()
-        time.sleep(0.5)
+        # One empty answer is no proof: on 2026-10-14 a single _lsof146
+        # said [] for a daemon that was listening, this cleanup killed
+        # nothing, and pid 76247 outlived the case by 12 hours. So both
+        # ports are asked again until two answers running are empty, and
+        # what they name is killed by its exact pid - only when its own
+        # environment names this case's folder.
+        _marks146 = {_base146, os.path.realpath(_base146)}
+        _strange146, _empty146 = set(), 0
+        _end146 = time.time() + 15
+        while _empty146 < 2 and time.time() < _end146:
+            _left146 = sorted(set(_lsof146(_port146) + _lsof146(_cfgport146))
+                              - _strange146)
+            _empty146 = 0 if _left146 else _empty146 + 1
+            for _pid in _left146:
+                if not _own146(_pid, _marks146):
+                    _strange146.add(_pid)
+                    print("       pid %d on this case's port is not its "
+                          "own - left alone" % _pid)
+                    continue
+                print("       still listening at the cleanup, killed: pid %d"
+                      % _pid)
+                try:
+                    os.kill(_pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                _wait146(lambda: _gone146(_pid), 5)
+            time.sleep(0.5)
         check("nothing of this case listens any more",
               (_lsof146(_port146), _lsof146(_cfgport146)), ([], []))
         _sh146.rmtree(_base146, ignore_errors=True)
@@ -12358,7 +12423,8 @@ print("   keys it holds and trusts by name, body and fingerprint - is a hit")
 print("   where it stands; it is asked of the machine and written nowhere,")
 print("   here neither: a check below names kinds, never a value. The forms")
 print("   no machine is asked about are hits on any machine; placeholders pass,")
-print("   and so does a name made of generic words only (bridge-mac)")
+print("   and so does a name made of generic words only (bridge-mac, a")
+print("   forge's known host and its first label)")
 try:
     import check_public as _cp148                               # noqa: E402
 except ImportError:
@@ -12491,11 +12557,16 @@ else:
     with open(os.path.join(_home148, ".ssh", "authorized_keys"), "w") as _fh:
         _fh.write("ssh-ed25519 %s bridge-mac\nssh-ed25519 %s otherbox-key\n"
                   % (_blob148, _blob148))
+    # host() takes a known host's first label too: a PC's known_hosts
+    # that gained github.com mid-scan had "github" refused (2026-10-15)
+    with open(os.path.join(_home148, ".ssh", "known_hosts"), "w") as _fh:
+        _fh.write("github.com ssh-ed25519 %s\ngitlab.com,otherbox.example "
+                  "ssh-ed25519 %s\n" % (_blob148, _blob148))
     _env148 = dict((k, os.environ.get(k)) for k in ("HOME", "USERPROFILE"))
     try:
         os.environ["HOME"] = os.environ["USERPROFILE"] = _home148
-        _names148 = [v for k, v in _cp148.machine_values()
-                     if k == "ssh key name"]
+        _vals148h = _cp148.machine_values()
+        _names148 = [v for k, v in _vals148h if k == "ssh key name"]
     finally:
         for _k, _v in _env148.items():
             if _v is None:
@@ -12506,6 +12577,11 @@ else:
           "one with a word of its own does: bridge-mac, otherbox-key",
           ("bridge-mac" in _names148, "otherbox-key" in _names148),
           (False, True))
+    check("a forge's known host names no machine either, nor its first "
+          "label: github.com, gitlab.com; a host with a word of its own is "
+          "a hit in both forms",
+          sorted(v for k, v in _vals148h if k == "ssh host"),
+          ["otherbox", "otherbox.example"])
 
 
 print("\n149. a long command's own tree is read off Windows too (8.99):")
@@ -12559,7 +12635,11 @@ print("    daemon answered in 12 - and planners were told 'NOT delivered' about"
 print("    verdicts the daemon had journalled. Measured there: 6.7-17.7 s for a")
 print("    SessionStart and 11.6-19.9 s for a /verdict, nearly all of it")
 print("    project_name's realpath/isdir/listdir and the journal's project copy.")
+print("    And Telegram is set up and slow (8.142, 2026-10-15): the tail of")
+print("    handle_event rewrote the status message in line, and a SessionStart")
+print("    took 2.28-2.31 s against a Bot API that answered in 2.")
 import builtins as _bi151
+import copy as _cp151
 import json as _js151
 _D151 = 0.4
 _SHARE151 = os.path.join(TMP, "share151")
@@ -12608,6 +12688,18 @@ def _rows151(base):
 
 
 _qc151, _rl151 = daemon.quiet_console_for, daemon.watch_rc_link
+_tg151 = _cp151.deepcopy(daemon.CFG.get("telegram"))
+_cl151 = daemon.chat_later
+
+
+def _tgfresh151():
+    """A chat that is set up and has no status message yet: the pin is a
+    sendMessage, and the 20 s since the last one are over."""
+    daemon.CFG["telegram"] = {"token": "t151", "chat_id": "151"}
+    daemon._last_pin[0] = 0
+    TGAPI.reset()
+
+
 try:
     daemon.quiet_console_for = lambda *a, **k: None
     daemon.watch_rc_link = lambda *a, **k: None
@@ -12629,6 +12721,8 @@ try:
     daemon.STATE.clear()
     daemon.STATE.update({"sessions": {}, "compactions": {},
                          "last_session": {}, "pids": {}})
+    _tgfresh151()
+    TGAPI.delay = 2
     _t151 = time.time()
     _o151, _ = daemon.handle_event({
         "hook_event_name": "SessionStart", "role": "executor",
@@ -12645,6 +12739,18 @@ try:
     check("and it carries its start words", len(_ac151) > 1000, True)
     check("the name is the folder's own spelling",
           daemon.project_name(_SLOW151), "Slow151")
+    _st151 = time.time()
+    check("what the reply handed to the chat's thread is done within 30 s",
+          daemon.chat_settle(30), True)
+    print("   the chat's thread settled %.2f s after the reply; the Bot API "
+          "saw %s" % (time.time() - _st151, TGAPI.methods()))
+    check("and the status message was sent all the same - to the slow Bot "
+          "API, after the hook had its answer",
+          [p.get("text", "").split("\n")[0][:9] for m, p in TGAPI.calls
+           if m == "sendMessage" and p.get("chat_id") == "151"
+           and p.get("text", "").startswith("bridge - ")][:1],
+          ["bridge - "])
+    TGAPI.delay = 0
     _t151 = time.time()
     for _w151 in _ORDER151:
         store.journal("case151", _w151, "Slow151", "", "log",
@@ -12715,10 +12821,39 @@ try:
     store.PROJECT_WRITE_WAIT = _pw151
     check("makes the same line cost the share's time again - so the timing "
           "checks above can fail", _took151 >= _D151, True)
+    print("   the sabotage: the chat's call made in line again, in the reply")
+    daemon.chat_later = lambda label, fn, *a, **k: fn(*a, **k) or True
+    daemon.STATE.clear()
+    daemon.STATE.update({"sessions": {}, "compactions": {},
+                         "last_session": {}, "pids": {}})
+    _tgfresh151()
+    TGAPI.delay = 2
+    _t151 = time.time()
+    daemon.handle_event({
+        "hook_event_name": "SessionStart", "role": "executor",
+        "session_id": "sess-151", "source": "startup",
+        "project_dir": _SLOW151, "cwd": _SLOW151})
+    _took151 = time.time() - _t151
+    daemon.chat_later = _cl151
+    TGAPI.delay = 0
+    print("   SessionStart with the call in line: %.2f s" % _took151)
+    check("makes the same SessionStart wait out the Bot API's 2 s again - so "
+          "the 1.5 s check above can fail", _took151 >= 2.0, True)
 finally:
     for _m151, _n151, _f151 in _saved151:
         setattr(_m151, _n151, _f151)
     daemon.quiet_console_for, daemon.watch_rc_link = _qc151, _rl151
+    daemon.chat_later = _cl151
+    TGAPI.delay = 0
+    daemon.chat_settle(30)
+    if _tg151:
+        daemon.CFG["telegram"] = _tg151
+    else:
+        daemon.CFG.pop("telegram", None)
+    store.save_config(daemon.CFG)
+    print("   the config's telegram is back to what the case found: %s"
+          % ("a token and a chat" if (_tg151 or {}).get("token") else
+             "not set up"))
     daemon.CFG.get("projects", {}).pop(_SLOW151, None)
     getattr(store, "flush_project_writes", lambda t: True)(30)
 
@@ -14227,6 +14362,2154 @@ else:
             except Exception:
                 pass
 
+print("\n159. nothing a test run does reaches past this machine (8.142): the")
+print("     fence refuses a urlopen, a lookup and a connect to any other host,")
+print("     writes each down with its caller, lets this machine's own through,")
+print("     and is up in a child that only imports the package")
+print("    2026-10-15 (8.142): case 17 left a token in the config, and from then on")
+print("    every refresh_pin of this suite was a POST to the real")
+print("    api.telegram.org - it failed, telegram.py never raises, and the run")
+print("    stayed green.")
+import socket as _so159
+import urllib.error as _ue159
+import urllib.request as _ur159
+from bridgecore import telegram as _tg159
+_SRC159 = os.path.dirname(os.path.abspath(__file__))
+_seen159 = netfence.refused()
+_mine159 = []
+
+
+def _since159(n):
+    """The refusals written after the first n, kept to be forgotten."""
+    got = netfence.refused()[n:]
+    _mine159.extend(got)
+    return got
+
+
+def _try159(fn):
+    try:
+        fn()
+        return "went through"
+    except Exception as exc:
+        return ("refused" if "netfence" in str(getattr(exc, "reason", exc))
+                else "%s: %s" % (type(exc).__name__, exc))
+
+
+_h159 = dict(_tg159.HEALTH)
+try:
+    check("the fence is up in this run, and the suite's Bot API is the "
+          "recorder on this machine",
+          (netfence.up(), _tg159.API_BASE), (True, TGAPI.base))
+    _n = len(netfence.refused())
+    check("(a) a urlopen to api.telegram.org is refused by the fence",
+          _try159(lambda: _ur159.urlopen(
+              "https://api.telegram.org/bot159secret/getMe", timeout=5)),
+          "refused")
+    check("and written down once: the token masked, this file the caller",
+          [(e.get("what"), e.get("target"),
+            (e.get("where") or "").startswith("test_handover.py:"))
+           for e in _since159(_n)],
+          [("urlopen", "GET https://api.telegram.org/bot***/getMe", True)])
+    _n = len(netfence.refused())
+    check("a name lookup of another host is refused",
+          _try159(lambda: _so159.getaddrinfo("example.com", 443)), "refused")
+    check("and written down", [(e.get("what"), e.get("target"))
+                               for e in _since159(_n)],
+          [("getaddrinfo", "example.com")])
+    _n = len(netfence.refused())
+    _s159 = _so159.socket(_so159.AF_INET, _so159.SOCK_STREAM)
+    try:
+        check("a connect to another address is refused",
+              _try159(lambda: _s159.connect(("192.0.2.1", 9))), "refused")
+    finally:
+        _s159.close()
+    check("and written down", [(e.get("what"), e.get("target"))
+                               for e in _since159(_n)],
+          [("connect", "192.0.2.1:9")])
+    _n = len(netfence.refused())
+    TGAPI.reset()
+    with _ur159.urlopen(TGAPI.base + "/bot159/getMe", timeout=10) as _r159:
+        _ok159 = _json.loads(_r159.read().decode("utf-8")).get("ok")
+    check("this machine's own is let through: a lookup of localhost, and "
+          "the recorder answers a call",
+          (bool(_so159.getaddrinfo("localhost", 80)), _ok159,
+           TGAPI.methods()), (True, True, ["getMe"]))
+    check("and nothing was written for it", netfence.refused()[_n:], [])
+
+    print("   (b) the seam taken off: telegram.py pointed at the real Bot API")
+    _n = len(netfence.refused())
+    _api159 = _tg159.API
+    _tg159.API = "https://api.telegram.org/bot%s/%s"
+    try:
+        _got159 = _tg159._call_ex("t159", "getMe", {})
+    finally:
+        _tg159.API = _api159
+    check("comes back as a call that never reached Telegram",
+          _got159, (False, None))
+    check("and the fence wrote it down, at telegram.py - the suite fails on "
+          "a seam that is gone, it does not reach the network",
+          [(e.get("what"), e.get("target"),
+            (e.get("where") or "").startswith("telegram.py:"))
+           for e in _since159(_n)],
+          [("urlopen", "POST https://api.telegram.org/bot***/getMe", True)])
+
+    print("   (c) a child that only imports the package")
+    _code159 = ("import bridgecore, urllib.request\n"
+                "from bridgecore import netfence\n"
+                "print('UP', netfence.up())\n"
+                "try:\n"
+                "    urllib.request.urlopen('http://example.com/c159', "
+                "timeout=5)\n"
+                "    print('WENT')\n"
+                "except Exception as exc:\n"
+                "    print('ERR', type(exc).__name__)\n")
+    _n = len(netfence.refused())
+    _c159 = subprocess.run([sys.executable, "-B", "-c", _code159],
+                           cwd=_SRC159, capture_output=True, text=True,
+                           timeout=60)
+    _out159 = _c159.stdout.split()
+    _kid159 = _since159(_n)
+    print("   the child said %r%s" % (_c159.stdout.strip(),
+                                       (" - " + _c159.stderr.strip()[-300:])
+                                       if _c159.returncode else ""))
+    check("is fenced from its first import, and its urlopen is refused",
+          (_c159.returncode, _out159), (0, ["UP", "True", "ERR", "URLError"]))
+    check("and the refusal is in this run's record, under a pid that is not "
+          "this one",
+          [(e.get("what"), e.get("target"), e.get("pid") != os.getpid())
+           for e in _kid159],
+          [("urlopen", "GET http://example.com/c159", True)])
+    _env159 = dict(os.environ)
+    _env159.pop(netfence.ENV, None)
+    _k159 = subprocess.run([sys.executable, "-B", "-c",
+                            "import bridgecore\n"
+                            "from bridgecore import netfence\n"
+                            "print('UP', netfence.up())\n"],
+                           cwd=_SRC159, env=_env159, capture_output=True,
+                           text=True, timeout=60)
+    check("the control: without BRIDGE_NETFENCE the same import puts no "
+          "fence up - so the check above can fail (it asks, and reaches "
+          "nothing)", _k159.stdout.split(), ["UP", "False"])
+finally:
+    _tg159.HEALTH.clear()
+    _tg159.HEALTH.update(_h159)
+    netfence.forget(_mine159)
+check("the refusals this case provoked are forgotten, and nothing else is",
+      netfence.refused(), _seen159)
+
+
+print("\n160. the chat's own thread (8.142): what a hook's reply hands it runs")
+print("     after the reply, one call at a time, in the order asked; an error")
+print("     is a journal line and the next call runs; a pin already waiting")
+print("     is not queued twice; idle, the thread ends")
+import threading as _th160
+_log160, _live160 = [], {"now": 0, "most": 0, "threads": 0}
+_lk160 = _th160.Lock()
+_idle160 = daemon.CHAT_IDLE
+_tgc160 = daemon.CFG.get("telegram")
+
+
+def _job160(n):
+    with _lk160:
+        _live160["now"] += 1
+        _live160["most"] = max(_live160["most"], _live160["now"])
+        _live160["threads"] = max(_live160["threads"], len(
+            [t for t in _th160.enumerate() if t.name == "bridge-chat"]))
+    time.sleep(0.05)
+    with _lk160:
+        _live160["now"] -= 1
+        _log160.append(n)
+
+
+def _boom160():
+    raise RuntimeError("boom160")
+
+
+def _chat_threads160():
+    return [t for t in _th160.enumerate()
+            if t.name == "bridge-chat" and t.is_alive()]
+
+
+try:
+    check("everything handed to the chat before this case is done",
+          daemon.chat_settle(30), True)
+    daemon.CHAT_IDLE = 0.5
+    _gate160 = _th160.Event()
+    daemon.chat_later("case160", _gate160.wait, 10)
+    daemon.chat_later("case160", _job160, 1)
+    daemon.chat_later("case160", _boom160)
+    daemon.chat_later("case160", _job160, 2)
+    daemon.chat_later("case160", _job160, 3)
+    _pins160 = (daemon.chat_later("pin", _job160, "pin-a"),
+                daemon.chat_later("pin", _job160, "pin-b"))
+    check("a pin while one is already waiting is dropped, and says so",
+          _pins160, (True, False))
+    _gate160.set()
+    check("the chat's thread settles", daemon.chat_settle(30), True)
+    check("the calls ran in the order asked, the one that raised did not "
+          "stop the next, and the dropped pin never ran",
+          _log160, [1, 2, 3, "pin-a"])
+    check("one call at a time, on one thread",
+          (_live160["most"], _live160["threads"]), (1, 1))
+    _err160 = [r.get("text") for r in store._read_events(
+        os.path.join(store.day_dir(), "events.jsonl"))
+        if r.get("kind") == "bridge_error" and "boom160" in
+        (r.get("text") or "")]
+    check("the error is a journal line naming the call",
+          [t.startswith("The chat's case160 raised and was dropped; the next "
+                        "one runs. RuntimeError: boom160") for t in _err160],
+          [True])
+    _end160 = time.time() + 5
+    while _chat_threads160() and time.time() < _end160:
+        time.sleep(0.1)
+    check("idle for CHAT_IDLE, the thread ends - a bridge thread does not "
+          "outlive its work", (_chat_threads160(), daemon._CHAT["thread"]),
+          ([], None))
+    daemon.chat_later("case160", _job160, 4)
+    check("and the next call starts one", daemon.chat_settle(10), True)
+    check("which runs it", _log160[-1:], [4])
+
+    print("   a hook's reply")
+    check("handle_event answers under hook_reply",
+          (hasattr(daemon.handle_event, "__wrapped__"),
+           daemon.answering_hook()), (True, False))
+    _seen160 = []
+    _pn160 = daemon.project_name
+
+    def _spy160(*a, **k):
+        _seen160.append(daemon.answering_hook())
+        return _pn160(*a, **k)
+
+    daemon.project_name = _spy160
+    try:
+        daemon.handle_event({"hook_event_name": "Notification",
+                             "role": "executor", "session_id": "sess-160",
+                             "project_dir": TMP, "cwd": TMP,
+                             "message": "case 160"})
+    finally:
+        daemon.project_name = _pn160
+    check("and what it calls knows a hook is waiting",
+          (_seen160[:1], daemon.answering_hook()), ([True], False))
+    daemon.chat_settle(30)
+    daemon.CFG["telegram"] = {"token": "t160", "chat_id": "160"}
+    TGAPI.reset()
+    TGAPI.delay = 2
+    _t160 = time.time()
+    _lv160 = daemon.hook_reply(lambda: daemon.notify(
+        "pair_colour", "case 160 in a reply %f" % _t160))()
+    _in160 = time.time() - _t160
+    check("a chat message said inside a reply returns at once with its "
+          "level, the Bot API answering in 2 s",
+          (_in160 < 1.0, _lv160 in ("silent", "sound")), (True, True))
+    check("and is sent all the same, after", (daemon.chat_settle(30),
+          [p.get("text") for m, p in TGAPI.calls if m == "sendMessage"
+           and "case 160 in a reply" in (p.get("text") or "")] != []),
+          (True, True))
+    _t160 = time.time()
+    daemon.notify("pair_colour", "case 160 outside %f" % _t160)
+    _out160 = time.time() - _t160
+    print("   inside a reply %.2f s, outside one %.2f s" % (_in160, _out160))
+    check("the control: the same message said outside a reply waits out the "
+          "2 s - the panel's caller has asked for the result",
+          _out160 >= 2.0, True)
+    # the links sweep asks getChat whether the pin it holds is still pinned
+    daemon.CFG["telegram"] = {"token": "t160", "chat_id": "160",
+                              "links_message_id": 7}
+    TGAPI.reset()
+    _t160 = time.time()
+    _sl160 = daemon.hook_reply(lambda: daemon.sync_links("case 160"))()
+    _in160 = time.time() - _t160
+    check("the links sweep inside a reply returns at once",
+          (_in160 < 1.0, _sl160), (True, ""))
+    check("and asks its getChat after", (daemon.chat_settle(30),
+                                         TGAPI.methods()[:1]),
+          (True, ["getChat"]))
+    daemon.CFG["telegram"] = {"token": "t160", "chat_id": "160",
+                              "links_message_id": 7}
+    _t160 = time.time()
+    daemon.sync_links("case 160")
+    _out160 = time.time() - _t160
+    print("   the links sweep: inside a reply %.2f s, outside one %.2f s"
+          % (_in160, _out160))
+    check("the control: outside a reply the sweep waits out the 2 s",
+          _out160 >= 2.0, True)
+finally:
+    TGAPI.delay = 0
+    daemon.CHAT_IDLE = _idle160
+    daemon.chat_settle(30)
+    if _tgc160:
+        daemon.CFG["telegram"] = _tgc160
+    else:
+        daemon.CFG.pop("telegram", None)
+
+
+print("\n161. the carried history is read on a thread of its own (8.144). The")
+print("     start and /config hand it to the bridge-history thread and answer")
+print("     at once; while a project's history is read, /state names it. On")
+print("     the Mac on 2026-10-15 the start read one project's carrier of")
+print("     131 753 lines over the share before it served, GET / timing out")
+print("     for a minute, and every /config waited for every carrier.")
+print("     FAILURE WOULD LOOK LIKE: a /config that waits for the read, a")
+print("     /state silent about a read in progress, a toggle that reads every")
+print("     carrier again, or a thread one bad project ends")
+import json as _js161                                       # noqa: E402
+import threading as _th161                                  # noqa: E402
+import urllib.request as _ur161                             # noqa: E402
+from http.server import ThreadingHTTPServer as _THS161      # noqa: E402
+
+
+def _srv_up161():
+    srv = _THS161(("127.0.0.1", 0), daemon.Handler)
+    srv.daemon_threads = True
+    _th161.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def _call161(srv, route, body=None, timeout=30):
+    """(status, answer, seconds) from this case's own server - never the
+    live one. A request that does not come back is an answer too."""
+    head = {"Content-Type": "application/json"}
+    data = None
+    if body is not None:
+        head["X-Bridge-Secret"] = daemon.SECRET
+        data = _js161.dumps(body).encode("utf-8")
+    rq = _ur161.Request("http://127.0.0.1:%d%s" % (srv.server_address[1],
+                                                   route),
+                        data=data, headers=head)
+    t0 = time.time()
+    try:
+        with _ur161.urlopen(rq, timeout=timeout) as r:
+            return (r.status, _js161.loads(r.read().decode("utf-8")),
+                    time.time() - t0)
+    except Exception as exc:                    # a timeout is the finding
+        return None, "%s: %s" % (type(exc).__name__, exc), time.time() - t0
+
+
+def _post_later161(srv, body, out):
+    """POST /config on a thread, so a POST that waits for the history does
+    not hold the case past its own hold file."""
+    t = _th161.Thread(target=lambda: out.append(
+        _call161(srv, "/config", body)), daemon=True)
+    t.start()
+    return t
+
+
+def _hist_threads161():
+    return [t for t in _th161.enumerate()
+            if t.name == "bridge-history" and t.is_alive()]
+
+
+_srv161 = _srv_up161()
+_was161 = _js161.loads(_js161.dumps(daemon.CFG.get("projects") or {}))
+_hold161 = os.path.join(TMP, "history-hold-161")
+_pA161, _pB161, _pC161, _pD161 = [os.path.join(TMP, "hist161-" + s) for s in
+                                  ("a", "b", "c-bad161", "d")]
+for _pp in (_pA161, _pB161, _pC161, _pD161):
+    os.makedirs(_pp, exist_ok=True)
+_nA161, _nB161, _nC161, _nD161 = [daemon.norm(p) for p in
+                                  (_pA161, _pB161, _pC161, _pD161)]
+_real_mch161 = daemon.merge_carried_history
+_calls161, _most161 = [], [0]
+
+
+def _mch161(why, only=None):
+    _calls161.append((why, only, _th161.current_thread().name))
+    _most161[0] = max(_most161[0], len(_hist_threads161()))
+    if only and only.endswith("bad161"):
+        raise RuntimeError("bad161")
+
+
+def _with161(**add):
+    out = _js161.loads(_js161.dumps(_was161))
+    out.update(add)
+    return out
+
+
+_heldhold161 = daemon.HISTORY_HOLD
+try:
+    check("nothing is being read before this case", (daemon.history_settle(
+        30), daemon.history_pending()), (True, []))
+    daemon.merge_carried_history = _mch161
+    open(_hold161, "w").close()
+    daemon.HISTORY_HOLD = _hold161
+
+    print("   (a) a project entering the watch list: /config answers while")
+    print("   its history is held unread on the thread")
+    _out161 = []
+    _post_later161(_srv161, {"projects": _with161(**{_pA161: {}})},
+                   _out161).join(10)
+    _a161 = _out161[0] if _out161 else (None, "no answer in 10 s", 10.0)
+    print("       POST /config: %r in %.2f s" % (_a161[0], _a161[2]))
+    check("(a) /config answered 200 inside 2 s, the read held",
+          (_a161[0], _a161[2] < 2.0), (200, True))
+    check("(a) the read is on its way, on one bridge-history thread",
+          (daemon.history_pending(), len(_hist_threads161()), _calls161),
+          ([_nA161], 1, []))
+    _s161 = _call161(_srv161, "/state")
+    check("(a) /state names the project whose history is still being read",
+          (_s161[0], (_s161[1] or {}).get("history_pending")
+           if isinstance(_s161[1], dict) else _s161[1]),
+          (200, [_nA161]))
+
+    print("   (b) a toggle on a project already watched reads nothing")
+    _out161 = []
+    _post_later161(_srv161, {"projects": _with161(
+        **{_pA161: {"commit_each_iteration": False}})}, _out161).join(10)
+    check("(b) answered, and nothing more was queued",
+          ((_out161[0][0] if _out161 else None), daemon.history_pending(),
+           len(daemon._HISTORY["queue"])), (200, [_nA161], 0))
+
+    print("   (c) three more come in; one is taken out again before its turn")
+    _out161 = []
+    _post_later161(_srv161, {"projects": _with161(**{
+        _pA161: {"commit_each_iteration": False}, _pB161: {}, _pC161: {},
+        _pD161: {}})}, _out161).join(10)
+    check("(c) all four are pending", daemon.history_pending(),
+          sorted([_nA161, _nB161, _nC161, _nD161]))
+    _out161 = []
+    _post_later161(_srv161, {"projects": _with161(**{
+        _pA161: {"commit_each_iteration": False}, _pC161: {}, _pD161: {}})},
+        _out161).join(10)
+    check("(c) the one taken out is still pending - it is skipped at its "
+          "turn, not dropped from the books",
+          ((_out161[0][0] if _out161 else None), _nB161 in
+           daemon.history_pending()), (200, True))
+
+    print("   (d) the hold lifted: one at a time, in order, the removed one")
+    print("   not read, the one that raises said and passed")
+    os.remove(_hold161)
+    check("(d) the thread settles", daemon.history_settle(30), True)
+    check("(d) read in the order they came, on the thread, never the "
+          "removed one",
+          [(w, o, n) for w, o, n in _calls161],
+          [("it entered the watch list", _nA161, "bridge-history"),
+           ("it entered the watch list", _nC161, "bridge-history"),
+           ("it entered the watch list", _nD161, "bridge-history")])
+    check("(d) one thread at a time", _most161[0], 1)
+    _err161 = [r.get("text") or "" for r in store._read_events(
+        os.path.join(store.day_dir(), "events.jsonl"))
+        if "could not be read" in (r.get("text") or "")
+        and "bad161" in (r.get("text") or "")]
+    check("(d) the project that raised is a journal line, and the next "
+          "one was read all the same", len(_err161), 1)
+    _end161 = time.time() + 5
+    while _hist_threads161() and time.time() < _end161:
+        time.sleep(0.05)
+    check("(d) nothing pending, and the thread is gone - it does not "
+          "outlive its work",
+          (daemon.history_pending(), _hist_threads161(),
+           daemon._HISTORY["thread"]), ([], [], None))
+    _s161 = _call161(_srv161, "/state")
+    check("(d) /state says so", (_s161[1] or {}).get("history_pending")
+          if isinstance(_s161[1], dict) else _s161[1], [])
+
+    print("   (e) the start hands it over too, and the panel says so")
+    _main161 = inspect.getsource(daemon.main)
+    check("(e) main() hands the start's merge to the thread and reads "
+          "nothing itself",
+          ("merge_history_later(\"the bridge started\")" in _main161,
+           "merge_carried_history(" in _main161), (True, False))
+    with open(os.path.join(os.path.dirname(daemon.__file__), "panel.html"),
+              encoding="utf-8") as _fh:
+        _panel161 = _fh.read()
+    check("(e) the panel reads history_pending into the feed's own line",
+          ("D.history_pending" in _panel161,
+           'id="feedHistory"' in _panel161), (True, True))
+finally:
+    daemon.HISTORY_HOLD = _heldhold161
+    if os.path.exists(_hold161):
+        os.remove(_hold161)
+    daemon.history_settle(30)
+    daemon.merge_carried_history = _real_mch161
+    _call161(_srv161, "/config", {"projects": _was161})
+    daemon.history_settle(30)
+    _srv161.shutdown()
+    _srv161.server_close()
+
+
+print("\n162. a restart calls the bridge back only when /state answers (8.143).")
+print("     main() binds its port first and serves after the start's")
+print("     migrations, and on the Mac on 2026-10-15 relayout said \"the")
+print("     bridge is answering again\" at 07:55:02 off an open port while")
+print("     GET / timed out until 07:56:07.")
+print("     FAILURE WOULD LOOK LIKE: a port that is open and never answers")
+print("     taken for an answer; or the two not told apart when it fails")
+import socket as _so162                                     # noqa: E402
+from http.server import BaseHTTPRequestHandler as _BH162    # noqa: E402
+from http.server import ThreadingHTTPServer as _THS162      # noqa: E402
+from bridgecore import relayout as _rl162                   # noqa: E402
+
+
+class _St162(_BH162):
+    answer = (200, "application/json", b'{"ok": true}')
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        code, kind, body = self.server.answer
+        self.send_response(code)
+        self.send_header("Content-Type", kind)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def _st162(code, kind, body):
+    srv = _THS162(("127.0.0.1", 0), _St162)
+    srv.daemon_threads = True
+    srv.answer = (code, kind, body)
+    import threading as _t
+    _t.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+_mute162 = _so162.socket(_so162.AF_INET, _so162.SOCK_STREAM)
+_mute162.bind(("127.0.0.1", 0))
+_mute162.listen(16)                  # the kernel accepts; nobody ever reads
+_pm162 = _mute162.getsockname()[1]
+_free162 = _so162.socket(_so162.AF_INET, _so162.SOCK_STREAM)
+_free162.bind(("127.0.0.1", 0))
+_pf162 = _free162.getsockname()[1]
+_free162.close()                     # a port nobody holds
+_srvs162 = [_st162(200, "application/json", b'{"ok": true}'),
+            _st162(200, "text/html", b"<html>not the bridge</html>"),
+            _st162(503, "application/json", b'{"ok": false}')]
+_po162, _ph162, _p5_162 = [s.server_address[1] for s in _srvs162]
+try:
+    check("the control: the mute port IS open - port_open alone would take "
+          "it", _rl162.port_open(_pm162), True)
+    _t162 = time.time()
+    _w162 = _rl162.wait_answering(_pm162, 3, 0.2)
+    print("       the mute port: %r in %.1f s" % (_w162, time.time() - _t162))
+    check("(a) an open port that never answers is not an answer, and is "
+          "told apart from a port that never opened", _w162, (False, True))
+    check("(a) and the line says which",
+          "port %d opened but /state did not answer within 3s" % _pm162
+          in _rl162.not_answered(_pm162, 3, _w162[1]), True)
+    check("(b) a /state that answers 200 with JSON is the bridge",
+          (_rl162.state_answers(_po162),
+           _rl162.wait_answering(_po162, 5, 0.2)), (True, (True, True)))
+    check("(c) 200 that is not JSON, and a 503, are not",
+          (_rl162.state_answers(_ph162), _rl162.state_answers(_p5_162)),
+          (False, False))
+    _w162 = _rl162.wait_answering(_pf162, 2, 0.2)
+    check("(d) a port nobody holds: no answer, never seen open",
+          (_w162, _rl162.not_answered(_pf162, 2, _w162[1])),
+          ((False, False), "it did not answer within 2s"))
+    check("(e) both starts wait on wait_answering, neither on port_open",
+          [("wait_answering(" in inspect.getsource(f),
+            "port_open(" in inspect.getsource(f))
+           for f in (_rl162._start_posix, _rl162.start_daemon)],
+          [(True, False), (True, False)])
+finally:
+    _mute162.close()
+    for _s in _srvs162:
+        _s.shutdown()
+        _s.server_close()
+
+
+print("\n163. /config says what it changed, and reads history only for a")
+print("     project that entered the watch list (8.147). The panel posts the")
+print("     whole projects dict on every toggle; one project's")
+print("     commit_each_iteration was switched off on 2026-10-15 06:00:24")
+print("     with no line saying so, and the write read every project's")
+print("     carrier over the share before it answered, ~47 s.")
+print("     FAILURE WOULD LOOK LIKE: a toggle with no line, or a dump of")
+print("     keys that did not change, or a toggle that queues a read")
+_srv163 = _srv_up161()
+_was163 = _js161.loads(_js161.dumps(daemon.CFG.get("projects") or {}))
+_had163 = "panel_sound" in daemon.CFG
+_snd163 = daemon.CFG.get("panel_sound")
+_p163 = os.path.join(TMP, "cfg163")
+os.makedirs(_p163, exist_ok=True)
+_n163 = daemon.norm(_p163)
+_name163 = daemon.project_name(_n163)
+_real_mhl163 = daemon.merge_history_later
+_mhl163 = []
+
+
+def _lines163():
+    return [r.get("text") or "" for r in store._read_events(
+        os.path.join(store.day_dir(), "events.jsonl"))
+        if (r.get("text") or "").endswith("(/config)")
+        and ((r.get("text") or "").startswith((_name163 + " ",
+                                                _name163 + ":"))
+             or "panel_sound" in (r.get("text") or ""))]
+
+
+def _cfg163(body):
+    n = len(_lines163())
+    got = _call161(_srv163, "/config", body)
+    return got[0], _lines163()[n:]
+
+
+try:
+    daemon.merge_history_later = lambda why, only=None: _mhl163.append(
+        (why, only))
+    _p163a = _js161.loads(_js161.dumps(_was163))
+    _p163a[_p163] = {}
+    _c163 = _cfg163({"projects": _p163a})
+    check("(a) a project entering the watch list: one line, one read "
+          "queued, for it alone",
+          (_c163, _mhl163),
+          ((200, ["%s entered the watch list (/config)" % _name163]),
+           [("it entered the watch list", _n163)]))
+    _p163b = _js161.loads(_js161.dumps(_p163a))
+    _p163b[_p163] = {"commit_each_iteration": False}
+    del _mhl163[:]
+    check("(b) a toggle: one line with what it was and what it is, and no "
+          "read", (_cfg163({"projects": _p163b}), _mhl163),
+          ((200, ["%s: commit_each_iteration was unset, now false (/config)"
+                  % _name163]), []))
+    check("(c) the same dict again: no line at all",
+          (_cfg163({"projects": _p163b}), _mhl163), ((200, []), []))
+    _new163 = not bool(_snd163)
+    check("(d) a setting outside projects is said the same way",
+          _cfg163({"panel_sound": _new163}),
+          (200, ["Setting panel_sound: was %s, now %s (/config)"
+                 % (_js161.dumps(_snd163), _js161.dumps(_new163))]))
+    check("(e) a project leaving the watch list is said, and reads nothing",
+          (_cfg163({"projects": _was163}), _mhl163),
+          ((200, ["%s left the watch list (/config)" % _name163]), []))
+finally:
+    daemon.merge_history_later = _real_mhl163
+    if _had163:
+        daemon.CFG["panel_sound"] = _snd163
+    else:
+        daemon.CFG.pop("panel_sound", None)
+    daemon.CFG["projects"] = _was163
+    store.save_config(daemon.CFG)
+    _srv163.shutdown()
+    _srv163.server_close()
+
+
+print("\n164. a pin the Bot API is slow to answer holds no hook (8.142,")
+print("     addendum). push_links runs on watch_rc_link's own thread and waits")
+print("     for Telegram outside daemon._lock; that was read in the code on")
+print("     2026-10-15 and never measured. Here the Bot API answers in 3 s")
+print("     and a hook comes in while the pin is in the air.")
+print("     FAILURE WOULD LOOK LIKE: the hook answered after the pin - the")
+print("     network waited under the lock")
+import threading as _th164                                  # noqa: E402
+_p164 = os.path.join(TMP, "links164")
+os.makedirs(_p164, exist_ok=True)
+_key164 = "%s|executor" % daemon.norm(_p164)
+_tr164 = os.path.join(_p164, "sess-164.jsonl")
+with open(_tr164, "w", encoding="utf-8") as _fh:
+    _fh.write(_js161.dumps({"type": "system", "subtype": "bridge_status",
+                            "sessionId": "sess-164", "url":
+                            "https://claude.ai/code/session_CASE164"}) + "\n")
+_tgc164 = daemon.CFG.get("telegram")
+_ev164 = {"hook_event_name": "Notification", "role": "executor",
+          "session_id": "sess-164", "project_dir": TMP, "cwd": TMP,
+          "message": "case 164"}
+
+
+def _hook164():
+    t0 = time.time()
+    daemon.handle_event(dict(_ev164))
+    return time.time() - t0
+
+
+try:
+    daemon.chat_settle(30)
+    daemon.CFG["telegram"] = {"token": "t164", "chat_id": "164"}
+    TGAPI.reset()
+    TGAPI.delay = 3
+    _w164 = _th164.Thread(target=daemon.watch_rc_link, args=(
+        _p164, "executor", _tr164, "sess-164", 1), daemon=True)
+    _w164.start()
+    _end164 = time.time() + 10
+    while not TGAPI.calls and time.time() < _end164:
+        time.sleep(0.02)
+    check("the pin is in the air: the Bot API has the first call and holds "
+          "it 3 s", (bool(TGAPI.calls), _w164.is_alive()), (True, True))
+    _in164 = _hook164()
+    print("       the hook while the pin waits: %.2f s" % _in164)
+    check("(a) the hook answered inside 1 s", _in164 < 1.0, True)
+    _w164.join(30)
+    check("(a) and the pin went out, with the link in it",
+          (_w164.is_alive(), any(
+              "session_CASE164" in (p.get("text") or "")
+              for m, p in TGAPI.calls)), (False, True))
+    print("   (b) THE CONTROL: the same hook while something holds the lock")
+    print("   for 3 s waits it out - so (a) could have failed")
+    _go164 = _th164.Event()
+
+    def _holder164():
+        with daemon._lock:
+            _go164.set()
+            time.sleep(3)
+
+    _h164 = _th164.Thread(target=_holder164, daemon=True)
+    _h164.start()
+    _go164.wait(5)
+    _out164 = _hook164()
+    _h164.join(10)
+    print("       the hook while the lock is held: %.2f s" % _out164)
+    check("(b) it waited for the lock", _out164 >= 2.5, True)
+finally:
+    TGAPI.delay = 0
+    daemon.chat_settle(30)
+    with daemon._lock:
+        (daemon.STATE.get("rc") or {}).pop(_key164, None)
+        daemon.save_state()
+    if _tgc164:
+        daemon.CFG["telegram"] = _tgc164
+    else:
+        daemon.CFG.pop("telegram", None)
+
+
+print("\n165. a subagent's compaction is not the window's: its record leaves the")
+print("   wall's count, its calibration sample is taken back, and the WALL line")
+print("   and the thread are not handed to it - the window's own still are")
+print("   2026-10-15 a watched project's subagents compacted with the window's")
+print("   session_id and no agent_id: 13 of 26 records were theirs, the wall was")
+print("   measured from them, and two WALL lines went to subagents. Whose it was")
+print("   shows only in the transcripts, after the landing hook has returned.")
+print("   The receivers: what the landing returns, what the window is handed")
+print("   over the channel, the books the wall is counted from, the samples.")
+print("   FAILURE WOULD LOOK LIKE: a subagent's compaction counted, its sample")
+print("   still in, the WALL line or the thread in what its landing returns, or")
+print("   the window's own compaction never handed its thread, or a record")
+print("   given a boundary that is another's, or a planner's restart")
+print("   notice handed to its subagent's landing; the window's dialog, turn")
+print("   edge, state or latches touched by a subagent's landing, or a start")
+print("   of the session a handover retires taken for its replacement; or")
+print("   the window's own state put out by a subagent's \"compacting\"")
+print("   -> DECISIONS.md 8.148")
+import json as _json165                                     # noqa: E402
+import threading as _thr165                                 # noqa: E402
+
+_d165 = os.path.join(TMP, "t165")
+
+
+def _tp165(part):
+    """The window's transcript for one part, and its subagent's beside it."""
+    tp = os.path.join(_d165, part, SID + ".jsonl")
+    ag = os.path.join(_d165, part, SID, "subagents", "agent-a165.jsonl")
+    os.makedirs(os.path.dirname(ag), exist_ok=True)
+    for f in (tp, ag):
+        with open(f, "a", encoding="utf-8") as fh:
+            fh.write(_json165.dumps({"type": "user", "timestamp": "x"}) + "\n")
+    return tp, ag
+
+
+def _bnd165(fp, epoch, uid, agent=None):
+    row = {"type": "system", "subtype": "compact_boundary", "uuid": uid,
+           "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z",
+                                      time.gmtime(epoch)),
+           "isSidechain": bool(agent)}
+    if agent:
+        row["agentId"] = agent
+    with open(fp, "a", encoding="utf-8") as fh:
+        fh.write(_json165.dumps(row) + "\n")
+
+
+def _setup165(tokens):
+    """A wall of 4; three landed compactions of SID; the window at `tokens`."""
+    reset()
+    daemon.CFG["projects"][daemon.norm(PATH)] = {
+        "wall_compactions": {"executor": 4, "planner": 5},
+        "wall_computed": {"executor": False}}
+    daemon.STATE["compactions"][_pkey()] = [
+        {"at": "x", "t": time.time() - 9000 + i, "tokens": 180000,
+         "landed": 60000, "session": SID} for i in range(3)]
+    sess(tokens)
+    daemon.TURN_EDGE.clear()
+    _call("note_task_sent", PATH, "TASK-165 the work in hand")
+
+
+def _agent165(role="executor"):
+    """A subagent of SID makes a call - what handle_event notes for one."""
+    daemon.note_turn_edge(PATH, role, {"session_id": SID,
+                                             "agent_id": "a165"},
+                          "PostToolUse")
+
+
+def _pre165(tp, role="executor"):
+    daemon.handle_event({"hook_event_name": "PreCompact", "role": role,
+                         "session_id": SID, "transcript_path": tp,
+                         "trigger": "auto", "project_dir": PATH, "cwd": PATH})
+    return dict(daemon.STATE["compactions"][_pkey(role)][-1])
+
+
+def _land165(tp, role="executor"):
+    o, _ = daemon.handle_event({
+        "hook_event_name": "SessionStart", "role": role,
+        "session_id": SID, "source": "compact", "transcript_path": tp,
+        "project_dir": PATH, "cwd": PATH})
+    return (((o or {}).get("hookSpecificOutput") or {})
+            .get("additionalContext") or "")
+
+
+def _join165(role="", skip=()):
+    """The landings' threads; `skip`, the ones running before - (e)'s polls
+    for its whole LANDING_SETTLE_SEC."""
+    for th in _thr165.enumerate():
+        if th.name.startswith("settle_landing:" + role) and th not in skip:
+            th.join(20)
+
+
+def _samples165(rec):
+    return (store.load_calibration().get(store.calib_key(rec.get("calib"),
+                                                         PATH)) or {}
+            ).get("compact_samples") or []
+
+
+def _lines165(what):
+    return [e.get("text") or "" for e in store.recent_events(400)
+            if what in (e.get("text") or "")]
+
+
+_sent165 = []
+_saved165 = (daemon.quiet_console_for, daemon.watch_rc_link,
+             daemon.deliver_ex, daemon.LANDING_POLL_SEC, daemon.WHOSE_CHUNK)
+_saved165b = (daemon.stop_the_replaced, daemon.LANDING_SETTLE_SEC)
+try:
+    daemon.quiet_console_for = lambda *a, **k: None
+    daemon.watch_rc_link = lambda *a, **k: None
+    daemon.deliver_ex = lambda path, role, content, meta, answer=None: (
+        _sent165.append((role, content, dict(meta or {}))) or (True, ""))
+    daemon.LANDING_POLL_SEC = 0.05
+    daemon.CHANNELS[(daemon.norm(PATH), "executor")] = {"port": 1,
+                                                        "ts": time.time()}
+
+    print("   (a) no subagent working: the landing is what it always was")
+    _tpa, _aga = _tp165("a")
+    _setup165(151000)
+    _ra = _pre165(_tpa)
+    _la = _land165(_tpa)
+    _join165()
+    check("CONTROL: the record is not in doubt, and the landing returns the "
+          "WALL line and the thread at once",
+          (_ra.get("unsure"), "WALL: compaction 4 of 4" in _la,
+           "TASK-165" in _la), (None, True, True))
+
+    print("   (b) a subagent working, and the compaction is its own")
+    _tpb, _agb = _tp165("b")
+    _setup165(152000)
+    _agent165()
+    _rb = _pre165(_tpb)
+    check("PRECONDITION: the PreCompact wrote its record in doubt and its "
+          "sample in", (_rb.get("unsure"), 152000 in _samples165(_rb)),
+          (True, True))
+    _n165 = len(_sent165)
+    _lb = _land165(_tpb)
+    check("the landing returns neither the WALL line nor the thread",
+          ("WALL:" in _lb, "TASK-165" in _lb), (False, False))
+    _bnd165(_agb, time.time(), "u-b", agent="a165")
+    _join165()
+    _hb = daemon.STATE["compactions"][_pkey()]
+    check("its record left the window's books: three compactions, not four",
+          (daemon.compactions_done(PATH, "executor"), len(_hb),
+           [h.get("t") for h in _hb].count(_rb.get("t"))), (3, 3, 0))
+    _gb = (daemon.STATE.get("agent_compactions") or {}).get(_pkey()) or []
+    check("and stands in the subagent's ledger, with whose and the boundary",
+          [(h.get("t"), h.get("whose"), h.get("boundary")) for h in _gb],
+          [(_rb.get("t"), "a165", "u-b")])
+    check("its calibration sample was taken back", 152000 in
+          _samples165(_rb), False)
+    check("the window's pending compaction was its, and is gone",
+          bool(daemon.STATE["sessions"]["executor:%s" % SID[:8]]
+               .get("compaction_pending")), False)
+    check("nothing of the window's was handed to anyone",
+          [c for c in _sent165[_n165:] if "held at the landing" in c[1]], [])
+    check("the journal says whose it was",
+          any("was subagent a165's, not this window's" in t
+              for t in _lines165("a165")), True)
+
+    print("   (c) a subagent working, and the compaction is the window's own")
+    _tpc, _agc = _tp165("c")
+    _setup165(153000)
+    _agent165()
+    _rc = _pre165(_tpc)
+    _n165 = len(_sent165)
+    _lc = _land165(_tpc)
+    check("PRECONDITION: held at the landing too",
+          ("WALL:" in _lc, "TASK-165" in _lc, _rc.get("unsure")),
+          (False, False, True))
+    _bnd165(_tpc, time.time(), "u-c")
+    _join165()
+    _sc = [c for c in _sent165[_n165:] if "held at the landing" in c[1]]
+    check("the window is handed it over the channel, once, as info",
+          [(c[0], c[2].get("kind")) for c in _sc], [("executor", "info")])
+    _bc = _sc[0][1] if _sc else ""
+    check("with the WALL line first and the thread after it",
+          ("WALL: compaction 4 of 4" in _bc, 0 <= _bc.find("WALL:")
+           < _bc.find("TASK-165")), (True, True))
+    check("its record stays, the window's, and its sample stays in",
+          ([h.get("whose") for h in daemon.STATE["compactions"][_pkey()]
+            if h.get("t") == _rc.get("t")], 153000 in _samples165(_rc)),
+          (["window"], True))
+
+    print("   (d) no landing settled it: the Stop asks by time, and a mark")
+    print("       written onto it by position goes to the window's record")
+    _tpd, _agd = _tp165("d")
+    _setup165(154000)
+    daemon.STATE["compactions"][_pkey()].append(
+        {"at": "x", "t": time.time() - 100, "tokens": 180000,
+         "session": SID})
+    _agent165()
+    _rd = _pre165(_tpd)
+    daemon.STATE["compactions"][_pkey()][-1]["landed"] = 61000
+    _bnd165(_agd, time.time(), "u-d", agent="a165")
+    daemon.settle_unsure_compactions(PATH, "executor", SID)
+    _hd = daemon.STATE["compactions"][_pkey()]
+    check("the subagent's record left, and the window's before it carries "
+          "the landing", ([h.get("t") for h in _hd].count(_rd.get("t")),
+                          _hd[-1].get("landed"),
+                          daemon.compactions_done(PATH, "executor")),
+          (0, 61000, 4))
+    _st165 = inspect.getsource(daemon.handle_event)
+    check("and the Stop asks before anything writes onto the last record "
+          "by position", 0 <= _st165.find("settle_unsure_compactions(")
+          < _st165.find('hist[-1]["after"] = int(now_tokens)'), True)
+
+    print("   (e) no channel to hand the thread later: handed at the landing,")
+    print("       as before, and the journal says so")
+    _tpe, _age = _tp165("e")
+    _setup165(155000)
+    daemon.CHANNELS.pop((daemon.norm(PATH), "executor"), None)
+    _agent165()
+    _pre165(_tpe)
+    _ne = len(_lines165("has no channel to be handed its thread later"))
+    _le = _land165(_tpe)
+    _join165()
+    check("the thread is in the landing, and one warning line",
+          ("TASK-165" in _le,
+           len(_lines165("has no channel to be handed its thread later"))
+           - _ne), (True, 1))
+
+    print("   (f) records written before the fix are asked once, at start-up")
+    _tpf, _agf = _tp165("f")
+    _setup165(156000)
+    _t0 = time.time() - 4000
+    _at0 = os.path.getsize(_tpf)
+    _bnd165(_agf, _t0 + 30, "u-f1", agent="a165")
+    _bnd165(_tpf, _t0 + 1030, "u-f2")
+    daemon.STATE["compactions"][_pkey()] += [
+        {"at": "x", "t": _t0, "tokens": 170000, "landed": 60000,
+         "session": SID, "tp": _tpf, "tp_at": _at0},
+        {"at": "x", "t": _t0 + 1000, "tokens": 175000, "landed": 60000,
+         "session": SID, "tp": _tpf, "tp_at": _at0}]
+    check("PRECONDITION: five counted before", daemon.compactions_done(
+        PATH, "executor"), 5)
+    daemon.migrate_agent_compactions()
+    _hf = daemon.STATE["compactions"][_pkey()]
+    check("the subagent's left, the window's stays, marked; four counted",
+          ([h.get("whose") for h in _hf if h.get("tp")],
+           daemon.compactions_done(PATH, "executor")), (["window"], 4))
+    check("and the journal says it in one line",
+          len([t for t in _lines165("written before 8.148 were a subagent's")
+               if "1 of 2" in t]), 1)
+
+    print("   (g) a record with no boundary of its own does not take the next")
+    print("       one's, and a boundary deep in a long subagent transcript is")
+    print("       found - one project's of 2026-10-15 ran to 99 and 121 MB,")
+    print("       and records were left unknown that each had one")
+    _tpg, _agg = _tp165("g")
+    _setup165(157000)
+    daemon.WHOSE_CHUNK = 4096
+    with open(_agg, "a", encoding="utf-8") as fh:
+        for _i in range(300):
+            fh.write(_json165.dumps({"type": "assistant", "pad": "x" * 200})
+                     + "\n")
+    check("PRECONDITION: its boundary stands past the first piece read",
+          os.path.getsize(_agg) > 10 * daemon.WHOSE_CHUNK, True)
+    _t0 = time.time() - 4000
+    _at0 = os.path.getsize(_tpg)
+    _bnd165(_agg, _t0 + 350, "u-g", agent="a165")
+    daemon.STATE["compactions"][_pkey()] += [
+        {"at": "x", "t": _t0, "tokens": 171000, "landed": 60000,
+         "session": SID, "tp": _tpg, "tp_at": _at0},
+        {"at": "x", "t": _t0 + 300, "tokens": 90000, "session": SID,
+         "tp": _tpg, "tp_at": _at0}]
+    daemon.migrate_agent_compactions()
+    _gg = [(h.get("t"), h.get("whose")) for h in
+           (daemon.STATE.get("agent_compactions") or {}).get(_pkey()) or []
+           if h.get("boundary") == "u-g"]
+    check("the record moved is the subagent's, 50 s before its boundary - "
+          "not the one 350 s before it", _gg, [(_t0 + 300, "a165")])
+    check("and the record with no boundary stays, unknown and counted",
+          ({h.get("t"): h.get("whose") for h in
+            daemon.STATE["compactions"][_pkey()]}.get(_t0),
+           daemon.compactions_done(PATH, "executor")), ("unknown", 4))
+    daemon.WHOSE_CHUNK = _saved165[4]
+
+    print("   (h) at the Stop the session's other records compete for the")
+    print("       boundaries: the window's own, never asked, keeps its own")
+    _tph, _agh = _tp165("h")
+    _setup165(158000)
+    _t0 = time.time() - 200
+    _at0 = os.path.getsize(_tph)
+    _bnd165(_tph, _t0 + 60, "u-h1")
+    _bnd165(_agh, _t0 + 90, "u-h2", agent="a165")
+    daemon.STATE["compactions"][_pkey()] += [
+        {"at": "x", "t": _t0, "tokens": 120000, "session": SID,
+         "tp": _tph, "tp_at": _at0, "unsure": True},
+        {"at": "x", "t": _t0 + 20, "tokens": 181000, "session": SID,
+         "tp": _tph, "tp_at": _at0}]
+    daemon.settle_unsure_compactions(PATH, "executor", SID)
+    check("the record in doubt is the subagent's, by the boundary the "
+          "window's own did not take",
+          [(h.get("t"), h.get("boundary")) for h in
+           (daemon.STATE.get("agent_compactions") or {}).get(_pkey()) or []
+           if h.get("boundary") in ("u-h1", "u-h2")], [(_t0, "u-h2")])
+
+    print("   (i) two PreCompacts in a row, the window's and then a")
+    print("       subagent's, before either lands: each landing takes its own")
+    print("       record, and the second is held too. 2026-10-15 15:35:42 the")
+    print("       second landing was not held and a subagent was handed the")
+    print("       executor's thread")
+    _tpi, _agi = _tp165("i")
+    _setup165(159000)
+    daemon.CHANNELS[(daemon.norm(PATH), "executor")] = {"port": 1,
+                                                        "ts": time.time()}
+    _agent165()
+    _ri1 = _pre165(_tpi)
+    _ri2 = _pre165(_tpi)
+    check("PRECONDITION: two records in doubt, none settled",
+          (_ri1.get("unsure"), _ri2.get("unsure"),
+           _ri1.get("t") != _ri2.get("t")), (True, True, True))
+    _n165 = len(_sent165)
+    _li1 = _land165(_tpi)
+    _bnd165(_tpi, time.time(), "u-i1")
+    _join165()
+    _li2 = _land165(_tpi)
+    check("both landings are held: neither returns the WALL line or the "
+          "thread", ("WALL:" in _li1, "TASK-165" in _li1, "WALL:" in _li2,
+                     "TASK-165" in _li2), (False, False, False, False))
+    _bnd165(_agi, time.time(), "u-i2", agent="a165")
+    _join165()
+    check("the first record is the window's, with the first landing's "
+          "boundary", [(h.get("whose"), h.get("boundary")) for h in
+                       daemon.STATE["compactions"][_pkey()]
+                       if h.get("t") == _ri1.get("t")], [("window", "u-i1")])
+    check("the second is the subagent's, moved out with the second "
+          "landing's; the window's books keep four records",
+          ([(h.get("t"), h.get("whose"), h.get("boundary")) for h in
+            (daemon.STATE.get("agent_compactions") or {}).get(_pkey()) or []
+            if h.get("boundary") in ("u-i1", "u-i2")],
+           len(daemon.STATE["compactions"][_pkey()])),
+          ([(_ri2.get("t"), "a165", "u-i2")], 4))
+    check("the window was handed its thread over the channel once, and "
+          "the subagent nothing",
+          [c[0] for c in _sent165[_n165:] if "held at the landing" in c[1]],
+          ["executor"])
+
+    print("   (j) a planner's landing is held the same way where it has a")
+    print("       channel: it carries no thread, but the restart notice is")
+    print("       said once, and a subagent's landing that took it handed it")
+    print("       to the subagent - the window never heard of the restart")
+    _tpj, _agj = _tp165("j")
+    _setup165(160000)
+    _kj = _pkey("planner")
+    _RS165 = "without shutting down cleanly"
+    daemon.CHANNELS[(daemon.norm(PATH), "planner")] = {"port": 1,
+                                                       "ts": time.time()}
+    daemon.STATE.setdefault("restart_notice", {})[_kj] = {
+        "reason": "crash", "at": time.time() - 60}
+    _agent165("planner")
+    _rj = _pre165(_tpj, "planner")
+    check("PRECONDITION: the planner's PreCompact wrote its record in "
+          "doubt", _rj.get("unsure"), True)
+    _n165 = len(_sent165)
+    _lj = _land165(_tpj, "planner")
+    check("the landing returns no restart notice", _RS165 in _lj, False)
+    _bnd165(_agj, time.time(), "u-j1", agent="a165")
+    _join165("planner")
+    check("the compaction was the subagent's: nothing is handed to the "
+          "planner, and the notice still waits for the window",
+          ([c[0] for c in _sent165[_n165:]],
+           bool((daemon.STATE.get("restart_notice") or {}).get(_kj))),
+          ([], True))
+    _agent165("planner")
+    _pre165(_tpj, "planner")
+    _lj2 = _land165(_tpj, "planner")
+    _bnd165(_tpj, time.time(), "u-j2")
+    _join165("planner")
+    _sj = [c for c in _sent165[_n165:] if "held at the landing" in c[1]]
+    check("the window's own is held too, then handed over the planner's "
+          "channel once, as info, with the notice - which is then spent",
+          (_RS165 in _lj2,
+           [(c[0], c[2].get("kind"), _RS165 in c[1]) for c in _sj],
+           bool((daemon.STATE.get("restart_notice") or {}).get(_kj))),
+          (False, [("planner", "info", True)], False))
+    print("       no channel: handed at the landing, as before; the journal")
+    print("       warns only when there is something to hand")
+    daemon.CHANNELS.pop((daemon.norm(PATH), "planner"), None)
+    _wj = "the planner has no channel to be handed"
+    _nwj = len(_lines165(_wj))
+    _agent165("planner")
+    _pre165(_tpj, "planner")
+    _lj3 = _land165(_tpj, "planner")
+    _bnd165(_tpj, time.time(), "u-j3")
+    _join165("planner")
+    check("nothing to hand: no notice in the landing, and no warning",
+          (_RS165 in _lj3, len(_lines165(_wj)) - _nwj), (False, 0))
+    daemon.STATE["restart_notice"][_kj] = {"reason": "crash",
+                                           "at": time.time() - 60}
+    _agent165("planner")
+    _pre165(_tpj, "planner")
+    _lj4 = _land165(_tpj, "planner")
+    _bnd165(_tpj, time.time(), "u-j4")
+    _join165("planner")
+    check("a notice to hand: in the landing, and one warning naming the "
+          "planner", (_RS165 in _lj4, len(_lines165(_wj)) - _nwj),
+          (True, 1))
+
+    print("   (k) a subagent's landing touches nothing of the window's books -")
+    print("       its dialog and open call, the edge of its turn, its state,")
+    print("       a latch; the window's own closes and resets what stood at")
+    print("       its landing, and keeps what came after; one nobody can tell")
+    print("       is taken as the window's, and the journal says so")
+    _tpk, _agk = _tp165("k")
+    _setup165(161000)
+    _np165 = daemon.norm(PATH)
+    _kk = "%s|executor|%s" % (_np165, SID)
+    _skk = "executor:%s" % SID[:8]
+
+    def _dlg165(tid):
+        """The window makes a call and its dialog is drawn."""
+        daemon.note_open_call(PATH, "executor", {"tool_use_id": tid,
+                                                 "tool_name": "Bash",
+                                                 "session_id": SID})
+        daemon.note_permission_ask(
+            PATH, "executor", "Claude needs your permission to use Bash",
+            "permission_prompt", SID, {"tid": tid, "tool": "Bash",
+                                       "agent": ""})
+        daemon.STATE["sessions"][_skk]["state"] = "needs you"
+
+    def _book165():
+        return ((daemon.STATE.get("asks") or {}).get(_pkey()) or {}
+                ).get("call"), sorted(daemon.OPEN_CALLS.get(_pkey()) or {})
+
+    _agent165()
+    _rk = _pre165(_tpk)
+    _dlg165("toolu_k1")
+    daemon.STATE["tight:%s" % _np165] = True
+    daemon.TURN_EDGE[_kk]["main"] = _mk = time.time() - 100
+    _sk = set(_thr165.enumerate())
+    _land165(_tpk)
+    _bnd165(_agk, time.time(), "u-k1", agent="a165")
+    _join165("executor", _sk)
+    check("PRECONDITION: the landing was the subagent's",
+          [h.get("whose") for h in (daemon.STATE.get("agent_compactions")
+                                     or {}).get(_pkey()) or []
+           if h.get("t") == _rk.get("t")], ["a165"])
+    check("its landing left the window's dialog on record and its call "
+          "open", _book165(), ("toolu_k1", ["toolu_k1"]))
+    check("and the edge of the window's turn, its state 'needs you' and "
+          "the latch where they were",
+          (daemon.TURN_EDGE[_kk].get("main") == _mk,
+           daemon.STATE["sessions"][_skk].get("state"),
+           bool(daemon.STATE.get("tight:%s" % _np165))),
+          (True, "needs you", True))
+    _agent165()
+    _pre165(_tpk)
+    _sk = set(_thr165.enumerate())
+    _land165(_tpk)
+    daemon.note_open_call(PATH, "executor", {"tool_use_id": "toolu_k2",
+                                             "tool_name": "Bash",
+                                             "session_id": SID})
+    daemon.note_turn_edge(PATH, "executor", {"session_id": SID}, "Stop")
+    _bnd165(_tpk, time.time(), "u-k2")
+    _join165("executor", _sk)
+    check("the window's own landing closes the dialog and forgets the call "
+          "that stood at it; a call made after it stays", _book165(),
+          (None, ["toolu_k2"]))
+    check("the edge moves to the landing, not past the Stop after it; the "
+          "state is 'starting'; the latch is spent",
+          (daemon.half_turn_over(PATH, "executor", SID),
+           daemon.STATE["sessions"][_skk].get("state"),
+           bool(daemon.STATE.get("tight:%s" % _np165))),
+          (True, "starting", False))
+    daemon.LANDING_SETTLE_SEC = 1.0
+    _wk = "could not be told from a subagent's, so it was taken as the"
+    _nk = len(_lines165(_wk))
+    _agent165()
+    _pre165(_tpk)
+    daemon.STATE["tight:%s" % _np165] = True
+    _sk = set(_thr165.enumerate())
+    _land165(_tpk)
+    _dlg165("toolu_k3")
+    _join165("executor", _sk)
+    daemon.LANDING_SETTLE_SEC = _saved165b[1]
+    check("no boundary within the wait: taken as the window's - the latch "
+          "is spent - and the journal says so, once",
+          (bool(daemon.STATE.get("tight:%s" % _np165)),
+           len(_lines165(_wk)) - _nk), (False, 1))
+    check("and the dialog drawn after the landing, its call and its state "
+          "stay; the call that stood at it is forgotten",
+          (_book165(), daemon.STATE["sessions"][_skk].get("state")),
+          (("toolu_k3", ["toolu_k3"]), "needs you"))
+
+    print("   (l) a planner handover pending: a start of the session it")
+    print("       retires is not its replacement. A subagent of the old")
+    print("       window landing, or the old window's own compaction, put")
+    print("       the old window out and dropped the handover before the new")
+    print("       one was up, and took the seed meant for it")
+    _tpl, _agl = _tp165("l")
+    _setup165(162000)
+    _stops165 = []
+    daemon.stop_the_replaced = lambda p, r: _stops165.append(r) or True
+    daemon.STATE["handover"] = {_np165: {
+        "at": time.time(), "reason": "test 165", "waiting": ["planner"],
+        "roles": ["planner"], "iteration": 0, "at_wall": False,
+        "retired": {"planner": SID}, "stop_after": {"planner": 4999999}}}
+    daemon.STATE.setdefault("planner_seed", {})[_np165] = {
+        "handoff": "HANDOFF-165", "feedback": "", "iteration": 0,
+        "reason": "test 165", "roles": ["planner"]}
+
+    def _swap165():
+        for th in _thr165.enumerate():
+            if th.name.startswith("resume_after_handover:"):
+                th.join(20)
+        return (list(_stops165),
+                ((daemon.STATE.get("handover") or {}).get(_np165) or {}
+                 ).get("waiting"),
+                bool((daemon.STATE.get("planner_seed") or {}).get(_np165)))
+
+    _agent165("planner")
+    _pre165(_tpl, "planner")
+    _sl = set(_thr165.enumerate())
+    _ll = _land165(_tpl, "planner")
+    _bnd165(_agl, time.time(), "u-l1", agent="a165")
+    _join165("planner", _sl)
+    check("the old session's subagent landing stops nothing, the handover "
+          "still waits for the planner, and the seed is not in it",
+          (_swap165(), "HANDOFF-165" in _ll),
+          (([], ["planner"], True), False))
+    daemon.TURN_EDGE.clear()
+    _pre165(_tpl, "planner")
+    _ll = _land165(_tpl, "planner")
+    check("nor does the old window's own compaction",
+          (_swap165(), "HANDOFF-165" in _ll),
+          (([], ["planner"], True), False))
+    _o165, _ = daemon.handle_event({
+        "hook_event_name": "SessionStart", "role": "planner",
+        "session_id": "sess-repl-165", "source": "startup",
+        "transcript_path": "", "project_dir": PATH, "cwd": PATH})
+    check("CONTROL: the new session's start is the replacement - the seed "
+          "in its start, the old window stopped, the handover done",
+          ("HANDOFF-165" in (((_o165 or {}).get("hookSpecificOutput")
+                              or {}).get("additionalContext") or ""),
+           _swap165()), (True, (["planner"], None, False)))
+
+    print("   (m) a subagent's compaction leaves the window's state as it")
+    print("       found it: 'needs you' while its dialog is on record,")
+    print("       'waiting on a process' while its command runs - never")
+    print("       'compacting', which the stall watch reads as busy; what")
+    print("       ended meanwhile is not put back, and while a later")
+    print("       compaction of the session is on record it stays busy")
+    _tpm, _agm = _tp165("m")
+    _setup165(163000)
+    _skm = "executor:%s" % SID[:8]
+    _npm = daemon.norm(PATH)
+
+    def _st165():
+        return daemon.STATE["sessions"][_skm].get("state")
+
+    def _busy165():
+        return daemon.tool_in_flight(PATH, "executor")
+
+    def _proc165(on):
+        """A tracked command of the window running, or not."""
+        if on:
+            daemon.STATE.setdefault("inflight", {}).setdefault(_npm, {})[
+                "make -j4 m165"] = {"cmd": "make -j4", "started": time.time()}
+        else:
+            ((daemon.STATE.get("inflight") or {}).get(_npm) or {}).pop(
+                "make -j4 m165", None)
+
+    def _answer165(tid):
+        """The window's call returns: what handle_event does first."""
+        daemon.permission_witness("PostToolUse", PATH, "executor", {
+            "session_id": SID, "tool_use_id": tid, "tool_name": "Bash"})
+
+    def _sub165(uid, mid=None):
+        """A subagent of the window compacts and lands, its boundary in its
+        own transcript; `mid` runs between its PreCompact and its landing."""
+        _agent165()
+        _r = _pre165(_tpm)
+        if mid:
+            mid()
+        _s = set(_thr165.enumerate())
+        _land165(_tpm)
+        _bnd165(_agm, time.time(), uid, agent="a165")
+        _join165("executor", _s)
+        return _r
+
+    def _whose165(rec):
+        return [h.get("whose") for h in (daemon.STATE.get(
+            "agent_compactions") or {}).get(_pkey()) or []
+            if h.get("t") == rec.get("t")]
+
+    _dlg165("toolu_m1")
+    _rm = _sub165("u-m1")
+    check("PRECONDITION: the compaction was the subagent's", _whose165(_rm),
+          ["a165"])
+    check("the window is 'needs you' again, its dialog on record, and the "
+          "stall watch is free to look", (_st165(), _book165()[0],
+                                          _busy165()),
+          ("needs you", "toolu_m1", False))
+    _answer165("toolu_m1")
+    _dlg165("toolu_m2")
+    _sub165("u-m2", mid=lambda: _answer165("toolu_m2"))
+    check("a dialog answered while the subagent compacted is not put back: "
+          "'idle', nothing on record", (_st165(), _book165()[0], _busy165()),
+          ("idle", None, False))
+    _proc165(True)
+    daemon.STATE["sessions"][_skm]["state"] = "waiting on a process"
+    _sub165("u-m3")
+    check("'waiting on a process' with the command still running is put back",
+          _st165(), "waiting on a process")
+    _proc165(False)
+    daemon.process_ended(PATH, "executor", SID)
+    check("and when the command ends the half is idle, the stall watch free",
+          (_st165(), _busy165()), ("idle", False))
+    _proc165(True)
+    daemon.STATE["sessions"][_skm]["state"] = "waiting on a process"
+
+    def _end165():
+        _proc165(False)
+        daemon.process_ended(PATH, "executor", SID)
+
+    _sub165("u-m4", mid=_end165)
+    check("a command that ended while the subagent compacted is not put "
+          "back: 'idle'", (_st165(), _busy165()), ("idle", False))
+    daemon.STATE["sessions"][_skm]["state"] = "waiting on a process"
+    _sub165("u-m5")
+    check("a wait verdict's 'waiting on a process', nothing tracked, is put "
+          "back: nothing says it is over", _st165(), "waiting on a process")
+    daemon.STATE["sessions"][_skm]["state"] = "idle"
+    _sub165("u-m6", mid=lambda: _dlg165("toolu_m6"))
+    check("a state written after the PreCompact is kept: the dialog drawn "
+          "meanwhile stays 'needs you'", (_st165(), _book165()[0]),
+          ("needs you", "toolu_m6"))
+    _answer165("toolu_m6")
+    _dlg165("toolu_m7")
+    _agent165()
+    _pre165(_tpm)
+    _agent165()
+    _pre165(_tpm)
+    _s = set(_thr165.enumerate())
+    _land165(_tpm)
+    _bnd165(_agm, time.time(), "u-m7a", agent="a165")
+    _join165("executor", _s)
+    check("two subagents at once: while the second compaction is on record "
+          "the window stays busy - it may be the window's own",
+          (_st165(), _busy165()), ("compacting", True))
+    _s = set(_thr165.enumerate())
+    _land165(_tpm)
+    _bnd165(_agm, time.time(), "u-m7b", agent="a165")
+    _join165("executor", _s)
+    check("and once it is settled a subagent's too, the window is 'needs "
+          "you' again", (_st165(), _book165()[0], _busy165()),
+          ("needs you", "toolu_m7", False))
+    _agent165()
+    _pre165(_tpm)
+    _pre165(_tpm)
+    _s = set(_thr165.enumerate())
+    _land165(_tpm)
+    _bnd165(_agm, time.time(), "u-m8a", agent="a165")
+    _join165("executor", _s)
+    check("a subagent's and then the window's own: the subagent's settled, "
+          "the window is still compacting - busy", (_st165(), _busy165()),
+          ("compacting", True))
+    _s = set(_thr165.enumerate())
+    _land165(_tpm)
+    _bnd165(_tpm, time.time(), "u-m8b")
+    _join165("executor", _s)
+    check("CONTROL: the window's own landing is a start, as before - "
+          "'starting', its dialog closed", (_st165(), _book165()[0]),
+          ("starting", None))
+finally:
+    (daemon.quiet_console_for, daemon.watch_rc_link, daemon.deliver_ex,
+     daemon.LANDING_POLL_SEC, daemon.WHOSE_CHUNK) = _saved165
+    daemon.stop_the_replaced, daemon.LANDING_SETTLE_SEC = _saved165b
+    (daemon.STATE.get("handover") or {}).pop(daemon.norm(PATH), None)
+    (daemon.STATE.get("planner_seed") or {}).pop(daemon.norm(PATH), None)
+    (daemon.STATE.get("asks") or {}).pop(_pkey(), None)
+    daemon.OPEN_CALLS.pop(_pkey(), None)
+    ((daemon.STATE.get("inflight") or {}).get(daemon.norm(PATH)) or {}
+     ).pop("make -j4 m165", None)
+    daemon.CHANNELS.pop((daemon.norm(PATH), "executor"), None)
+    daemon.CHANNELS.pop((daemon.norm(PATH), "planner"), None)
+    (daemon.STATE.get("restart_notice") or {}).pop(_pkey("planner"), None)
+    daemon.TURN_EDGE.clear()
+
+
+print("\n166. a routine compaction is no miss: under rotate_policy compact the")
+print("   PreCompact leaves the ceiling where it is and the start puts back")
+print("   what earlier ones lowered; where it is a miss, a subagent's is put")
+print("   back; and a subagent's compaction does not cost the turn its")
+print("   measurement. 2026-10-15 every 222k executor of one machine sat at")
+print("   40 % and 3.0: each PreCompact called calib_miss with a percentage of")
+print("   the million the client reports. The receivers: the calibration")
+print("   entry, the compaction's record, the journal, the session's flag.")
+print("   FAILURE WOULD LOOK LIKE: the ceiling lowered under compact, a reset")
+print("   that undoes a wall's miss or a pair's not on compact, or never runs")
+print("   at the start; a subagent's miss left in, an entry that moved since")
+print("   overwritten; the turn after a subagent's compaction still dropped")
+print("   -> DECISIONS.md 8.149")
+_k166 = MODEL.lower()        # calib_model: no compact_window recorded here
+_MISS166 = "PreCompact fired - estimate was high"   # what PreCompacts wrote
+
+
+def _cal166(**fields):
+    cal = store.load_calibration()
+    entry = {"ceiling_pct": 93.7, "buffer_tokens": 33000, "misses": 0,
+             "clean_streak": 0, "multiplier": 1.5,
+             "wall_history_tokens": None, "compact_at_tokens": None,
+             "how": "test"}
+    entry.update(fields)
+    cal[store.calib_key(_k166, PATH)] = entry
+    store.save_calibration(cal)
+
+
+def _now166():
+    e = store.load_calibration().get(store.calib_key(_k166, PATH)) or {}
+    return (e.get("ceiling_pct"), e.get("multiplier"), e.get("misses"))
+
+
+def _set166(tokens, policy, **cal):
+    """_setup165, the session at 18.1 % of its million, the policy, the
+    entry. Both spellings of the project carry the policy."""
+    _setup165(tokens)
+    for k in (PATH, daemon.norm(PATH)):
+        daemon.CFG["projects"].setdefault(k, {})["rotate_policy"] = policy
+    _sess166()["context_pct"] = 18.1
+    _cal166(**cal)
+
+
+def _sess166():
+    return next(s for s in daemon.STATE["sessions"].values()
+                if isinstance(s, dict) and s.get("session_id") == SID)
+
+
+def _settle166(t, whose, uid):
+    return _call("settle_compaction", PATH, "executor", t, whose, uid,
+                 "case 166")
+
+
+_rot166 = []
+_saved166 = (daemon.rotate_executor, daemon.deliver_ex)
+try:
+    daemon.rotate_executor = lambda *a, **k: _rot166.append(a)
+    daemon.deliver_ex = lambda *a, **k: (True, "")
+
+    print("   (a) rotate_policy compact: the window's own compaction")
+    _tpa166, _ = _tp165("166a")
+    _set166(181000, "compact")
+    _ra166 = _pre165(_tpa166)
+    check("the PreCompact leaves the ceiling, the multiplier and the count "
+          "as they were", _now166(), (93.7, 1.5, 0))
+    check("and its record says no miss was counted",
+          (_ra166.get("miss"), "ceil" in _ra166), (False, False))
+
+    print("   (b) a pair that rotates first: a compaction is still a miss")
+    _tpb166, _ = _tp165("166b")
+    _set166(181000, "rotate")
+    _rb166 = _pre165(_tpb166)
+    check("CONTROL: the ceiling comes down as it always did",
+          _now166(), (40.0, 1.75, 1))
+    check("and the record keeps what the miss changed, before and after",
+          (_rb166.get("miss"),
+           ((_rb166.get("ceil") or {}).get("before") or {}).get(
+               "ceiling_pct"),
+           ((_rb166.get("ceil") or {}).get("after") or {}).get(
+               "ceiling_pct")), (True, 93.7, 40.0))
+    check("CONTROL: a wall is a miss under any policy",
+          "calib_miss(" in inspect.getsource(daemon.handle_wall_hit), True)
+
+    print("   (c) a subagent's miss is put back, with the streak it had")
+    _tpc166, _ = _tp165("166c")
+    _set166(181000, "rotate", clean_streak=4)
+    _agent165()
+    _rc166 = _pre165(_tpc166)
+    check("PRECONDITION: the record is in doubt and the miss counted",
+          (_rc166.get("unsure"), _now166()), (True, (40.0, 1.75, 1)))
+    _settle166(_rc166.get("t"), "a165", "u-166c")
+    check("the subagent's compaction gives the ceiling back",
+          _now166(), (93.7, 1.5, 0))
+    check("with the clean streak it had before it",
+          (store.load_calibration().get(store.calib_key(_k166, PATH))
+           or {}).get("clean_streak"), 4)
+    check("and the journal says it was restored",
+          any("ceiling it lowered is restored" in x
+              for x in _lines165("compaction at 181k was subagent a165")),
+          True)
+
+    print("   (d) an entry another miss moved since is not overwritten")
+    _tpd166, _ = _tp165("166d")
+    _set166(181000, "rotate")
+    _agent165()
+    _rd166 = _pre165(_tpd166)
+    daemon.calib_miss(_k166, PATH, 50.0, "wall hit")
+    _mid166 = _now166()
+    _settle166(_rd166.get("t"), "a165", "u-166d")
+    check("the wall's miss after it stands", (_mid166, _now166()),
+          ((40.0, 2.0, 2), (40.0, 2.0, 2)))
+    check("and the journal says the entry moved",
+          any("has moved since" in x for x in
+              _lines165("compaction at 181k was subagent a165")), True)
+
+    print("   (e) the window's own miss is not put back")
+    _tpe166, _ = _tp165("166e")
+    _set166(181000, "rotate")
+    _agent165()
+    _re166 = _pre165(_tpe166)
+    _settle166(_re166.get("t"), "window", "u-166e")
+    check("its ceiling stays down", _now166(), (40.0, 1.75, 1))
+
+    print("   (f) the start puts back what PreCompacts lowered under compact")
+    _set166(181000, "rotate", ceiling_pct=40.0, multiplier=3.0, misses=9,
+            how=_MISS166)
+    _call("reset_compact_ceilings")
+    check("CONTROL: a pair not on compact keeps its misses' ceiling",
+          _now166(), (40.0, 3.0, 9))
+    for k in (PATH, daemon.norm(PATH)):
+        daemon.CFG["projects"][k]["rotate_policy"] = "compact"
+    _call("reset_compact_ceilings")
+    check("on compact: the initial ceiling of its window and 1.5, the count "
+          "kept", _now166(), (93.7, 1.5, 9))
+    _rs166 = [x for x in _lines165("Calibration %s:" % _k166)
+              if "40.0 % / multiplier 3.0 -> 93.7 % / 1.5" in x]
+    check("the journal says what it was and what it is", len(_rs166), 1)
+    _call("reset_compact_ceilings")
+    check("a second start changes nothing and says nothing",
+          (_now166(), len([x for x in _lines165("Calibration %s:" % _k166)
+                           if "8.149" in x])), ((93.7, 1.5, 9), 1))
+    _cal166(ceiling_pct=40.0, multiplier=3.0, misses=9, how="wall hit")
+    _call("reset_compact_ceilings")
+    check("a wall's miss is never undone", _now166(), (40.0, 3.0, 9))
+    # 8.62, merging a planner's "(1m context)" key, carries its how over
+    # with a tail - live on the PC, this project's opus 5.5 key, 85.0/1.75
+    _tail166 = '; merged from "%s (1m context)" (8.62)' % _k166
+    check("PRECONDITION: 8.62 still writes the how it carried over first",
+          '"%s; merged from' in inspect.getsource(
+              daemon.migrate_calibration_windows), True)
+    _cal166(ceiling_pct=40.0, multiplier=3.0, misses=9,
+            how=_MISS166 + _tail166)
+    _call("reset_compact_ceilings")
+    check("a PreCompact's step down that 8.62 merged since goes back too",
+          _now166(), (93.7, 1.5, 9))
+    _cal166(ceiling_pct=40.0, multiplier=3.0, misses=9,
+            how="wall hit" + _tail166)
+    _call("reset_compact_ceilings")
+    check("and a wall's that 8.62 merged since stays", _now166(),
+          (40.0, 3.0, 9))
+    check("main() asks at the start",
+          "reset_compact_ceilings()" in inspect.getsource(daemon.main), True)
+
+    print("   (f2) a key no session reports stays lowered, said once a set")
+
+    def _calx166(model):
+        cal = store.load_calibration()
+        cal[store.calib_key(model, PATH)] = {
+            "ceiling_pct": 40.0, "buffer_tokens": 33000, "misses": 9,
+            "clean_streak": 0, "multiplier": 3.0,
+            "wall_history_tokens": None, "compact_at_tokens": None,
+            "how": _MISS166}
+        store.save_calibration(cal)
+
+    def _lowx166(model):
+        e = store.load_calibration().get(store.calib_key(model, PATH)) or {}
+        return (e.get("ceiling_pct"), e.get("multiplier"))
+
+    def _said166():
+        return len(_lines165("left as they are"))
+    _n166 = _said166()
+    _calx166("nosession-a 166")
+    _call("reset_compact_ceilings")
+    check("a key no session reports stays lowered, and the start says so",
+          (_lowx166("nosession-a 166"), _said166() - _n166),
+          ((40.0, 3.0), 1))
+    _call("reset_compact_ceilings")
+    check("the next start, the same set, says nothing - the PC's sixteen "
+          "were said at every start", _said166() - _n166, 1)
+    _sig166 = daemon.STATE.get("calib_left_said")
+    check("what was said is on disk, a hash with no path in it",
+          (store.load_state().get("calib_left_said") == _sig166,
+           len(_sig166 or ""), PATH.lower() in str(_sig166).lower()),
+          (True, 16, False))
+    _calx166("nosession-b 166")
+    _call("reset_compact_ceilings")
+    check("a changed set is said, once", _said166() - _n166, 2)
+    _call("reset_compact_ceilings")
+    check("and not again; neither key was reset",
+          (_said166() - _n166, _lowx166("nosession-a 166"),
+           _lowx166("nosession-b 166")), (2, (40.0, 3.0), (40.0, 3.0)))
+    _cal166x = store.load_calibration()
+    for _m166 in ("nosession-a 166", "nosession-b 166"):
+        _cal166x.pop(store.calib_key(_m166, PATH), None)
+    store.save_calibration(_cal166x)
+
+    print("   (g) a subagent's compaction leaves the turn, measured again")
+    _tpg166, _ = _tp165("166g")
+    _set166(181000, "compact")
+    _agent165()
+    _rg166 = _pre165(_tpg166)
+    check("PRECONDITION: the turn holds this compaction's t",
+          _sess166().get("compacted_this_turn"), [_rg166.get("t")])
+    _sess166().pop("compaction_pending", None)   # the window drew itself
+    _settle166(_rg166.get("t"), "a165", "u-166g")
+    check("settled as a subagent's, it is out of the turn - even after the "
+          "window drew itself", "compacted_this_turn" in _sess166(), False)
+    check("and its journal line says it lowered no ceiling",
+          any("it lowered no ceiling" in x for x in
+              _lines165("compaction at 181k was subagent a165")), True)
+    _tph166, _ = _tp165("166h")
+    _set166(181000, "compact")
+    _sess166()["compacted_this_turn"] = True     # an older daemon's flag
+    daemon.TURN_EDGE.clear()
+    _rw166 = _pre165(_tph166)
+    _agent165()
+    _rh166 = _pre165(_tph166)
+    _settle166(_rh166.get("t"), "a165", "u-166h")
+    check("the window's own and an older daemon's flag keep the turn "
+          "straddled", _sess166().get("compacted_this_turn"),
+          [True, _rw166.get("t")])
+    _st166 = inspect.getsource(daemon.handle_event)
+    check("the Stop settles the records in doubt before it reads the flag",
+          0 <= _st166.find("settle_unsure_compactions(")
+          < _st166.find('sess.pop("compacted_this_turn"'), True)
+finally:
+    daemon.rotate_executor, daemon.deliver_ex = _saved166
+    daemon.TURN_EDGE.clear()
+
+
+print("\n167. a share mounted by ADDRESS is still its server's, and one that")
+print("   drops while the bridge runs is asked back (132a, 8.150). 2026-10-15")
+print("   21:48 the Mac's share came back as //<who>@<address>/<share>: the")
+print("   launcher took that for no share and would have asked for one by")
+print("   name - a password dialog on the owner's screen - and the start would")
+print("   have kept the address as the server. The receivers: the launcher's")
+print("   verdict, the record kept, what is opened, the lines said, the")
+print("   projects handed on")
+print("   FAILURE WOULD LOOK LIKE: an address taken for no server, or asked at")
+print("   every read; an address kept as the server; a password under the")
+print("   address not found; a mount asked by a name that leads nowhere or")
+print("   elsewhere, by a host with no password, or of a share mounted at")
+print("   another point; a dropped share never asked back, asked at every")
+print("   look, asked for a project nobody works, or asked twice at the start")
+print("   -> DECISIONS.md 8.150")
+import socket as _sk167                                      # noqa: E402
+from bridgecore import netshare as _ns167                   # noqa: E402
+from bridgecore import maclaunch as _ml167                  # noqa: E402
+_d167 = os.path.join(TMP, "case167")
+os.makedirs(_d167)
+_NAMES167 = getattr(_ns167, "NAMES", None)
+_TRIED167 = getattr(_ns167, "TRIED", None)
+_was167 = (_ns167.KNOWN, dict(_NAMES167 or {}), dict(_TRIED167 or {}),
+           getattr(_ns167, "while_running", None))
+_ns167.KNOWN = os.path.join(_d167, "netshare.json")
+for _m167 in (_NAMES167, _TRIED167):
+    if isinstance(_m167, dict):
+        _m167.clear()
+
+
+class _R167(object):
+    def __init__(self, code, out=""):
+        self.returncode, self.stdout = code, out
+
+
+# the Mac's table at 21:48 (10-share-by-ip.md), its PC's name and address
+# put as documentation ones, the logins, shares and points as the stand-ins
+# check_public passes by name: this file is published
+_MT167 = ("//user1@192.0.2.5/public on /Volumes/public (smbfs, nodev, "
+          "nosuid, mounted by user1)\n"
+          "//guest@192.0.2.7/x on /Volumes/x (smbfs, nodev)\n"
+          "//user2@192.0.2.8/Other on /Volumes/Other (smbfs, nodev)\n")
+_NAMED167 = {"192.0.2.5": "WORKPC", "192.0.2.8": "OTHERPC"}
+_status167, _sec167, _open167 = [], [], []
+
+
+def _run167(keyed=(), table=_MT167):
+    """the mount table, the servers' answers, the keychain's items by host"""
+    def run(cmd, timeout=None):
+        if cmd[0] == _ns167.MOUNT:
+            return _R167(0, table)
+        if cmd[0] == _ns167.SMBUTIL and cmd[1:2] == ["status"]:
+            _status167.append(cmd[2])
+            n = _NAMED167.get(cmd[2], "")
+            return _R167(0, "Server: %s\n" % n) if n else _R167(68)
+        if cmd[0] == _ns167.SECURITY:
+            _sec167.append(list(cmd))
+            return _R167(0 if cmd[cmd.index("-s") + 1] in keyed else 44)
+        if cmd[0] == _ns167.OPEN:
+            _open167.append(cmd[1:])
+            return _R167(0)
+        return _R167(1)
+    return run
+
+
+try:
+    print("   (a) the table: an address is named by its server, asked once")
+    _m167 = _ns167.mounted(_run167())
+    _m167b = _ns167.mounted(_run167())
+    check("a share mounted by address is its server's NAME; an address that "
+          "says no name stays an address; another server is itself",
+          _m167, {"/Volumes/public": ("user1", "WORKPC", "public"),
+                  "/Volumes/x": ("guest", "192.0.2.7", "x"),
+                  "/Volumes/Other": ("user2", "OTHERPC", "Other")})
+    check("the second read answers the same, a named address asked once, a "
+          "silent one again", (_m167b == _m167, sorted(_status167)),
+          (True, ["192.0.2.5", "192.0.2.7", "192.0.2.7", "192.0.2.8"]))
+    _set167 = {"server": "WORKPC", "share": "public", "account": "user1"}
+    check("the launcher finds the share by name though it was mounted by "
+          "address - and not one whose server says no name, or another",
+          (_ml167.mounted_at(_set167, _m167),
+           _ml167.mounted_at(dict(_set167, share="x"), _m167),
+           _ml167.mounted_at(dict(_set167, server="WORKPC", share="Other"),
+                             _m167)),
+          ("/Volumes/public", "", ""))
+    del _open167[:]
+    _pt167 = _ml167.mount(_set167, now=lambda: _ns167.mounted(_run167()),
+                          run=lambda c: _open167.append(c[1:]), wait=0.2,
+                          sleep=lambda s: time.sleep(0.05))
+    check("so its start asks for nothing: no dialog for a share that is there",
+          (_pt167[0], _open167), ("/Volumes/public", []))
+
+    print("   (b) what is kept: the name and the address it was mounted from")
+    _mts167 = getattr(_ns167, "mounts", _ns167.mounted)
+    _said167 = []
+    _ns167.at_start(["/volumes/public/game", "/volumes/x/game"],
+                    now=lambda: _mts167(_run167()),
+                    again=lambda p, rec, say=None: ("", "asked"),
+                    say=lambda t, lv: _said167.append((lv, t)))
+    check("the share mounted by address is kept by its server's name and that "
+          "address; the one whose server says no name is not kept at all",
+          {k: (v.get("server"), v.get("addr"))
+           for k, v in _ns167.known().items()},
+          {"/volumes/public": ("WORKPC", "192.0.2.5")})
+    _ns167.keep(dict(_ns167.known(), **{"/volumes/x": {
+        "point": "/Volumes/x", "who": "guest", "server": "WORKPC",
+        "share": "x", "addr": "192.0.2.6"}}))
+    del _said167[:]
+    _ns167.at_start(["/volumes/x/game"], now=lambda: _mts167(_run167()),
+                    again=lambda p, rec, say=None: ("", "asked"),
+                    say=lambda t, lv: _said167.append((lv, t)))
+    _pub167 = _ns167.known().get("/volumes/x") or {}
+    check("an address that says no name leaves the record as it was, and it "
+          "is said",
+          (_pub167.get("server"), _pub167.get("addr"),
+           [lv for lv, t in _said167 if "says no name" in t]),
+          ("WORKPC", "192.0.2.6", ["warn"]))
+
+    print("   (c) the keychain, under the address too - attributes only")
+    del _sec167[:]
+
+    def _has167(*a, **k):
+        try:
+            return _ns167.has_password(*a, **k)
+        except TypeError as _e:
+            return "raised %s" % _e
+    check("a password Finder kept under the address is found, by the address "
+          "alone too; none is not; no secret read",
+          (_has167("user1", "WORKPC", run=_run167(keyed=("192.0.2.5",)),
+                   addr="192.0.2.5"),
+           _has167("user1", "", run=_run167(keyed=("192.0.2.5",)),
+                   addr="192.0.2.5"),
+           _has167("user1", "WORKPC", run=_run167(keyed=("192.0.2.5",))),
+           _has167("user1", "WORKPC", run=_run167(keyed=()), addr="192.0.2.5"),
+           [a for c in _sec167 for a in c if a in ("-g", "-w")]),
+          (True, True, False, False, []))
+
+    print("   (d) asked back: by name where the name leads, else by address -")
+    print("   only with a password for the host asked")
+    _rec167 = {"point": "/Volumes/public", "who": "user1",
+               "server": "WORKPC", "share": "public", "addr": "192.0.2.5"}
+    _lk167 = "lookup" in inspect.signature(_ns167.remount).parameters
+
+    def _try167(leads, keyed, table=""):
+        """leads: where WORKPC.local resolves to, None for nowhere"""
+        del _open167[:]
+        said, up = [], [False]
+        inner = _run167(keyed=keyed, table=table)
+
+        def run(cmd, timeout=None):
+            if cmd[0] == _ns167.OPEN:
+                up[0] = True
+            return inner(cmd, timeout)
+
+        def lookup(*a):
+            if leads is None:
+                raise _sk167.gaierror(8, "nodename nor servname provided")
+            return [(2, 1, 6, "", (leads, 445))]
+        got = _ns167.remount("/Volumes/public", dict(_rec167),
+                             finder=lambda name, last, say=None: (
+                                 "192.0.2.5", ""),
+                             run=run, ismount=lambda p: up[0], wait=0.3,
+                             sleep=lambda s: time.sleep(0.05),
+                             say=lambda t, lv: said.append((lv, t)),
+                             **({"lookup": lookup} if _lk167 else {}))
+        return (got[0], list(_open167), [lv for lv, t in said],
+                " ".join(t for lv, t in said))
+    _a167 = _try167(None, ("192.0.2.5",))
+    check("the name leads nowhere, the password is under the address: asked "
+          "BY ADDRESS, and said with the server's name",
+          (_a167[0], _a167[1], _a167[2], "WORKPC" in _a167[3]),
+          ("192.0.2.5", [["-g", "smb://user1@192.0.2.5/public"]], ["log"],
+           True))
+    _b167 = _try167(None, ("WORKPC.local",))
+    check("the name leads nowhere and the password is only under it: nothing "
+          "asked, and why",
+          (_b167[0], _b167[1], _b167[2], "keychain" in _b167[3]),
+          ("", [], ["warn"], True))
+    _c167 = _try167("192.0.2.5", ("WORKPC.local",))
+    check("the name leads to the address, the password under it: by NAME, as "
+          "before", (_c167[0], _c167[1], _c167[2]),
+          ("192.0.2.5", [["-g", "smb://user1@WORKPC.local/public"]], ["log"]))
+    _e167 = _try167("192.0.2.99", ("WORKPC.local",))
+    check("the name leads ELSEWHERE: not asked by it - and with no password "
+          "under the address, not at all", (_e167[0], _e167[1], _e167[2]),
+          ("", [], ["warn"]))
+    _f167 = _try167("192.0.2.5", ("192.0.2.5",))
+    check("the name leads there but the password is under the address: by "
+          "the address", _f167[1], [["-g", "smb://user1@192.0.2.5/public"]])
+    # the system would say public-1; a stand-in, in a table of its own
+    _g167 = _try167("192.0.2.5", ("WORKPC.local", "192.0.2.5"),
+                    table="//user1@192.0.2.5/public on /Volumes/other "
+                          "(smbfs, nodev)\n")
+    check("the same share mounted at another point: nothing asked - asked "
+          "again, the system opens a Finder window on it - and where it is "
+          "is said", (_g167[0], _g167[1], _g167[2],
+                      "/Volumes/other" in _g167[3]),
+          ("", [], ["warn"], True))
+
+    print("   (e) while the bridge runs: asked back, RETRY_SEC apart at most")
+    _wr167 = getattr(_ns167, "while_running", None)
+    _retry167 = getattr(_ns167, "RETRY_SEC", 300)
+    _ns167.keep({"/volumes/public": dict(_rec167)})
+    _asks167, _now167, _up167 = [], [1000.0], [False]
+
+    def _again167(p, rec, say=None):
+        _asks167.append((p, rec.get("server"), rec.get("addr")))
+        return "192.0.2.6", "asked"
+
+    def _wr(projects, again=_again167, say=None):
+        if _wr167 is None:
+            return None
+        return _wr167(projects, again=again, ismount=lambda p: _up167[0],
+                      clock=lambda: _now167[0],
+                      say=say or (lambda t, lv: None))
+    _pr167 = ["/volumes/public/game", "/volumes/never/x"]
+    _r167 = [_wr(_pr167)]
+    _now167[0] += 10
+    _r167.append(_wr(_pr167))
+    _now167[0] += _retry167
+    _r167.append(_wr(_pr167))
+    _up167[0] = True
+    _now167[0] += 1
+    _r167.append(_wr(_pr167))
+    _up167[0] = False
+    _now167[0] += 1
+    _r167.append(_wr(_pr167))
+    check("a dropped share asked back at once, not again within RETRY_SEC, "
+          "again after it; not while mounted; back and dropped again, at "
+          "once; one never seen mounted, never",
+          ([len(x or []) for x in _r167], len(_asks167)), ([1, 0, 1, 0, 1], 3))
+    check("by the record kept, and the address that answered is kept for the "
+          "next find",
+          (_asks167[:1],
+           (_ns167.known().get("/volumes/public") or {}).get("addr")),
+          ([("/Volumes/public", "WORKPC", "192.0.2.5")], "192.0.2.6"))
+    if isinstance(_TRIED167, dict):
+        _TRIED167.clear()
+    _said167 = []
+    _now167[0] += _retry167 + 1
+    _wr(["/volumes/public/game"],
+        again=lambda p, rec, say=None: _ns167.remount(
+            p, rec, finder=lambda name, last, say=None: ("192.0.2.5", ""),
+            run=_run167(keyed=()), ismount=lambda q: False, wait=0.1,
+            sleep=lambda s: time.sleep(0.05), say=say,
+            **({"lookup": lambda *a: [(2, 1, 6, "", ("192.0.2.5", 445))]}
+               if _lk167 else {})),
+        say=lambda t, lv: _said167.append((lv, t)))
+    check("no password in the keychain: nothing opened - no dialog - and the "
+          "ask is a line", (_open167[-1:], [lv for lv, t in _said167]),
+          ([], ["warn"]))
+    if isinstance(_TRIED167, dict):
+        _TRIED167.clear()
+    _ns167.at_start(["/volumes/public/game"], now=lambda: {},
+                    again=lambda p, rec, say=None: ("", "asked at the start"),
+                    say=lambda t, lv: None)
+    _l167 = None if _wr167 is None else _wr167(
+        ["/volumes/public/game"], again=_again167, ismount=lambda p: False,
+        say=lambda t, lv: None)
+    check("a share the start has just asked back is not asked again at once",
+          _l167, [])
+
+    print("   (f) the daemon: on a Mac, for the projects it works, a watch")
+    print("   of its own")
+    _swr167 = getattr(daemon, "shares_while_running", None)
+    _got167 = []
+    _saved167 = {k: daemon.STATE.get(k) for k in ("loops", "paused", "mode",
+                                                  "sessions")}
+    _cfg167 = daemon.CFG.get("projects")
+    _ns167.while_running = lambda projects, **k: (
+        _got167.append(sorted(projects)) or ["asked"])
+    try:
+        _g, _i, _h, _x = (daemon.norm(p) for p in (
+            "/volumes/public/game167", "/volumes/public/idle167",
+            "/volumes/public/held167", "/volumes/public/died167"))
+        daemon.CFG["projects"] = {p: {} for p in (_g, _i, _h, _x)}
+        daemon.STATE["loops"] = {_g: {"active": True}, _i: {"active": False},
+                                 _h: {"active": True}, _x: {"active": True}}
+        daemon.STATE["paused"] = {_h: {"why": "by hand"},
+                                  _x: {"by_death": True}}
+        daemon.STATE["mode"] = "running"
+        daemon.STATE["sessions"] = {}
+        _out167 = (None, None) if _swr167 is None else (
+            _swr167("win32"), _swr167("darwin"))
+        check("off a Mac nothing is asked; on a Mac the projects worked - a "
+              "hold the bridge put on is still work, a person's pause and a "
+              "loop that is off are not",
+              (_out167, _got167),
+              (([], ["asked"]), [[daemon.norm(_x), daemon.norm(_g)]]))
+    finally:
+        for _k, _v in _saved167.items():
+            daemon.STATE[_k] = _v
+        daemon.CFG["projects"] = _cfg167
+    _main167 = inspect.getsource(daemon.main)
+    check("the bridge starts that watch, on a Mac only",
+          'if sys.platform == "darwin":\n        threading.Thread('
+          'target=share_watch' in _main167, True)
+finally:
+    _ns167.KNOWN = _was167[0]
+    for _m167, _v167 in ((_NAMES167, _was167[1]), (_TRIED167, _was167[2])):
+        if isinstance(_m167, dict):
+            _m167.clear()
+            _m167.update(_v167)
+    if _was167[3] is None:
+        _ns167.__dict__.pop("while_running", None)
+    else:
+        _ns167.while_running = _was167[3]
+
+
+print("\n168. the launcher asks for the share as the bridge asks it back")
+print("   (132b). maclaunch.mount, the share not there, opened")
+print("   smb://<who>@<PC>.local/<share> without a look at the keychain -")
+print("   with no password there, a dialog on the owner's screen - and by a")
+print("   name that may lead nowhere: the owner's double-click on")
+print("   bridge.command. Now it takes netshare's decision: the server proven")
+print("   by name - the address the bridge last found it at, then the name -")
+print("   asked by the name while the name leads to that address and the")
+print("   keychain holds the password under it, else by the address with one")
+print("   there, else not at all, and the line says why and what to do; the")
+print("   bridge starts anyway. The receivers: what is opened, what is asked")
+print("   of the system, the line said, what main does after it")
+print("   FAILURE WOULD LOOK LIKE: an `open` with no password in the")
+print("   keychain; by a name that leads nowhere or elsewhere; by an address")
+print("   with no password under it; an `open` of a server not found;")
+print("   anything asked by --check; a share mounted by address taken for")
+print("   none; the bridge not started because the share was not mounted")
+import re as _re168                                         # noqa: E402
+import socket as _sk168                                     # noqa: E402
+from bridgecore import netshare as _ns168                   # noqa: E402
+from bridgecore import maclaunch as _ml168                  # noqa: E402
+_d168 = os.path.join(TMP, "case168")
+os.makedirs(_d168)
+_NAMES168 = getattr(_ns168, "NAMES", None)
+_was168 = (_ns168.KNOWN, dict(_NAMES168 or {}))
+_ns168.KNOWN = os.path.join(_d168, "netshare.json")
+if isinstance(_NAMES168, dict):
+    _NAMES168.clear()
+# before 132b the launcher asked the system nothing before its `open`, so it
+# took nothing to ask with: the fakes are passed only where they are taken
+_seam168 = {k: "query" in inspect.signature(f).parameters
+            for k, f in (("mount", _ml168.mount), ("main", _ml168.main))}
+_set168 = {"server": "WORKPC", "share": "public", "account": "user1"}
+_NAMED168 = {"192.0.2.5": "WORKPC", "192.0.2.99": "OTHERPC"}
+_asked168, _open168 = [], []
+
+
+class _R168(object):
+    def __init__(self, code, out=""):
+        self.returncode, self.stdout = code, out
+
+
+def _status168(cmd):
+    n = _NAMED168.get(cmd[2], "")
+    return _R168(0, "Server: %s\n" % n) if n else _R168(68)
+
+
+def _sys168(keyed=(), netbios=(), leads=None):
+    """(query, lookup): the system the launcher asks before a mount, every
+    ask written down. keyed: the hosts the keychain holds user1's password
+    under; netbios: the addresses NetBIOS names WORKPC at; leads: where
+    WORKPC.local resolves, None for nowhere"""
+    def query(cmd, timeout=None):
+        _asked168.append(list(cmd))
+        if cmd[0] == _ns168.SMBUTIL and cmd[1:2] == ["status"]:
+            return _status168(cmd)
+        if cmd[0] == _ns168.SMBUTIL and cmd[1:2] == ["lookup"] and netbios:
+            return _R168(0, "".join("IP address of %s: %s\n" % (cmd[2], a)
+                                    for a in netbios))
+        if cmd[0] == _ns168.SECURITY:
+            return _R168(0 if cmd[cmd.index("-s") + 1] in keyed else 44)
+        return _R168(1)
+
+    def lookup(host, *a):
+        _asked168.append(["getaddrinfo", host])
+        if leads is None:
+            raise _sk168.gaierror(8, "nodename nor servname provided")
+        return [(2, 1, 6, "", (leads, 445))]
+    return query, lookup
+
+
+def _mount168(keyed=(), netbios=(), leads=None, table="", check=False):
+    """(point, line, what was opened, what was asked of the system). The
+    table is the mount table before; an `open` mounts what its URL names
+    at once, by that host, as the system would - and the launcher reads it
+    back through netshare.mounted, an address named by its server"""
+    del _asked168[:]
+    del _open168[:]
+    tab = [table]
+    query, lookup = _sys168(keyed, netbios, leads)
+
+    def table_now(cmd, timeout=None):
+        if cmd[0] == _ns168.MOUNT:
+            return _R168(0, tab[0])
+        if cmd[0] == _ns168.SMBUTIL and cmd[1:2] == ["status"]:
+            return _status168(cmd)
+        return _R168(1)
+
+    def run(cmd):
+        _open168.append(cmd[1:])
+        m = _re168.match(r"smb://([^@/]+)@([^/]+)/(.+)$", cmd[-1])
+        if m:
+            tab[0] += "//%s@%s/%s on /Volumes/%s (smbfs, nodev)\n" % (
+                m.group(1), m.group(2), m.group(3), m.group(3))
+        return 0
+    point, line = _ml168.mount(
+        dict(_set168), check=check, now=lambda: _ns168.mounted(table_now),
+        run=run, wait=0.3, sleep=lambda s: time.sleep(0.05),
+        **({"query": query, "lookup": lookup} if _seam168["mount"] else {}))
+    return point, line, list(_open168), list(_asked168)
+
+
+def _keyhosts168(asked):
+    return sorted({c[c.index("-s") + 1] for c in asked
+                   if c[0] == _ns168.SECURITY})
+
+
+try:
+    print("   (a) no password in the keychain: nothing opened, and why")
+    _a168 = _mount168(keyed=(), leads="192.0.2.5")
+    check("the PC answers by name and the keychain holds no password for "
+          "it: no `open` - no dialog - and not mounted",
+          (_a168[0], _a168[2]), ("", []))
+    check("the line says why and what the person can do: the keychain, and "
+          "Finder with the password remembered, at the URL to type - and "
+          "that the bridge starts anyway",
+          ("keychain holds no password" in _a168[1],
+           "Remember this password" in _a168[1],
+           "smb://user1@WORKPC.local/public" in _a168[1],
+           "starts anyway" in _a168[1]), (True, True, True, True))
+    check("the keychain was asked - under the name and the address - for "
+          "the item's attributes only: no secret read",
+          ("WORKPC.local" in _keyhosts168(_a168[3]),
+           "192.0.2.5" in _keyhosts168(_a168[3]),
+           [c for c in _a168[3] if "-g" in c or "-w" in c]),
+          (True, True, []))
+
+    print("   (b) the name leads to the proven address, the password under")
+    print("   it: by NAME, as before")
+    _b168 = _mount168(keyed=("WORKPC.local",), leads="192.0.2.5")
+    check("opened by name, once, and found mounted",
+          (_b168[0], _b168[2], "by name" in _b168[1]),
+          ("/Volumes/public", [["smb://user1@WORKPC.local/public"]], True))
+
+    print("   (c) the name does not resolve, or leads elsewhere: the address")
+    print("   the server there proved, with a password under it")
+    _c168 = _mount168(keyed=("192.0.2.5",), netbios=("192.0.2.5",))
+    check("the name leads nowhere, NetBIOS names the address: opened BY "
+          "ADDRESS, and the share mounted by it found as the PC's",
+          (_c168[0], _c168[2]),
+          ("/Volumes/public", [["smb://user1@192.0.2.5/public"]]))
+    check("and the line says by address, with the server's name",
+          ("by address" in _c168[1], "WORKPC" in _c168[1]), (True, True))
+    _e168 = _mount168(keyed=("192.0.2.5", "WORKPC.local"),
+                      netbios=("192.0.2.5",), leads="192.0.2.99")
+    check("the name leads ELSEWHERE, to a server that says it is another: "
+          "not opened by it, though the keychain holds a password under "
+          "it - by the proven address",
+          (_e168[0], _e168[2]),
+          ("/Volumes/public", [["smb://user1@192.0.2.5/public"]]))
+    _f168 = _mount168(keyed=("WORKPC.local",), netbios=("192.0.2.5",))
+    check("the password only under the name, and the name leads nowhere: "
+          "nothing opened, and the line says why and gives the address to "
+          "mount it by",
+          (_f168[0], _f168[2], "does not lead there" in _f168[1],
+           "smb://user1@192.0.2.5/public" in _f168[1]),
+          ("", [], True, True))
+
+    print("   (d) no server proven: nothing opened; the address the bridge")
+    print("   last found it at is asked first")
+    _g168 = _mount168(keyed=("WORKPC.local", "192.0.2.5"))
+    check("the name leads nowhere and NetBIOS names no address: nothing "
+          "opened, and the line says the PC was not found",
+          (_g168[0], _g168[2], "not found" in _g168[1]), ("", [], True))
+    _ns168.keep({"/volumes/public": {
+        "point": "/Volumes/public", "who": "user1", "server": "WORKPC",
+        "share": "public", "addr": "192.0.2.5"}})
+    _h168 = _mount168(keyed=("192.0.2.5",))
+    check("but the address kept from the bridge's last find is proven: by "
+          "that address", (_h168[0], _h168[2]),
+          ("/Volumes/public", [["smb://user1@192.0.2.5/public"]]))
+    _ns168.keep({})
+
+    print("   (e) --check asks nothing; a share that is there is not asked")
+    _i168 = _mount168(keyed=("WORKPC.local",), leads="192.0.2.5", check=True)
+    check("--check: nothing opened, nothing asked of the keychain or the "
+          "network, and it says the share is not mounted",
+          (_i168[0], _i168[2], _i168[3], "NOT mounted" in _i168[1]),
+          ("", [], [], True))
+    if isinstance(_NAMES168, dict):
+        _NAMES168.clear()
+    _j168 = _mount168(keyed=("WORKPC.local", "192.0.2.5"), leads="192.0.2.5",
+                      table="//user1@192.0.2.5/public on /Volumes/public "
+                            "(smbfs, nodev)\n")
+    check("mounted already, by ADDRESS: found as the PC's share - nothing "
+          "opened, nothing asked", (_j168[0], _j168[2], _j168[3]),
+          ("/Volumes/public", [], []))
+
+    print("   (f) the launcher itself: the share not mounted, the bridge")
+    print("   started anyway, the line said")
+    _hm168 = os.path.join(_d168, "home")
+    os.makedirs(_hm168)
+    with open(os.path.join(_hm168, "bridge-mac.json"), "w",
+              encoding="utf-8") as _fh:
+        _json.dump(_set168, _fh)
+    _st168, _out168, _op168 = [], [], []
+    _q168, _l168 = _sys168(keyed=(), leads="192.0.2.5")
+    _code168 = _ml168.main(
+        [], home=_hm168, find=lambda n: "/x/" + n,
+        now=lambda: ({"/Volumes/public": ("user1", "WORKPC", "public")}
+                     if _op168 else {}),
+        run=lambda c: _op168.append(c[1:]), ask=lambda q: 1 / 0,
+        say=_out168.append, tty=True,
+        start=lambda src, env, rest: _st168.append(rest) or 0,
+        **({"query": _q168, "lookup": _l168} if _seam168["main"] else {}))
+    check("no password: nothing opened, the reason said, and the bridge "
+          "started all the same",
+          (_code168, _op168, _st168,
+           [l for l in _out168 if "keychain holds no password" in l] != []),
+          (0, [], [[]], True))
+finally:
+    _ns168.KNOWN = _was168[0]
+    if isinstance(_NAMES168, dict):
+        _NAMES168.clear()
+        _NAMES168.update(_was168[1])
+
+check("nothing this run did reached past this machine: the fence was up, "
+      "and it refused nothing (netfence.py, 8.142)",
+      (netfence.up(), netfence.refused()), (True, []))
 print("\n" + ("-" * 60))
 owntemp.finish(TMP, bool(FAILED))
 if TMUX_HOME:

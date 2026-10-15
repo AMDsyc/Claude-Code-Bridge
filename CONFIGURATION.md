@@ -17,8 +17,11 @@ Part of [README.md](README.md), moved out whole under rule 36.
 | `role_window` | `executor: 222000`, `planner: 1000000` | the auto-compact window a role's window starts with, in tokens, handed to that window alone as `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (the client reads it before any settings file), so the project's shared `.claude/settings.json` is never edited to give the two halves different windows. A role not named gets none and the project's own settings decide. A project can override it in `projects[path].window` |
 | `role_idle_compaction` | `planner: false` | `false` switches the client's idle compaction off in that role's window, passed as `--settings {"idleCompaction":false}` (the flag source outranks the project's settings files). The client otherwise compacts a long conversation that sits idle, and a reviewer waits for reports most of its life. A project can override it in `projects[path].idle_compaction`; `true` there leaves it on |
 | `telegram` | empty | token and chat id |
+| `home_pair` | empty | the watched project whose planner you talk to: it also hears each needs_you of another pair that the chat did not carry. Empty, no pair is guessed |
+| `mac_notify` | `false` | on a Mac, each needs_you is also a notification, with no sound - one a pair in ten minutes, six an hour |
 | `thresholds.idle_hold` | `1200` | how long an idling pair is held rather than answered, in seconds. `0` disables |
 | `thresholds.review_timeout` | `1200` | how long a report may wait for a verdict |
+| `thresholds.long_turn` | `2700` | an executor turn running this long is told to its planner, once a turn and again at most hourly |
 | `archive_parallel` | `2` | archive searches at once across all projects |
 | `archive_model` | `sonnet` | the model the search agent runs on |
 | `retention.days` | `7` | how long the bridge keeps its own logs |

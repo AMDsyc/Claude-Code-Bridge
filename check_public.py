@@ -295,13 +295,15 @@ STAND_IN_SHARES = {"x", "public", "other"}
 # which keys it holds and trusts, by name, body and fingerprint. Only the
 # count is printed; a value is shown where it is found. -> DECISIONS 8.98
 MACHINE_VALUES = None
-# what a machine's name is made of, never a leak on its own
+# what a machine's name is made of, never a leak on its own; a forge's
+# too, since host() takes a known host's first label as well: a PC's
+# known_hosts that gained github.com mid-scan had "github" refused (8.149)
 GENERIC_WORDS = {"macbook", "pro", "air", "mac", "mini", "imac", "studio",
                  "desktop", "laptop", "local", "localhost", "users", "public",
                  "shared", "admin", "administrator", "user", "root", "home",
                  "default", "guest", "id_ed25519", "id_rsa", "id_ecdsa",
                  "id_dsa", "known_hosts", "authorized_keys", "bridge",
-                 "share", "github.com", "gitlab.com"}
+                 "share", "github.com", "gitlab.com", "github", "gitlab"}
 
 
 def generic(value):

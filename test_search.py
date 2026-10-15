@@ -61,6 +61,13 @@ os.environ["PYTHONUTF8"] = "1"
 os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(TMP, "claude-home")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# NOTHING THIS RUN DOES REACHES PAST THIS MACHINE (DECISIONS.md 8.142): the
+# fence refuses it and writes it down, and the last check fails on what it
+# wrote. The Bot API is a recorder on 127.0.0.1, put up before the
+# package reads BRIDGE_TELEGRAM_API.
+from bridgecore import netfence                # noqa: E402
+netfence.fence(os.path.join(TMP, "netfence.jsonl"))
+TGAPI = netfence.telegram()
 from bridgecore import archive, daemon, store          # noqa: E402
 
 FAILED = []
@@ -509,6 +516,9 @@ finally:
         getattr(daemon, "_share_of", {}).pop(_pp, None)
     srv10.shutdown()
 
+check("nothing this run did reached past this machine: the fence was up, "
+      "and it refused nothing (netfence.py, 8.142)",
+      (netfence.up(), netfence.refused()), (True, []))
 print("\n" + ("-" * 60))
 owntemp.finish(TMP, bool(FAILED))
 if FAILED:

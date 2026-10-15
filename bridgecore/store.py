@@ -371,6 +371,14 @@ DEFAULT_CONFIG = {
     # takes this, since load_config lays the file over these.
     # -> DECISIONS.md 8.135
     "panel_sound": panel_sound_default(),
+    # The watched project whose planner the person talks to: a call of
+    # another pair the chat did not carry goes to it as well. Empty: no
+    # pair is guessed, and the chat stays the way to a person.
+    # -> DECISIONS.md 8.151
+    "home_pair": "",
+    # On a Mac, a call is also a Notification Center notification, with no
+    # sound. Off until the owner turns it on. -> DECISIONS.md 8.151
+    "mac_notify": False,
     "projects": {},
 }
 
@@ -381,6 +389,10 @@ PROJECT_DEFAULTS = {
     # -> DECISIONS.md 8.61
     "chains": {"executor": ["opus", "sonnet"], "planner": ["opus", "fable"]},
     "commit_each_iteration": True,
+    # A project on a Mac's network share is NOT committed unless this is
+    # set: a commit read over SMB stored stale bytes once (one project,
+    # a064b18, 2026-10-14). daemon.commit_off says so once per run. -> 8.145
+    "commit_on_share": False,
     # WHERE THIS PROJECT'S REPOSITORY IS, relative to the project path.
     # Empty means "the project path itself", which is the only thing the
     # bridge ever assumed and which is right for most projects. It is
@@ -1528,6 +1540,17 @@ def calib_move(old_project, new_project):
     return out
 
 
+def calib_initial_ceiling(window, buffer_t=33000):
+    """The ceiling a calibration entry starts at under this window: the
+    buffer below it, three points off, never under 50 - and 80 when the
+    window is not known. Also what reset_compact_ceilings puts back (8.149).
+    """
+    if window and window > buffer_t:
+        return round(max(50.0, (window - buffer_t) * 100.0 / window - 3.0),
+                     1)
+    return 80.0
+
+
 def calib_get(model, project, window):
     """A COMPLETE calibration record for this model and project.
 
@@ -1545,11 +1568,8 @@ def calib_get(model, project, window):
     cal = load_calibration()
     key = calib_key(model, project)
     buffer_t = 33000
-    if window and window > buffer_t:
-        ceiling = max(50.0, (window - buffer_t) * 100.0 / window - 3.0)
-    else:
-        ceiling = 80.0
-    blank = {"ceiling_pct": round(ceiling, 1), "buffer_tokens": buffer_t,
+    blank = {"ceiling_pct": calib_initial_ceiling(window, buffer_t),
+             "buffer_tokens": buffer_t,
              "measured_at": "", "how": "initial estimate",
              "misses": 0, "clean_streak": 0, "multiplier": 1.5,
              "wall_history_tokens": None,
@@ -1564,6 +1584,24 @@ def calib_get(model, project, window):
         entry.update(missing)
         save_calibration(cal)
     return entry
+
+
+def calib_put_back(model, project, expect, fields):
+    """Write `fields` into the entry only while it still holds `expect`,
+    under the lock - so nothing written between the read and the write is
+    undone (8.149). None when written; else the entry's values for the keys
+    of `expect` as they stand ({} when there is no entry)."""
+    with _lock:
+        cal = load_calibration()
+        entry = cal.get(calib_key(model, project))
+        if not isinstance(entry, dict):
+            return {}
+        now = {k: entry.get(k) for k in expect}
+        if now != expect:
+            return now
+        entry.update(fields)
+        _write_atomic(CALIB_PATH, cal)
+        return None
 
 
 def calib_update(model, project, **fields):

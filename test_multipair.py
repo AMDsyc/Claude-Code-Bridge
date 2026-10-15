@@ -140,6 +140,11 @@ os.environ["BRIDGE_TELEGRAM_API"] = "http://127.0.0.1:%d" \
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# NOTHING THIS RUN DOES REACHES PAST THIS MACHINE (DECISIONS.md 8.142): the
+# fence refuses it and writes it down, and the last check fails on what it
+# wrote. The Bot API is this suite's own recorder, above.
+from bridgecore import netfence                # noqa: E402
+netfence.fence(os.path.join(TMP, "netfence.jsonl"))
 from bridgecore import archive, daemon, sessions, store, telegram   # noqa: E402
 
 FAILED = []
@@ -292,11 +297,20 @@ sessions.launch = _kept_launch
 # the cases before 13 produce no traffic.
 
 
+def tg_settle():
+    """What a hook's reply handed to the chat's thread goes out after the
+    reply (8.142): the chat is read, and emptied, once that has gone."""
+    if not daemon.chat_settle(30):
+        print("   the chat's thread had not settled in 30 s")
+
+
 def tg_texts():
+    tg_settle()
     return [p.get("text", "") for m, p in TG_CALLS if m == "sendMessage"]
 
 
 def tg_reset():
+    tg_settle()
     del TG_CALLS[:]
 
 
@@ -3834,6 +3848,9 @@ _c_projects[CARRY] = {}
 # endpoint, the real handler and the real order of events.
 _code45, _r45 = post_rc("/config", {"projects": _c_projects})
 check("the endpoint took it", _code45, 200)
+# The merge runs on the bridge-history thread now (8.144): the POST
+# returns before it, so the feed is read after the thread has settled.
+check("the history thread settled", daemon.history_settle(30), True)
 
 _c_feed = daemon.store.recent_events(300, project=CARRY)
 _c_mine = [r for r in _c_feed if "before the move" in (r.get("text") or "")
@@ -3869,11 +3886,12 @@ check("the project's own day still holds exactly what it held",
 print("   it is called from both moments, and from nowhere else - a tick")
 print("   would make a move into background work")
 _src45 = inspect.getsource(daemon)
-check("startup calls it", "merge_carried_history(\"the bridge started\")"
+check("startup calls it", "merge_history_later(\"the bridge started\")"
       in _src45, True)
 check("and so does a project entering the watch list",
-      "merge_carried_history(\"it entered the watch list\")" in _src45, True)
-check("and add-project", "merge_carried_history(\"it was added to the "
+      "merge_history_later(\"it entered the watch list\", at)" in _src45,
+      True)
+check("and add-project", "merge_history_later(\"it was added to the "
       "bridge\", norm(path))" in _src45, True)
 print("   never under _lock: it is file work, and file I/O under the lock is")
 print("   what once serialised the whole daemon behind somebody else's disk")
@@ -4187,7 +4205,9 @@ print("   the day the lists were wrong. It walks the STATE this suite has")
 print("   actually built through the real endpoints and asks of every")
 print("   path-shaped key: is the container holding it one the inventory")
 print("   names? Its limit, said plainly: it can only see containers this")
-print("   suite fills. That is why it runs LAST, after every fixture")
+print("   suite fills by the time it runs. It said \"it runs LAST\" here, at")
+print("   case 49 of 177 (132b): so the same walk, inventory_walk, runs")
+print("   again as the suite's last case, after every fixture")
 # a key is a path when it is one on THIS machine: a drive letter, and off
 # Windows this suite's own folder, under which every fixture lives. Drive
 # letters alone left the guard blind on a Mac: it found nothing, and its
@@ -4200,39 +4220,53 @@ def _pathish(x):
     return isinstance(x, str) and bool(_PATHY.match(x))
 
 
-_unlisted, _kinds49 = [], set()
-for _name, _v in sorted(daemon.STATE.items()):
-    if _PATHY.search(_name):
-        if any(_name.startswith(p) for p in daemon.STATE_PATH_PREFIXES):
-            _kinds49.add("prefixed")
-        else:
-            _unlisted.append("top-level key %r" % _name)
-        continue
-    _kind = daemon.STATE_PATHS.get(_name)
-    if isinstance(_v, dict):
-        for _k, _val in _v.items():
-            if _pathish(_k) and _kind not in ("path", "pair"):
-                _unlisted.append("%s: path-shaped keys" % _name)
-                break
-            if isinstance(_val, dict) and _pathish(_val.get("path")) \
-                    and _kind != "value":
-                _unlisted.append("%s: values carry a path" % _name)
-                break
-    elif isinstance(_v, list):
-        for _row in _v:
-            if isinstance(_row, dict) and _pathish(_row.get("path")) \
-                    and _kind != "rows":
-                _unlisted.append("%s: rows carry a path" % _name)
-                break
+def inventory_walk():
+    """(the containers of this daemon's live STATE holding a path where the
+    inventory does not say, whether a prefixed top-level key was seen). The
+    walk of case 49, a function since 132b: case 49 stood at 49 of 177 and
+    called itself LAST, so a container first filled by a later case was
+    never walked - the suite's last case walks again (183)."""
+    unlisted, prefixed = [], False
+    for name, v in sorted(daemon.STATE.items()):
+        if name in getattr(daemon, "STATE_PATH_RECORDS", ()):
+            continue        # the bridge's own records, kept on purpose
+        if _PATHY.search(name):
+            if any(name.startswith(p) for p in daemon.STATE_PATH_PREFIXES):
+                prefixed = True
+            else:
+                unlisted.append("top-level key %r" % name)
+            continue
+        kind = daemon.STATE_PATHS.get(name)
+        if isinstance(v, dict):
+            for k, val in v.items():
+                if _pathish(k) and kind not in ("path", "pair"):
+                    unlisted.append("%s: path-shaped keys" % name)
+                    break
+                if isinstance(val, dict) and _pathish(val.get("path")) \
+                        and kind != "value":
+                    unlisted.append("%s: values carry a path" % name)
+                    break
+        elif isinstance(v, list):
+            for row in v:
+                if isinstance(row, dict) and _pathish(row.get("path")) \
+                        and kind != "rows":
+                    unlisted.append("%s: rows carry a path" % name)
+                    break
+    return sorted(set(unlisted)), prefixed
 
+
+_unlisted, _prefixed49 = inventory_walk()
+# what was filled when case 49 walked: the last case names what it could
+# not have seen
+_filled49 = sorted(n for n, v in daemon.STATE.items() if v)
 check("every path in this daemon's STATE lies where the inventory says",
-      sorted(set(_unlisted)), [])
+      _unlisted, [])
 print("   and the guard is worth something only if the run reached all")
 print("   four shapes the inventory distinguishes")
 check("all four shapes were exercised",
       sorted({k for n, k in daemon.STATE_PATHS.items() if daemon.STATE.get(n)}),
       ["pair", "path", "rows", "value"])
-check("prefixed top-level keys too", "prefixed" in _kinds49, True)
+check("prefixed top-level keys too", _prefixed49, True)
 
 print("   THE SABOTAGE (rule 19): put paths in a container the inventory")
 print("   does not name, and the same walk must go red - that is its")
@@ -23943,7 +23977,7 @@ print("     has been inside ONE command for 60 min - \"cd \"/Volumes/<share>/...
 print("     went to a person. It was a SUBAGENT's foreground grep, started")
 print("     10:18:35, standing in state U in the kernel on the share, while")
 print("     the executor's own transcript had calls at 11:15-11:19.")
-print("     -> DECISIONS.md 8.132")
+print("     -> DECISIONS.md 8.132, and its addendum of 2026-10-15")
 print("   FAILURE WOULD LOOK LIKE: a person told the half is blocking itself")
 print("   while its own thread is making calls; or a call that does go out")
 print("   naming forty characters of a cd and no helper, pid or state.")
@@ -23952,8 +23986,13 @@ os.makedirs(_p170, exist_ok=True)
 _k170 = canon(_p170)
 _S170, _AG170, _TID170 = "hh170-ex", "a170helper000000", "toolu_170_grep"
 _t170 = os.path.join(TMP, "%s.jsonl" % _S170)
-_cmd170 = ('cd "%s/research" && grep -n "sep_legs_off" -A4 '
-           'make_recipe_001.py | head' % _p170)
+# The cd's folder alone is longer than the 160 characters the record
+# keeps, on every machine: 2026-10-15 the Mac's acceptance, its temp folder
+# 150 characters deep, cut the command inside the cd and the words were the
+# cd again, while the PC's short temp folder passed (8.132, addendum).
+_deep170 = "/".join(["a-folder-deep-in-the-share"] * 7)
+_cmd170 = ('cd "%s/research/%s" && grep -n "sep_legs_off" -A4 '
+           'make_recipe_001.py | head' % (_p170, _deep170))
 _prev170 = daemon.sessions.transcript_of
 _hung170 = None
 
@@ -24091,6 +24130,8 @@ try:
           (True, True))
     check("(b) and the pid of the call's own process", "pid %d" %
           _hung170.pid in _c170, True)
+    check("PRECONDITION: the cd alone is longer than the 160 characters "
+          "the record keeps", _cmd170.index(" && ") > 160, True)
     check("(b) and foreground, and the command past its cd",
           ("foreground" in _c170, "grep -n" in _c170, 'cd "' in _c170),
           (True, True, False))
@@ -25097,6 +25138,984 @@ finally:
         daemon.save_state()
 
 
+print("\n176. a project on a Mac's share is not committed unless asked for")
+print("     (commit_on_share). A commit read over SMB can store bytes the")
+print("     share had not caught up with: one project's a064b18 (2026-10-14) stored")
+print("     an image as blob 7e589b71 where the file on the PC was 11f12d31,")
+print("     and ef3f885 had to put it back. -> DECISIONS.md 8.145")
+print("   FAILURE WOULD LOOK LIKE: a commit from a share project with the")
+print("   switch off; a line at every iteration; or the switch that does not")
+print("   bring the commit back")
+from bridgecore import install as _inst176                 # noqa: E402
+_p176 = os.path.join(TMP, "share176")
+_p176L = os.path.join(TMP, "local176")
+_real_ons176 = _inst176.on_network_share
+# the same mount table case 171 reads, for this one folder only
+_table176 = ("//u@pc/Projects on %s (smbfs, nodev, nosuid, mounted by u)\n"
+             "/dev/disk3s1s1 on / (apfs, sealed, local, read-only)\n"
+             % os.path.realpath(_p176))
+
+
+def _ons176(p, table=None, platform=None):
+    if table is None and platform is None and canon(p) == canon(_p176):
+        return _real_ons176(p, _table176, "darwin")
+    return _real_ons176(p, table, platform)
+
+
+def _repo176(where, n):
+    os.makedirs(where, exist_ok=True)
+    daemon._git(["init"], where, timeout=20)
+    daemon._git(["config", "user.email", "suite@invalid"], where)
+    daemon._git(["config", "user.name", "suite"], where)
+    with open(os.path.join(where, ".gitignore"), "wb") as fh:
+        fh.write(b"bridge-logs/\n")
+    daemon._git(["add", "-A"], where)
+    daemon._git(["commit", "-m", "baseline"], where)
+    with open(os.path.join(where, "work%d.txt" % n), "wb") as fh:
+        fh.write(b"an iteration's work\n")
+
+
+def _head176(where):
+    return daemon._git(["log", "-1", "--format=%s"], where)[1]
+
+
+def _off176():
+    return [t for t in _git_lines(canon(_p176)) if "network share" in t]
+
+
+def _forget176():
+    for _pp in (_p176, _p176L, daemon.norm(_p176), daemon.norm(_p176L)):
+        getattr(daemon, "_share_of", {}).pop(_pp, None)
+        getattr(daemon, "_commit_off_said", set()).discard(_pp)
+
+
+_forget176()
+_inst176.on_network_share = _ons176
+try:
+    _repo176(_p176, 1)
+    _repo176(_p176L, 1)
+    check("the switch is a project's own, and off by default",
+          store.PROJECT_DEFAULTS.get("commit_on_share", "missing"), False)
+    post("/config", {"projects": {A: {}, B: {}, C: {}, _p176: {},
+                                  _p176L: {}}})
+
+    print("   (a) a share, the switch off: two iterations, no commit, said")
+    print("   once")
+    daemon.git_commit_iteration(_p176, 176, "continue")
+    with open(os.path.join(_p176, "work2.txt"), "wb") as fh:
+        fh.write(b"and the next one's\n")
+    daemon.git_commit_iteration(_p176, 177, "continue")
+    check("(a) nothing was committed", _head176(_p176), "baseline")
+    check("(a) and nothing was added either - the index is the baseline's",
+          daemon._git(["diff", "--cached", "--name-only"], _p176)[1], "")
+    check("(a) the journal says why, once for the two, naming the switch",
+          (len(_off176()), all("commit_on_share" in t for t in _off176())),
+          (1, True))
+
+    print("   (b) THE CONTROL: the same project with the switch on commits -")
+    print("   so (a) is the switch and not a repository that cannot. Set")
+    print("   through /config, the way a person sets it")
+    post("/config", {"projects": {A: {}, B: {}, C: {},
+                                  _p176: {"commit_on_share": True},
+                                  _p176L: {}}})
+    daemon.git_commit_iteration(_p176, 178, "continue")
+    check("(b) the iteration is committed", _head176(_p176),
+          "bridge: iteration 178 (continue)")
+    check("(b) and no second line was said", len(_off176()), 1)
+
+    print("   (c) a local project with the switch off commits as before")
+    daemon.git_commit_iteration(_p176L, 176, "continue")
+    check("(c) the iteration is committed", _head176(_p176L),
+          "bridge: iteration 176 (continue)")
+    check("(c) and nothing was said about a share",
+          [t for t in _git_lines(canon(_p176L)) if "network share" in t], [])
+finally:
+    _inst176.on_network_share = _real_ons176
+    _forget176()
+post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n177. an iteration in a repository with no author configured is")
+print("     committed as bridge <bridge@invalid>, never git's guess. A Mac")
+print("     with no user.email committed a project as the owner's name at the")
+print("     Mac's .local host name (167111a, 2026-10-15) - a stranger's")
+print("     address in a history that may be published. -> DECISIONS.md 8.146")
+print("   FAILURE WOULD LOOK LIKE: an author git made up; a configured author")
+print("   overridden; the half that was configured replaced; or a line at")
+print("   every iteration")
+_cfg177 = os.path.join(TMP, "identity-177.gitconfig")
+open(_cfg177, "w").close()
+_envk177 = ("GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+            "EMAIL")
+_env177 = {k: os.environ.get(k) for k in _envk177}
+for _k in _envk177[2:]:
+    os.environ.pop(_k, None)        # an author in the environment beats -c
+os.environ.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=_cfg177)
+_g177 = os.path.join(TMP, "anon177")       # nobody configured
+_g177h = os.path.join(TMP, "half177")      # a name, no address
+_g177u = os.path.join(TMP, "named177")     # both, the repository's own
+
+
+def _init177(where, **conf):
+    os.makedirs(where, exist_ok=True)
+    daemon._git(["init"], where, timeout=20)
+    for k, v in conf.items():
+        daemon._git(["config", "user.%s" % k, v], where)
+    with open(os.path.join(where, ".gitignore"), "wb") as fh:
+        fh.write(b"bridge-logs/\n")
+
+
+def _work177(where, n):
+    with open(os.path.join(where, "work%d.txt" % n), "wb") as fh:
+        fh.write(b"an iteration's work\n")
+
+
+def _who177(where):
+    return daemon._git(["log", "-1", "--format=%an <%ae>|%cn <%ce>|%s"],
+                       where)[1]
+
+
+def _said177(where):
+    return [e.get("text", "") for e in store.recent_events(
+        300, project=canon(where)) if e.get("kind") == "git" and
+        "committed as bridge <bridge@invalid>" in e.get("text", "")]
+
+
+def _forget177():
+    for _pp in (_g177, _g177h, _g177u):
+        for _q in (_pp, daemon.norm(_pp)):
+            getattr(daemon, "_identity_said", set()).discard(_q)
+            getattr(daemon, "_commit_off_said", set()).discard(_q)
+
+
+_forget177()
+try:
+    _init177(_g177)
+    _init177(_g177h, name="half177")
+    _init177(_g177u, name="suite177", email="suite177@invalid")
+    check("the control: this repository has no author git can read",
+          daemon._git(["config", "--get", "user.email"], _g177)[0] != 0, True)
+    post("/config", {"projects": {A: {}, B: {}, C: {}, _g177: {},
+                                  _g177h: {}, _g177u: {}}})
+
+    print("   (a) nobody configured: bridge <bridge@invalid>, said once")
+    _work177(_g177, 1)
+    daemon.git_commit_iteration(_g177, 177, "continue")
+    check("(a) committed as the bridge, author and committer",
+          _who177(_g177), "bridge <bridge@invalid>|bridge <bridge@invalid>|"
+          "bridge: iteration 177 (continue)")
+    _work177(_g177, 2)
+    daemon.git_commit_iteration(_g177, 178, "continue")
+    check("(a) the next one too", _who177(_g177),
+          "bridge <bridge@invalid>|bridge <bridge@invalid>|"
+          "bridge: iteration 178 (continue)")
+    check("(a) and the journal said it once, naming both keys",
+          [("user.name or user.email" in t) for t in _said177(_g177)],
+          [True])
+
+    print("   (b) a name and no address: the name is kept, the address is")
+    print("   the bridge's")
+    _work177(_g177h, 1)
+    daemon.git_commit_iteration(_g177h, 177, "continue")
+    check("(b) the configured half is the repository's",
+          _who177(_g177h), "half177 <bridge@invalid>|half177 "
+          "<bridge@invalid>|bridge: iteration 177 (continue)")
+    check("(b) and the line names only the missing key",
+          [("no user.email is configured" in t) for t in _said177(_g177h)],
+          [True])
+
+    print("   (c) THE CONTROL: an author the repository names is never")
+    print("   overridden, and nothing is said")
+    _work177(_g177u, 1)
+    daemon.git_commit_iteration(_g177u, 177, "continue")
+    check("(c) committed as the repository's own author", _who177(_g177u),
+          "suite177 <suite177@invalid>|suite177 <suite177@invalid>|"
+          "bridge: iteration 177 (continue)")
+    check("(c) with no line", _said177(_g177u), [])
+finally:
+    for _k, _v in _env177.items():
+        if _v is None:
+            os.environ.pop(_k, None)
+        else:
+            os.environ[_k] = _v
+    _forget177()
+post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+# ==CASES-132b==
+
+print("\n178. a call for the person reaches the planner the person talks to")
+print("     (home_pair) and the Mac's own notification - not only the pair's")
+print("     own planner. 2026-10-14 on the Mac: five calls about one pair went")
+print("     to that pair's planner and to nobody else, and of 57 calls over")
+print("     12-15.10, 40 were not about the pair whose planner talks to the")
+print("     owner. FAILURE WOULD LOOK LIKE: deliveries only to the pair's own")
+print("     planner and no notification - which is what HEAD does. -> 8.151")
+_a178 = os.path.join(TMP, "call-a")
+_h178 = os.path.join(TMP, "call-h")
+for _d178 in (_a178, _h178):
+    os.makedirs(_d178, exist_ok=True)
+_ka178, _kh178 = daemon.norm(_a178), daemon.norm(_h178)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _a178: {}, _h178: {}}})
+_tg178 = dict(daemon.CFG.get("telegram") or {})
+# on the code before 132b these are not there: its checks go red, not a
+# traceback that hides the rest (docs/writing-checks.md)
+_calls_pass178 = getattr(daemon, "calls_pass", lambda now_ts=None: None)
+_dx178 = daemon.deliver_ex
+_mac178 = (getattr(daemon, "IS_MAC", None), getattr(daemon, "MAC_NOTIFY", None),
+           daemon.CFG.get("mac_notify"), daemon.CFG.get("home_pair"))
+_to178 = []
+_notes178 = []
+
+
+def _deliver178(path, role, content, meta):
+    _to178.append((daemon.norm(path), role, (meta or {}).get("kind"),
+                   content))
+    return True, "ok"
+
+
+def _told178(tag):
+    # this case's two pairs only: a call an earlier case left held is
+    # delivered by whichever pass comes next, and is not this case's
+    return sorted((p, r, k) for p, r, k, c in _to178
+                  if tag in c and p in (_ka178, _kh178))
+
+
+def _lines178(tag):
+    return [r.get("text") or "" for r in daemon.store.recent_events(400)
+            if tag in (r.get("text") or "")]
+
+
+def _notes_reset178():
+    del _notes178[:]
+    with daemon._lock:
+        del getattr(daemon, "MAC_NOTE_TIMES", [])[:]
+        getattr(daemon, "MAC_NOTE_HELD", {}).clear()
+
+
+def _no_chat178():
+    # memory AND disk, as case 163 (a) found: save_config puts a token that
+    # is on disk back into the live config (8.115)
+    daemon.CFG["telegram"] = {"token": "", "chat_id": "",
+                              "pinned_message_id": 0}
+    with open(store.CONFIG_PATH, encoding="utf-8") as fh:
+        _disk = json.load(fh)
+    _disk["telegram"] = dict(daemon.CFG["telegram"])
+    with open(store.CONFIG_PATH, "w", encoding="utf-8") as fh:
+        json.dump(_disk, fh)
+
+
+def _calls_clear178():
+    with daemon._lock:
+        for _k in (_ka178, _kh178):
+            (daemon.STATE.get("calls") or {}).pop(_k, None)
+            for _r in ("planner", "executor"):
+                (daemon.STATE.get("asks") or {}).pop("%s|%s" % (_k, _r), None)
+
+
+daemon.deliver_ex = _deliver178
+daemon.IS_MAC = True
+daemon.MAC_NOTIFY = lambda argv: _notes178.append(list(argv))
+try:
+    print("   (e0) both switches are ones /config can reach - a switch")
+    print("   nobody can flip is no switch (rule 24) - and both are off by")
+    print("   default")
+    post("/config", {"home_pair": _h178, "mac_notify": True})
+    check("(e0) /config writes home_pair and mac_notify; by default the one "
+          "is empty and the other off",
+          (daemon.CFG.get("home_pair"), daemon.CFG.get("mac_notify"),
+           store.DEFAULT_CONFIG.get("home_pair"),
+           store.DEFAULT_CONFIG.get("mac_notify")),
+          (_h178, True, "", False))
+    _no_chat178()
+    tg_reset()
+    daemon.CFG["mac_notify"] = True
+    daemon.CFG["home_pair"] = _h178
+    _notes_reset178()
+    print("   (e1) a call about A: A's planner, the home planner H, and one")
+    print("   notification, with no sound anywhere in it")
+    daemon.notify("needs_you", "N178-1 a window of A is asking", path=_a178)
+    check("(e1) A's planner and H's planner, once each", _told178("N178-1"),
+          sorted([(_ka178, "planner", "info"), (_kh178, "planner", "info")]))
+    check("(e1) H is told whose call it is",
+          [c.startswith("The bridge needs the human for call-a:")
+           for p, r, k, c in _to178 if "N178-1" in c and p == _kh178],
+          [True])
+    check("(e1) one notification", len(_notes178), 1)
+    _argv178 = _notes178[0] if _notes178 else []
+    _script178 = [_argv178[i + 1] for i, _x in enumerate(_argv178[:-1])
+                  if _x == "-e"]
+    check("(e1) by osascript, the text in argv and not in the script, and "
+          "no sound",
+          (_argv178[:1], any("N178-1" in _x for _x in _script178),
+           any("N178-1" in _x for _x in _argv178[1:]),
+           "sound" in " ".join(_argv178).lower()),
+          (["/usr/bin/osascript"], False, True, False))
+    print("   (e2) a call about H itself goes to H's planner once")
+    _notes_reset178()
+    daemon.notify("needs_you", "N178-2 a window of H is asking", path=_h178)
+    check("(e2) only H's planner, once", _told178("N178-2"),
+          [(_kh178, "planner", "info")])
+    print("   (e3) no home_pair: only A's own planner - the published bridge")
+    _notes_reset178()
+    daemon.CFG.pop("home_pair", None)
+    daemon.notify("needs_you", "N178-3 a window of A asks again", path=_a178)
+    check("(e3) only A's planner", _told178("N178-3"),
+          [(_ka178, "planner", "info")])
+    print("   (e3b) a home_pair that is not a watched project is not used,")
+    print("   and says so once")
+    daemon.CFG["home_pair"] = os.path.join(TMP, "not-watched-178")
+    daemon.notify("needs_you", "N178-3B a window of A asks a third time",
+                  path=_a178)
+    daemon.notify("needs_you", "N178-3C a window of A asks a fourth time",
+                  path=_a178)
+    check("(e3b) only A's planner", _told178("N178-3B"),
+          [(_ka178, "planner", "info")])
+    check("(e3b) one line naming it",
+          len(_lines178("not-watched-178 is not a watched project")), 1)
+    daemon.CFG["home_pair"] = _h178
+    print("   (e4) mac_notify off, or not a Mac: no notification")
+    _notes_reset178()
+    daemon.CFG["mac_notify"] = False
+    daemon.notify("needs_you", "N178-4A asked with mac_notify off", path=_a178)
+    daemon.CFG["mac_notify"] = True
+    daemon.IS_MAC = False
+    daemon.notify("needs_you", "N178-4B asked on a PC", path=_a178)
+    daemon.IS_MAC = True
+    check("(e4) no notification either way", _notes178, [])
+    check("(e4) and the two planners still told",
+          (_told178("N178-4A"), _told178("N178-4B")),
+          (sorted([(_ka178, "planner", "info"), (_kh178, "planner", "info")]),
+           sorted([(_ka178, "planner", "info"), (_kh178, "planner", "info")])))
+    print("   (e5) five calls about A in a minute: one notification, and the")
+    print("   journal says how many were held back")
+    _notes_reset178()
+    for _i178 in range(5):
+        daemon.notify("needs_you", "N178-5.%d call number %d" % (_i178, _i178),
+                      path=_a178)
+    check("(e5) one notification", len(_notes178), 1)
+    check("(e5) the held-back ones are counted",
+          [l for l in _lines178("notification about call-a suppressed")
+           if "4 held back" in l][:1] != [], True)
+    print("   (e6) six an hour in all, whatever the pair")
+    _notes_reset178()
+    for _i178 in range(8):
+        _p178 = os.path.join(TMP, "call-n%d" % _i178)
+        getattr(daemon, "mac_notify", lambda p, x: None)(_p178, "N178-6 pair %d" % _i178)
+    check("(e6) six of eight different pairs", len(_notes178), 6)
+finally:
+    daemon.deliver_ex = _dx178
+    daemon.IS_MAC, daemon.MAC_NOTIFY = _mac178[0], _mac178[1]
+    for _n178, _v178 in (("mac_notify", _mac178[2]), ("home_pair", _mac178[3])):
+        if _v178 is None:
+            daemon.CFG.pop(_n178, None)
+        else:
+            daemon.CFG[_n178] = _v178
+    daemon.CFG["telegram"] = _tg178
+    store.save_config(daemon.CFG)
+    _notes_reset178()
+    _calls_clear178()
+
+
+print("\n179. a call about the planner itself does not go only into that")
+print("     planner's channel: a window on a dialog does not read it.")
+print("     2026-10-14 on the Mac: the planner of a pair stood on a")
+print("     permission dialog from 07:28 to 08:51, and five calls about it")
+print("     went into its own channel, 'ok', and nowhere else. FAILURE WOULD")
+print("     LOOK LIKE: [(A, planner, info)] - HEAD. -> 8.151")
+daemon.deliver_ex = _deliver178
+daemon.IS_MAC = True
+daemon.MAC_NOTIFY = lambda argv: _notes178.append(list(argv))
+_un179 = dict(daemon.STATE.get("unanswered") or {})
+try:
+    _no_chat178()
+    tg_reset()
+    daemon.CFG["mac_notify"] = True
+    daemon.CFG["home_pair"] = _h178
+    _notes_reset178()
+    _calls_clear178()
+    del _to178[:]
+    daemon.note_permission_ask(_a178, "planner", "Claude needs your "
+                               "permission to use Grep", "permission_prompt",
+                               tool="Grep")
+    daemon.tell_permission_ask(_a178, "planner",
+                               "report 8 is waiting behind it")
+    _calls_pass178(time.time() + 60)
+    check("A's planner on a dialog: H's planner told, A's not",
+          _told178("permission"), [(_kh178, "planner", "info")])
+    check("and the journal says why A's planner was not",
+          len(_lines178("not to the planner of call-a: it is the one "
+                        "asking")) >= 1, True)
+    print("   the same for silence: the pair held for unanswered reports")
+    with daemon._lock:
+        daemon.STATE.setdefault("unanswered", {})[_ka178] = \
+            daemon.silence_limit() - 1
+    daemon.note_silence(_a178, "call-a", 9)
+    check("note_silence: H's planner, not A's",
+          _told178("answered nothing"), [(_kh178, "planner", "info")])
+    with daemon._lock:
+        (daemon.STATE.get("paused") or {}).pop(_ka178, None)
+    print("   A IS home: no planner is told, and the line says the panel and")
+    print("   the notification are what is left")
+    daemon.end_permission_ask(_a178, "planner", "case 179")
+    _calls_pass178(time.time() + 60)
+    daemon.CFG["home_pair"] = _a178
+    _notes_reset178()
+    del _to178[:]
+    daemon.note_permission_ask(_a178, "planner", "Claude needs your "
+                               "permission to use Read", "permission_prompt",
+                               tool="Read")
+    daemon.tell_permission_ask(_a178, "planner", "nothing is behind it")
+    _calls_pass178(time.time() + 60)
+    check("home is A: no planner told", _told178("permission"), [])
+    check("the panel and the notification, and the line saying so",
+          (len(_notes178), len(_lines178("needs_you about the planner of "
+                                         "call-a reaches a person by the "
+                                         "panel and the Mac's "
+                                         "notification")) >= 1),
+          (1, True))
+    daemon.end_permission_ask(_a178, "planner", "case 179")
+    _calls_pass178(time.time() + 60)
+    print("   CONTROL: the EXECUTOR's dialog - its planner is free to read")
+    daemon.CFG["home_pair"] = _h178
+    del _to178[:]
+    daemon.note_permission_ask(_a178, "executor", "Claude needs your "
+                               "permission to use Bash", "permission_prompt",
+                               tool="Bash")
+    daemon.tell_permission_ask(_a178, "executor", "nothing is behind it")
+    _calls_pass178(time.time() + 60)
+    check("the executor's dialog: A's planner and H's",
+          _told178("permission"),
+          sorted([(_ka178, "planner", "info"), (_kh178, "planner", "info")]))
+    daemon.end_permission_ask(_a178, "executor", "case 179")
+    _calls_pass178(time.time() + 60)
+finally:
+    daemon.deliver_ex = _dx178
+    daemon.IS_MAC, daemon.MAC_NOTIFY = _mac178[0], _mac178[1]
+    for _n178, _v178 in (("mac_notify", _mac178[2]), ("home_pair", _mac178[3])):
+        if _v178 is None:
+            daemon.CFG.pop(_n178, None)
+        else:
+            daemon.CFG[_n178] = _v178
+    with daemon._lock:
+        daemon.STATE["unanswered"] = _un179
+        (daemon.STATE.get("paused") or {}).pop(_ka178, None)
+    daemon.CFG["telegram"] = _tg178
+    store.save_config(daemon.CFG)
+    _notes_reset178()
+    _calls_clear178()
+
+
+print("\n180. a call that closed by itself before anybody could read it is")
+print("     not delivered as a live one. Of 47 calls over 12-15.10, 12 closed")
+print("     in under a minute; on 2026-10-14 a planner wrote of three: 'this")
+print("     is a false alarm'. The chat and the panel still go at once; the")
+print("     rest waits CALL_HOLD_SEC and asks again. FAILURE WOULD LOOK LIKE:")
+print("     a delivery the moment the call is made - HEAD. -> 8.151")
+daemon.deliver_ex = _deliver178
+_lv180 = dict(daemon.STATE.get("last_verdict") or {})
+
+
+def _notify180(kind, text, **kw):
+    # the code before 132b takes neither about nor call: it is told plainly,
+    # and (e) goes red rather than ending the suite in a traceback
+    import inspect
+    if "call" not in inspect.signature(daemon.notify).parameters:
+        kw.pop("about", None), kw.pop("call", None)
+    return daemon.notify(kind, text, **kw)
+
+
+try:
+    _no_chat178()
+    tg_reset()
+    daemon.CFG["home_pair"] = _h178
+    _calls_clear178()
+    del _to178[:]
+    with daemon._lock:
+        del daemon.PANEL_ALERTS[:]
+    _b180 = "(permission|executor) closed before delivery"
+    _e180 = ("(report|planner) closed before delivery",
+             "(waiting|) closed before delivery")
+    _n180 = [len(_lines178(_t)) for _t in (_b180,) + _e180]
+    print("   (a) the executor's dialog: nothing past the panel at once")
+    daemon.note_permission_ask(_a178, "executor", "Claude needs your "
+                               "permission to use Bash", "permission_prompt",
+                               tool="Bash")
+    # its own words: case 179's control said the same of the same dialog a
+    # moment ago, and notify drops the same fact said twice (notify_repeat_sec)
+    daemon.tell_permission_ask(_a178, "executor", "case 180 (a) is behind it")
+    check("(a) no delivery yet", _told178("permission"), [])
+    check("(a) the panel has it at once",
+          any("permission" in (a.get("text") or "")
+              and a.get("path") == _ka178
+              for a in (get("/state").get("alerts") or [])), True)
+    print("   (b) answered inside the hold: nothing is delivered, one line")
+    daemon.end_permission_ask(_a178, "executor", "case 180 (b)")
+    _calls_pass178(time.time() + 60)
+    check("(b) no delivery", _told178("permission"), [])
+    check("(b) one line saying so", len(_lines178(_b180)), _n180[0] + 1)
+    check("(b) and the record is gone",
+          (daemon.STATE.get("calls") or {}).get(_ka178), None)
+    print("   (c) CONTROL: still open after the hold - delivered once")
+    daemon.note_permission_ask(_a178, "executor", "Claude needs your "
+                               "permission to use Edit", "permission_prompt",
+                               tool="Edit")
+    daemon.tell_permission_ask(_a178, "executor", "nothing is behind it")
+    _calls_pass178(time.time() + 10)
+    check("(c) not before the hold is over", _told178("permission"), [])
+    _calls_pass178(time.time() + 60)
+    check("(c) A's planner and H's, once each", _told178("permission"),
+          sorted([(_ka178, "planner", "info"), (_kh178, "planner", "info")]))
+    _calls_pass178(time.time() + 120)
+    check("(c) a second pass delivers nothing more", len(_told178("permission")),
+          2)
+    daemon.end_permission_ask(_a178, "executor", "case 180 (c)")
+    _calls_pass178(time.time() + 180)
+    check("(c) answered after delivery: the record goes",
+          (daemon.STATE.get("calls") or {}).get(_ka178), None)
+    print("   (d) a call that cannot close by itself goes at once")
+    del _to178[:]
+    daemon.notify("needs_you", "N180-D the executor is not taking the "
+                  "verdict and its channel is gone", path=_a178)
+    check("(d) at once, to both", _told178("N180-D"),
+          sorted([(_ka178, "planner", "info"), (_kh178, "planner", "info")]))
+    print("   (e) a report's call closes when a verdict reaches the bridge,")
+    print("   and a wait's when the pair is no longer waiting on the person")
+    _notify180("needs_you", "N180-E the planner has not answered report "
+               "7", path=_a178, about="planner", call=("report", 7))
+    with daemon._lock:
+        daemon.STATE.setdefault("last_verdict", {})[_ka178] = {
+            "v": "continue", "at": time.time() + 1}
+    with daemon._lock:
+        daemon.STATE.setdefault("waiting_on_you", {})[_ka178] = {
+            "since": time.time(), "why": "case 180"}
+    _notify180("needs_you", "N180-W the planner is waiting on you",
+               path=_a178, call=("waiting", None))
+    with daemon._lock:
+        daemon.STATE["waiting_on_you"].pop(_ka178, None)
+    _calls_pass178(time.time() + 60)
+    check("(e) neither delivered", (_told178("N180-E"), _told178("N180-W")),
+          ([], []))
+    check("(e) each closed by its own witness",
+          (len(_lines178(_e180[0])), len(_lines178(_e180[1]))),
+          (_n180[1] + 1, _n180[2] + 1))
+    print("   (f) the record is in the inventory: a moved project's calls")
+    print("   move, a removed project's go")
+    check("(f) STATE_PATHS names it by path",
+          daemon.STATE_PATHS.get("calls"), "path")
+    _new180 = daemon.norm(os.path.join(TMP, "call-a-moved"))
+    with daemon._lock:
+        daemon.STATE.setdefault("calls", {})[_ka178] = {
+            "permission|executor": {"family": "permission", "ref": 1}}
+        daemon.move_state_keys(_ka178, _new180)
+        _moved180 = (_new180 in daemon.STATE["calls"],
+                     _ka178 in daemon.STATE["calls"])
+    check("(f) moved", _moved180, (True, False))
+    with daemon._lock:
+        daemon.drop_project_state(_new180)
+    check("(f) removed", _new180 in (daemon.STATE.get("calls") or {}), False)
+    print("   (g) no token or chat id: the journal says 'not configured', not")
+    print("   that a send came back empty")
+    del _to178[:]
+    daemon.notify("needs_you", "N180-G nothing configured", path=_a178)
+    check("(g) not configured",
+          [l for l in _lines178("N180-G") if "-> telegram" in l
+           or "telegram" in l][:1] != [] and
+          all("no message id came back" not in l
+              for l in _lines178("N180-G")) and
+          any("telegram not configured" in l for l in _lines178("N180-G")),
+          True)
+    print("   CONTROL: a chat that is set up and fails is still a failed send")
+    daemon.CFG["telegram"] = {"token": "test-token", "chat_id": "42",
+                              "pinned_message_id": 0}
+    TG_FAIL.add("sendMessage")
+    try:
+        daemon.notify("needs_you", "N180-G2 configured and failing",
+                      path=_a178)
+    finally:
+        TG_FAIL.discard("sendMessage")
+    check("(g) a failed send", any("no message id came back" in l
+                                   for l in _lines178("N180-G2")), True)
+finally:
+    daemon.deliver_ex = _dx178
+    for _n178, _v178 in (("home_pair", _mac178[3]),):
+        if _v178 is None:
+            daemon.CFG.pop(_n178, None)
+        else:
+            daemon.CFG[_n178] = _v178
+    with daemon._lock:
+        daemon.STATE["last_verdict"] = _lv180
+        (daemon.STATE.get("waiting_on_you") or {}).pop(_ka178, None)
+    daemon.CFG["telegram"] = _tg178
+    store.save_config(daemon.CFG)
+    TG_FAIL.discard("sendMessage")
+    _calls_clear178()
+post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n181. a turn of the executor's that has not ended for long_turn is")
+print("     news for the planner: no report is lost, none was made. A")
+print("     watched project, 2026-10-15: no Stop and no turn end from 15:35")
+print("     to 18:57, and at 18:56 the planner told its executor the bridge")
+print("     was not carrying reports. FAILURE WOULD LOOK LIKE: nothing said")
+print("     - HEAD has no such function. -> 8.151")
+_p181 = os.path.join(TMP, "long-turn")
+os.makedirs(_p181, exist_ok=True)
+_k181 = daemon.norm(_p181)
+_tp181 = os.path.join(_p181, "transcript.jsonl")
+_long_turn181 = getattr(daemon, "long_turn_note",
+                        lambda path, now_ts=None: "no long_turn_note")
+_dx181, _tpf181, _ew181 = (daemon.deliver_ex, daemon.transcript_path_for,
+                           daemon.executor_is_working)
+_to181 = []
+_working181 = [True]
+
+
+def _iso181(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t))
+
+
+def _transcript181(end):
+    with open(_tp181, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "system", "subtype": "turn_duration",
+                             "timestamp": _iso181(end)}) + "\n")
+        fh.write(json.dumps({"type": "user", "timestamp": _iso181(end + 5),
+                             "message": {"content": "the next task"}}) + "\n")
+        fh.write(json.dumps({"type": "assistant",
+                             "timestamp": _iso181(end + 10),
+                             "message": {"content": []}}) + "\n")
+
+
+def _said181():
+    return len([c for p, r, c in _to181
+                if p == _k181 and r == "planner" and "has not ended since" in c])
+
+
+daemon.deliver_ex = (lambda path, role, content, meta:
+                     (_to181.append((daemon.norm(path), role, content)) or
+                      (True, "ok")))
+daemon.transcript_path_for = lambda path, role: _tp181
+daemon.executor_is_working = lambda path: _working181[0]
+try:
+    with daemon._lock:
+        daemon.STATE.setdefault("loops", {})[_k181] = {"active": True}
+        daemon.STATE.setdefault("pids", {})["%s|executor" % _k181] = {
+            "pid": os.getpid()}
+    _now181 = time.time()
+    _transcript181(_now181 - 2800)
+    getattr(daemon, "LONG_TURN_TOLD", {}).pop(_k181, None) \
+        if hasattr(daemon, "LONG_TURN_TOLD") else None
+    _r181 = getattr(daemon, "long_turn_note", lambda p, now_ts=None: "absent")(
+        _p181, now_ts=_now181)
+    check("a turn open 46 min: the planner is told once", (_r181, _said181()),
+          ("told", 1))
+    check("in so many words",
+          [("This is not a carrying fault" in c, "No report from the "
+            "executor since" in c) for p, r, c in _to181][:1],
+          [(True, True)])
+    check("a second pass says nothing", (_long_turn181(
+        _p181, now_ts=_now181 + 60), _said181()), ("said already", 1))
+    check("an hour on, it is said again",
+          (_long_turn181(_p181, now_ts=_now181 + 3700), _said181()),
+          ("told", 2))
+    print("   CONTROL: a turn that ended ten minutes ago")
+    getattr(daemon, "LONG_TURN_TOLD", {}).pop(_k181, None)
+    _transcript181(_now181 - 600)
+    check("a recent end: nothing", (_long_turn181(
+        _p181, now_ts=_now181), _said181()),
+          ("the turn is younger than long_turn", 2))
+    print("   CONTROL: a frozen window is stalled()'s, not this")
+    _transcript181(_now181 - 2800)
+    _working181[0] = False
+    check("not working: nothing", (_long_turn181(
+        _p181, now_ts=_now181), _said181()),
+          ("not working - a frozen window is stalled()'s", 2))
+    _working181[0] = True
+    print("   CONTROL: a report with the planner")
+    daemon.PENDING[_k181] = {"n": 9, "event": threading.Event()}
+    try:
+        check("a report pending: nothing", (_long_turn181(
+            _p181, now_ts=_now181), _said181()),
+              ("a report is with the planner", 2))
+    finally:
+        daemon.PENDING.pop(_k181, None)
+    print("   CONTROL: the loop off")
+    with daemon._lock:
+        daemon.STATE["loops"][_k181]["active"] = False
+    check("loop off: nothing", (_long_turn181(
+        _p181, now_ts=_now181), _said181()), ("loop off or paused", 2))
+finally:
+    daemon.deliver_ex, daemon.transcript_path_for = _dx181, _tpf181
+    daemon.executor_is_working = _ew181
+    with daemon._lock:
+        (daemon.STATE.get("loops") or {}).pop(_k181, None)
+        (daemon.STATE.get("pids") or {}).pop("%s|executor" % _k181, None)
+    getattr(daemon, "LONG_TURN_TOLD", {}).pop(_k181, None)
+
+
+print("\n182. a background job handed to the new window at a swap is not")
+print("    ended by the new window's Stop")
+print("    Read in the code on 2026-10-15 (batch 132b), not seen in a")
+print("    journal.")
+print("    A handover stops the old window WITHOUT its tree and hands its")
+print("    background records to the new session (bg_session_gone, 8.31):")
+print("    session = the new one, from_session = the old one. The new")
+print("    client never launched the job, so its Stop's background_tasks")
+print("    never names it - and close_at_stop read the record as the new")
+print("    session's own and closed it: \"Background command ended ... no")
+print("    longer names it\". The next `wait` then found nothing running and")
+print("    called a person about a pair whose job still ran. A handed record")
+print("    ends by the shells the old window left (inherited_jobs_over) or")
+print("    by the ceiling (BG_MAX_SEC), never by the new client's list.")
+_p182 = os.path.join(TMP, "handed-182")
+os.makedirs(_p182, exist_ok=True)
+_k182 = canon(_p182)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p182: {}}})
+post_rc("/loop", {"action": "start", "project": _p182})
+_A182, _B182, _C182, _PL182 = ("ha182-ex", "hb182-ex", "hc182-ex",
+                               "hp182-pl")
+_SHELL182 = ("b182shel1", "bash tools/soak_182.sh")
+_NONE182 = ("b182none2", "bash tools/render_182.sh")
+_OWN182 = ("b182own03", "bash tools/own_182.sh")
+_DEEP182 = ("b182deep4", "bash tools/deep_182.sh")
+_out182 = {}
+_sh182 = []
+
+
+def _ev182(name, sid, **extra):
+    body = {"hook_event_name": name, "role": "executor", "session_id": sid,
+            "project_dir": _p182, "cwd": _p182}
+    body.update(extra)
+    return post_rc("/event", body)
+
+
+def _launch182(sid, job):
+    """A background Bash launch, in the shape a real client sends it: the
+    PostToolUse names the job the way the Stop's list will (8.24)."""
+    bgid, cmd = job
+    tin = {"command": cmd, "description": "run it", "run_in_background": True}
+    _ev182("PreToolUse", sid, tool_name="Bash", tool_input=tin,
+           tool_use_id="toolu_" + bgid)
+    _ev182("PostToolUse", sid, tool_name="Bash", tool_input=tin,
+           tool_use_id="toolu_" + bgid, duration_ms=900,
+           tool_response={"stdout": "", "stderr": "", "interrupted": False,
+                          "isImage": False, "noOutputExpected": False,
+                          "backgroundTaskId": bgid})
+
+
+def _rec182(job):
+    """The record of this job in the live answer, or {} - what every
+    watchdog reads (inflight_live)."""
+    return next((dict(m) for m in (daemon.inflight_live(_p182) or [])
+                 if (m or {}).get("bgid") == job[0]), {})
+
+
+def _write182(job, **fields):
+    """Put fields on the job's record in memory and on disk, as
+    stop_window does with `orphans`."""
+    for m in (daemon.PROCTRACK.get(_k182) or {}).values():
+        if isinstance(m, dict) and m.get("bgid") == job[0]:
+            m.update(fields)
+    with daemon._lock:
+        for m in ((daemon.STATE.get("inflight") or {}).get(_k182)
+                  or {}).values():
+            if isinstance(m, dict) and m.get("bgid") == job[0]:
+                m.update(fields)
+        daemon.save_state()
+
+
+def _swap182(new_sid, old_window):
+    """The new window of the half comes up while a handover replaces the
+    old one: the record handover() writes, then the SessionStart. The
+    planner is left in `waiting` so resume_after_handover stops nothing;
+    the record goes once the hand-over has happened."""
+    with daemon._lock:
+        daemon.STATE.setdefault("handover", {})[_k182] = {
+            "at": time.time(), "reason": "case 182",
+            "roles": ["executor"], "waiting": ["executor", "planner"],
+            "stop_after": {"executor": old_window}}
+        daemon.save_state()
+    _ev182("SessionStart", new_sid, source="startup")
+    until(lambda: ((daemon.STATE.get("handover") or {}).get(_k182) or {})
+          .get("waiting") == ["planner"], 15)
+    with daemon._lock:
+        (daemon.STATE.get("handover") or {}).pop(_k182, None)
+        daemon.save_state()
+    register(_p182, "executor", new_sid)
+
+
+def _turn182(tag, sid, text, tasks):
+    _out182[tag] = post("/event", {
+        "hook_event_name": "Stop", "role": "executor", "session_id": sid,
+        "project_dir": _p182, "cwd": _p182, "last_assistant_message": text,
+        "background_tasks": tasks})
+
+
+def _wait182(tag, sid, feedback):
+    """One turn of `sid` ends with an EMPTY list of running tasks - the new
+    client never started the handed jobs - and the planner answers wait.
+    Gives back whether a person was called."""
+    with daemon._lock:
+        daemon.STATE.get("waiting_on_you", {}).pop(_k182, None)
+        daemon.save_state()
+    _t = threading.Thread(target=_turn182,
+                          args=(tag, sid, "turn " + tag, []), daemon=True)
+    _t.start()
+    check("(%s) precondition: its report is waiting" % tag,
+          until(lambda: bool(_k182 in daemon.PENDING), 25), True)
+    post("/verdict", {"project": _p182, "verdict": "wait",
+                      "feedback": feedback}, secret=True)
+    _t.join(40)
+    check("(%s) precondition: the Stop hook has its answer" % tag,
+          _t.is_alive(), False)
+    return bool((daemon.STATE.get("waiting_on_you") or {}).get(_k182))
+
+
+def _said182(words):
+    return [r.get("text") or "" for r in daemon.store.recent_events(
+        600, project=_p182)
+        if words in (r.get("text") or "")]
+
+
+_WORK182 = ("Checked it: the soak and the render are both still going. " + (
+    "When the soak log closes, read its last block and put the frame counts "
+    "into section 5; the render goes to the same folder. ") * 3)
+_NO182 = object()
+_ih182 = daemon.CFG.setdefault("thresholds", {}).get("idle_hold", _NO182)
+daemon.CFG["thresholds"]["idle_hold"] = 0
+try:
+    for _r, _s in (("executor", _A182), ("planner", _PL182)):
+        post_rc("/event", {"hook_event_name": "SessionStart", "role": _r,
+                           "session_id": _s, "project_dir": _p182,
+                           "cwd": _p182})
+        register(_p182, _r, _s)
+    _launch182(_A182, _SHELL182)
+    _launch182(_A182, _NONE182)
+    check("precondition: the old window's two jobs are tracked, with the "
+          "client's ids",
+          (_rec182(_SHELL182).get("session"),
+           _rec182(_NONE182).get("session")),
+          (_A182, _A182))
+    _W182 = dead_pid()
+    _swap182(_B182, _W182)
+    check("precondition: both records were handed to the new session, "
+          "naming the old one and its window",
+          [(_rec182(j).get("session"), _rec182(j).get("from_session"),
+            _rec182(j).get("from_window")) for j in (_SHELL182, _NONE182)],
+          [(_B182, _A182, _W182)] * 2)
+    check("precondition: no shell of the old window is known yet",
+          [_rec182(j).get("orphans") for j in (_SHELL182, _NONE182)],
+          [None, None])
+
+    print("   (a) the new window's Stop lists nothing running, and the")
+    print("   planner answers wait")
+    print("   FAILURE WOULD LOOK LIKE: both records closed as \"no longer")
+    print("   names it\", and a person called about a pair whose jobs run")
+    check("(a) nobody is called",
+          _wait182("a", _B182, _WORK182), False)
+    check("(a) both handed records are still open",
+          [bool(_rec182(j)) for j in (_SHELL182, _NONE182)], [True, True])
+    check("(a) and no line called either of them ended by the new list",
+          [l for l in _said182("no longer names it")
+           if _SHELL182[0] in l or _NONE182[0] in l], [])
+    check("(a) the planner's words came back on the Stop hook",
+          "frame counts into section 5" in json.dumps(
+              _out182.get("a"), ensure_ascii=False), True)
+
+    print("   (b) CONTROL: a job the new window launched itself is still")
+    print("   ended by its own list")
+    _launch182(_B182, _OWN182)
+    check("(b) precondition: its own job is tracked as its own",
+          (_rec182(_OWN182).get("session"),
+           _rec182(_OWN182).get("from_session")), (_B182, None))
+    check("(b) nobody is called - the handed jobs still run",
+          _wait182("b", _B182, _WORK182), False)
+    check("(b) its own job's record is closed by its own list",
+          bool(_rec182(_OWN182)), False)
+    check("(b) and the line says so, naming the job",
+          len([l for l in _said182("no longer names it")
+               if _OWN182[0] in l]), 1)
+    check("(b) the handed records are untouched by it",
+          [bool(_rec182(j)) for j in (_SHELL182, _NONE182)], [True, True])
+
+    print("   (c) CONTROL: a handed record ends when the shells the old")
+    print("   window left are gone - written as stop_window writes them")
+    _sh = subprocess.Popen([sys.executable, "-c",
+                            "import time" + chr(10) + "time.sleep(900)"],
+                           creationflags=getattr(subprocess,
+                                                 "CREATE_NO_WINDOW", 0))
+    _sh182.append(_sh)
+    STAND_INS.append(_sh)
+    for _j in (_SHELL182, _NONE182):
+        _write182(_j, orphans=[_sh.pid])
+    daemon.check_processes()
+    check("(c) while the shell lives, both are open",
+          [bool(_rec182(j)) for j in (_SHELL182, _NONE182)], [True, True])
+    _sh.kill()
+    _sh.wait(20)
+    daemon.check_processes()
+    check("(c) the shell gone, both records are closed",
+          [bool(_rec182(j)) for j in (_SHELL182, _NONE182)], [False, False])
+    _ended = [l for l in _said182("Background job ended")
+              if "_182.sh" in l]
+    check("(c) one line each, naming the window that left them",
+          (len(_ended), all("replaced window %s" % _W182 in l
+                            for l in _ended)), (2, True))
+    check("(c) and with nothing running now, the next wait calls you",
+          _wait182("c", _B182, _WORK182), True)
+
+    print("   (d) THE LIMIT: a handed record with no shell known - the")
+    print("   old window's children could not be read - ends only at the")
+    print("   ceiling, and until then a wait calls nobody")
+    _launch182(_B182, _DEEP182)
+    _W2182 = dead_pid()
+    _swap182(_C182, _W2182)
+    check("(d) precondition: handed to the third window, no shell known",
+          (_rec182(_DEEP182).get("session"),
+           _rec182(_DEEP182).get("from_session"),
+           _rec182(_DEEP182).get("orphans")), (_C182, _B182, None))
+    check("(d) nobody is called while it is under the ceiling",
+          _wait182("d", _C182, _WORK182), False)
+    check("(d) and the record is still open", bool(_rec182(_DEEP182)), True)
+    _write182(_DEEP182,
+              started=time.time() - daemon.BG_MAX_SEC - 120)
+    check("(d) past BG_MAX_SEC it is no longer counted as running",
+          bool(_rec182(_DEEP182)), False)
+    check("(d) and the next wait calls you",
+          _wait182("d2", _C182, _WORK182), True)
+finally:
+    if _ih182 is _NO182:
+        daemon.CFG["thresholds"].pop("idle_hold", None)
+    else:
+        daemon.CFG["thresholds"]["idle_hold"] = _ih182
+    for _sh in _sh182:
+        if _sh.poll() is None:
+            _sh.kill()
+            _sh.wait(20)
+    daemon.PROCTRACK.pop(_k182, None)
+    with daemon._lock:
+        daemon.STATE.get("waiting_on_you", {}).pop(_k182, None)
+        (daemon.STATE.get("inflight") or {}).pop(_k182, None)
+        (daemon.STATE.get("handover") or {}).pop(_k182, None)
+        daemon.save_state()
+post_rc("/loop", {"action": "stop", "project": _p182})
+post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n183. the walk of case 49 again, as the suite's LAST case: a")
+print("   container first filled after case 49 is walked too")
+print("   case 49 called itself LAST and stood at 49 of 177, so a container")
+print("   a later case fills first was never walked - and one missing from")
+print("   STATE_PATHS is invisible to move_state_keys and drop_project_state")
+print("   alike (the verdict on 140, 132b). Keep this the last case")
+_late183 = sorted(n for n, v in daemon.STATE.items()
+                  if v and n not in _filled49 and not _PATHY.search(n))
+print("   filled only after case 49: %d - %s"
+      % (len(_late183), ", ".join(_late183) or "none"))
+check("every path in this daemon's STATE lies where the inventory says, "
+      "after every case", inventory_walk()[0], [])
+
+
 for _si in STAND_INS:
     try:
         sessions.terminate_and_wait(_si.pid)
@@ -25168,6 +26187,9 @@ while time.time() < _until:
         _t.join(max(0.0, min(5.0, _until - time.time())))
 _left = [_n for _, _n in _bridge_threads()]
 print("   waited %.0f s for the bridge's threads" % (time.time() - _waited))
+check("nothing this run did reached past this machine: the fence was up, "
+      "and it refused nothing (netfence.py, 8.142)",
+      (netfence.up(), netfence.refused()), (True, []))
 if TMUX_HOME:
     check("no tmux server this run started still listens - their sockets "
           "are in its own folder, which goes with it (8.103)",

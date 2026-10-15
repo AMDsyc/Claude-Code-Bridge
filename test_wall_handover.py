@@ -60,6 +60,13 @@ os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(TMP, "claude-home")
 os.environ["PYTHONUTF8"] = "1"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# NOTHING THIS RUN DOES REACHES PAST THIS MACHINE (DECISIONS.md 8.142): the
+# fence refuses it and writes it down, and the last check fails on what it
+# wrote. The Bot API is a recorder on 127.0.0.1, put up before the
+# package reads BRIDGE_TELEGRAM_API.
+from bridgecore import netfence                # noqa: E402
+netfence.fence(os.path.join(TMP, "netfence.jsonl"))
+TGAPI = netfence.telegram()
 from bridgecore import daemon, sessions, store, telegram      # noqa: E402
 
 FAILED = []
@@ -1084,17 +1091,20 @@ check("while the offer to rename is still open",
       bool(daemon.NAMEWAIT.get(daemon.norm(NAMEPROJ))), True)
 check("and it was asked for over telegram",
       any("Reply to this message" in t for _, t in TG), True)
+# no offer open is a FAIL said above, not a crash that would hide the cases
+# after it (batch 132b: a sabotage that refused this handover crashed here)
 waiter = daemon.NAMEWAIT.get(daemon.norm(NAMEPROJ))
-waiter["name"] = "a better name"
-waiter["event"].set()
-for _ in range(100):
+if waiter:
+    waiter["name"] = "a better name"
+    waiter["event"].set()
+for _ in range(100 if waiter else 0):
     if (daemon.STATE.get("seed") or {}).get(
             daemon.norm(NAMEPROJ), {}).get("title") == "a better name":
         break
     time.sleep(0.05)
 check("a name that arrives in time replaces it in the seed",
-      (daemon.STATE.get("seed") or {})[daemon.norm(NAMEPROJ)]["title"],
-      "a better name")
+      ((daemon.STATE.get("seed") or {}).get(daemon.norm(NAMEPROJ)) or {})
+      .get("title"), "a better name")
 daemon.CFG["telegram"]["chat_id"] = ""
 
 print("\nA8. the pending-start guard: no second window while one is starting")
@@ -1648,6 +1658,324 @@ check("and the bridge says it is compacting, as it always did",
 
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 68)
+print("SCENARIO E - a replacement decided at the wall, and the loop goes off")
+print("=" * 68)
+print("    2026-10-15 22:42:33, a watched project: the executor wrote its")
+print("    handoff at the wall, its last report went to the planner, and the")
+print("    planner answered `stop` - the pair was moving to another machine.")
+print("    The loop went off, and at 22:42:35 the replacement decided before")
+print("    the verdict was opened anyway: a new window, in a pair nobody was")
+print("    working. A wall replacement is the bridge's own move for a pair")
+print("    that goes on working; the panel's button is the owner's, and is")
+print("    not refused for it.")
+_STANDS_E = []
+
+
+def _proj_e(tag):
+    p = os.path.join(TMP, "wall-off-" + tag)
+    os.makedirs(p, exist_ok=True)
+    with open(os.path.join(p, "run.log"), "w", encoding="utf-8") as fh:
+        fh.write("exit 0\n")
+    for _key in (p, daemon.norm(p)):
+        daemon.CFG["projects"][_key] = {
+            "wall_compactions": {"executor": 1, "planner": 5},
+            "wall_computed": {"executor": False}}
+    return p
+
+
+def _up_e(p, role, sid, port, tokens):
+    launch_from_panel(p, role)
+    hook("SessionStart", role, sid, proj=p, transcript_path="")
+    post("/channel/register", {"project": p, "role": role, "port": port,
+                               "pid": 4242, "session_id": sid}, secret=True)
+    statusline(role, sid, tokens, proj=p)
+
+
+def _alive_e(p, role="executor"):
+    """The role's window is ALIVE, as A4b's is: the stub windows exit
+    once they have recorded themselves, and a handover refuses a half it
+    cannot name (8.36). The record is written now, for the process born
+    now (8.51)."""
+    w = _sp31.Popen([sys.executable, "-c",
+                     "import time" + chr(10) + "time.sleep(600)"],
+                    creationflags=0x08000000 if os.name == "nt" else 0)
+    _STANDS_E.append(w)
+    with daemon._lock:
+        rec = daemon.STATE.setdefault("pids", {}).setdefault(
+            "%s|%s" % (daemon.norm(p), role), {})
+        rec.pop("stopped_at", None)
+        rec["pid"] = w.pid
+        rec["at"] = time.time()
+        daemon.save_state()
+    return w.pid
+
+
+def _wall_e(p, sid):
+    """One compaction that lands: with the cap at one, that is the wall."""
+    statusline("executor", sid, 806000, proj=p)
+    hook("PreCompact", "executor", sid, proj=p, transcript_path="")
+    statusline("executor", sid, 280000, proj=p)
+
+
+def _turn_e(p, sid, msg, verdict, feedback=OKFB, between=None):
+    """finish_turn for a project of its own. `between` runs once the report
+    is waiting and before the verdict is sent: a person's hand in the
+    panel while the planner reads."""
+    out = {}
+
+    def run():
+        out.update(hook("Stop", "executor", sid, proj=p,
+                        last_assistant_message=msg) or {})
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    if daemon.loop_state(p)[1].get("active"):
+        for _ in range(400):
+            if daemon.PENDING.get(daemon.norm(p)):
+                if between:
+                    between()
+                out["verdict_answer"] = post(
+                    "/verdict", {"project": p, "verdict": verdict,
+                                 "feedback": feedback}, secret=True)
+                break
+            if not t.is_alive():
+                break
+            time.sleep(0.05)
+    t.join(90)
+    return out
+
+
+def _handoff_e(p, text):
+    f = os.path.join(p, "bridge-logs", time.strftime("%Y-%m-%d"),
+                     "handoff", "201-shift.md")
+    try:
+        os.makedirs(os.path.dirname(f), exist_ok=True)
+    except OSError:
+        pass
+    io.open(f, "w", encoding="utf-8").write(text)
+    return f
+
+
+def _dropped_e(p):
+    return [r.get("text") or "" for r in
+            daemon.store.recent_events(600, project=p)
+            if "Handover at the wall dropped" in (r.get("text") or "")]
+
+
+def _opening_e(p):
+    return len([r for r in daemon.store.recent_events(600, project=p)
+                if "Opening a executor window" in (r.get("text") or "")])
+
+
+def _under_way_e(p):
+    return bool((daemon.STATE.get("handover") or {}).get(daemon.norm(p)))
+
+
+def _launched_e(before):
+    """Wait for a launch's own record, then join what started it."""
+    end = time.time() + 30
+    while len(launches()) <= before and time.time() < end:
+        time.sleep(0.05)
+    settled()
+    return len(launches()) - before
+
+
+PE = _proj_e("e")
+PEX, PEP = "wall-off-ex-1", "wall-off-pl-1"
+_up_e(PE, "planner", PEP, PL_PORT, 90000)
+_up_e(PE, "executor", PEX, EX_PORT, 120000)
+post("/loop", {"project": PE, "action": "start"})
+_alive_e(PE)
+
+print("\nE1. at the wall, the handoff written, the planner answers stop")
+_wall_e(PE, PEX)
+check("precondition: the executor is at its wall",
+      daemon.plan_for(sess_of("executor", PE), PE)["do"], "handover")
+_turn_e(PE, PEX, "a piece of work, the wall is reached", "continue")
+check("precondition: the turn after the wall asked for the handoff",
+      bool(_pend(PE, "executor")), True)
+_hf_e = _handoff_e(PE, u"# the shift handoff\n\nE1 - the thread itself\n")
+_before_e = len(launches())
+_drop0_e = len(_dropped_e(PE))
+_open0_e = _opening_e(PE)
+_out_e1 = _turn_e(PE, PEX, "%s %s\n\nthe pair moves to the other machine"
+                  % (_MARK, _hf_e), "stop")
+note("the planner's stop was taken", (_out_e1.get("verdict_answer")
+                                       or {}).get("ok"))
+check("precondition: the stop turned the loop off",
+      daemon.loop_state(PE)[1].get("active"), False)
+note("anything the wall started, waited for", settled())
+print("    FAILURE WOULD LOOK LIKE: a window opened two seconds after the")
+print("    stop, as at 22:42:35")
+check("E1: no window was opened", len(launches()) - _before_e, 0)
+check("E1: and no 'Opening a executor window' line",
+      _opening_e(PE) - _open0_e, 0)
+check("E1: and no handover is under way", _under_way_e(PE), False)
+_d1_e = _dropped_e(PE)
+check("E1: one line says it was dropped, and why",
+      (len(_d1_e) - _drop0_e,
+       any("the loop is off" in l for l in _d1_e)), (1, True))
+note("the line", _d1_e[0] if _d1_e else "")
+note("what the window was told on the hook (not changed by 132b)",
+     ((_out_e1.get("hook_output") or {}).get("stopReason") or "")[:200])
+print("    and no demand is left with the refusal's clock: the next Stop")
+print("    with the loop working asks for a current handoff")
+check("E1: no demand is on record for the executor",
+      bool(_pend(PE, "executor")), False)
+
+print("\nE1b. the other automatic road, assess(), with the loop off: it does")
+print("     not replace either, and says so ONCE, not once a minute")
+backdate("executor", proj=PE)
+backdate("planner", proj=PE)
+_before_e = len(launches())
+_drop0_e = len(_dropped_e(PE))
+_saw0_e = len([r for r in daemon.store.recent_events(
+    600, project=PE)
+    if "not replaced" in (r.get("text") or "")])
+_res_e = [daemon.assess(PE), daemon.assess(PE)]
+note("assess, twice", _res_e)
+note("anything assess started, waited for", settled())
+check("E1b: neither pass decided a replacement",
+      ["handing over" in (r.get("did") or "") for r in _res_e],
+      [False, False])
+check("E1b: both say why",
+      ["the loop is off" in (r.get("did") or "") for r in _res_e],
+      [True, True])
+check("E1b: no window was opened", len(launches()) - _before_e, 0)
+check("E1b: no dropped line from either pass - nothing was started",
+      len(_dropped_e(PE)) - _drop0_e, 0)
+check("E1b: and the journal heard it once",
+      len([r for r in daemon.store.recent_events(
+          600, project=PE)
+          if "not replaced" in (r.get("text") or "")]) - _saw0_e, 1)
+
+print("\nE2. the loop on again; the handoff written again; a person pauses")
+print("    the pair while the planner reads, and the planner answers wait")
+post("/loop", {"project": PE, "action": "start"})
+_before_e = len(launches())
+_turn_e(PE, PEX, "a piece of work with the loop back on", "continue")
+check("E2: the first Stop with the loop on asks for the handoff afresh",
+      bool(_pend(PE, "executor")), True)
+check("E2: and opens nothing yet", len(launches()) - _before_e, 0)
+_hf_e = _handoff_e(PE, u"# the shift handoff\n\nE2 - the thread, again, "
+                       u"after the loop came back\n")
+_before_e = len(launches())
+_drop0_e = len(_dropped_e(PE))
+_out_e2 = _turn_e(PE, PEX, "%s %s\n\nthe second piece" % (_MARK, _hf_e),
+                  "wait", feedback="Waiting for the owner.",
+                  between=lambda: post("/cmd", {"cmd": "pause",
+                                                "project": PE}))
+check("precondition: the pair is paused by hand",
+      daemon.lock_idle_why(PE).startswith("the pair is paused"), True)
+check("precondition: and the loop itself is on",
+      daemon.loop_state(PE)[1].get("active"), True)
+note("anything the wall started, waited for", settled())
+check("E2: no window was opened", len(launches()) - _before_e, 0)
+check("E2: and no handover is under way", _under_way_e(PE), False)
+_d2_e = _dropped_e(PE)
+check("E2: one line says it was dropped, naming the pause",
+      (len(_d2_e) - _drop0_e,
+       any("the pair is paused" in l for l in _d2_e)), (1, True))
+note("the line", _d2_e[0] if _d2_e else "")
+check("E2: and no demand is left behind", bool(_pend(PE, "executor")),
+      False)
+
+print("\nE5. the pause lifted, the next Stop at the wall asks afresh and the")
+print("    one after replaces it - the replacement was not lost")
+post("/cmd", {"cmd": "resume", "project": PE})
+check("precondition: the pair is worked again", daemon.lock_idle_why(PE), "")
+_turn_e(PE, PEX, "a piece of work, the pause lifted", "continue")
+check("precondition: the Stop asked for the handoff afresh",
+      bool(_pend(PE, "executor")), True)
+_hf_e = _handoff_e(PE, u"# the shift handoff\n\nE5 - the thread, written "
+                       u"once more, now that the pair is worked\n")
+_before_e = len(launches())
+_drop0_e = len(_dropped_e(PE))
+_out_e5 = _turn_e(PE, PEX, "%s %s\n\nthe third piece" % (_MARK, _hf_e),
+                  "continue")
+check("E5: exactly one window was opened", _launched_e(_before_e), 1)
+check("E5: the replacement is under way", _under_way_e(PE), True)
+check("E5: and nothing was dropped", len(_dropped_e(PE)) - _drop0_e, 0)
+
+print("\nE3. CONTROL: a pair whose loop stays on - continue replaces it")
+PF = _proj_e("f")
+PFX, PFP = "wall-on-ex-1", "wall-on-pl-1"
+_up_e(PF, "planner", PFP, PL_PORT, 90000)
+_up_e(PF, "executor", PFX, EX_PORT, 120000)
+post("/loop", {"project": PF, "action": "start"})
+_alive_e(PF)
+_wall_e(PF, PFX)
+_turn_e(PF, PFX, "a piece of work, the wall is reached", "continue")
+check("precondition: the handoff was asked for", bool(_pend(PF, "executor")),
+      True)
+_hf_f = _handoff_e(PF, u"# the shift handoff\n\nE3 - the thread\n")
+_before_e = len(launches())
+_turn_e(PF, PFX, "%s %s\n\nthe piece is done" % (_MARK, _hf_f), "continue")
+check("E3: exactly one window was opened", _launched_e(_before_e), 1)
+check("E3: and nothing was dropped", _dropped_e(PF), [])
+
+print("\nE4. CONTROL: the panel's button, with the loop off, opens a window")
+PG = _proj_e("g")
+PGX, PGP = "button-ex-1", "button-pl-1"
+_up_e(PG, "planner", PGP, PL_PORT, 90000)
+_up_e(PG, "executor", PGX, EX_PORT, 120000)
+_alive_e(PG)
+check("precondition: the loop is off",
+      daemon.loop_state(PG)[1].get("active"), False)
+_before_e = len(launches())
+_r_e4 = post("/handover", {"project": PG, "role": "executor"})
+check("E4: the button was taken", _r_e4.get("ok"), True)
+check("E4: exactly one window was opened", _launched_e(_before_e), 1)
+check("E4: and nothing was dropped", _dropped_e(PG), [])
+
+print("\nE6. the PLANNER at its wall in a pair nobody works: assess neither")
+print("    replaces it nor asks for its handoff. A demand written now would")
+print("    start its ceiling clock with the loop off, and a loop back after")
+print("    HANDOFF_WAIT_MAX_SEC would replace the planner at once, never asked")
+PH = _proj_e("h")
+PHX, PHP = "idle-pl-ex-1", "idle-pl-pl-1"
+_up_e(PH, "planner", PHP, PL_PORT, 90000)
+_up_e(PH, "executor", PHX, EX_PORT, 120000)
+for _i_e, _floor_e in enumerate(FLOORS, 1):
+    statusline("planner", PHP, 805000 + _i_e * 1000, proj=PH)
+    hook("PreCompact", "planner", PHP, proj=PH, transcript_path="")
+    if _i_e < len(FLOORS):
+        statusline("planner", PHP, _floor_e, proj=PH)
+        statusline("planner", PHP, _floor_e + 20000, proj=PH)
+statusline("planner", PHP, FLOORS[-1], proj=PH)
+_alive_e(PH, "planner")
+check("precondition: the planner is at its wall",
+      daemon.plan_for(sess_of("planner", PH), PH)["do"], "handover")
+check("precondition: the loop is off",
+      daemon.loop_state(PH)[1].get("active"), False)
+check("precondition: no demand on the planner yet",
+      bool(_pend(PH, "planner")), False)
+backdate("executor", proj=PH)
+backdate("planner", proj=PH)
+_before_e = len(launches())
+_saw0_e = len([r for r in daemon.store.recent_events(600, project=PH)
+               if "not replaced" in (r.get("text") or "")])
+_res_e6 = [daemon.assess(PH), daemon.assess(PH)]
+note("assess, twice", _res_e6)
+note("anything assess started, waited for", settled())
+print("    FAILURE WOULD LOOK LIKE: 'its handoff not yet asked for', then")
+print("    'waiting for its own handoff first' - the demand's clock running")
+check("E6: both passes say the planner is not replaced, and why",
+      [r.get("did") for r in _res_e6], ["not replaced: the loop is off"] * 2)
+check("E6: no demand was put on the planner", bool(_pend(PH, "planner")),
+      False)
+check("E6: no window was opened", len(launches()) - _before_e, 0)
+check("E6: and the journal heard it once",
+      len([r for r in daemon.store.recent_events(600, project=PH)
+           if "not replaced" in (r.get("text") or "")]) - _saw0_e, 1)
+for _w_e in _STANDS_E:
+    if _w_e.poll() is None:
+        _w_e.kill()
+        _w_e.wait(20)
+
+
+# ---------------------------------------------------------------------------
+print("\n" + "=" * 68)
 SRV.shutdown()
 check("CONTROL: every other window this simulation stopped went whole, tree "
       "and all - only the one with a job left running was spared its tree",
@@ -1671,6 +1999,9 @@ if TMUX_HOME:
           "them still listens there (8.103)",
           (bool(owntemp.tmux_made(TMUX_HOME)) or not sessions.tmux_command(),
            owntemp.tmux_left(TMUX_HOME, 5)), (True, []))
+check("nothing this run did reached past this machine: the fence was up, "
+      "and it refused nothing (netfence.py, 8.142)",
+      (netfence.up(), netfence.refused()), (True, []))
 print("=" * 68)
 owntemp.finish(TMP, bool(FAILED))
 if TMUX_HOME:

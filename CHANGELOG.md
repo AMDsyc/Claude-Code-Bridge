@@ -13,6 +13,34 @@ file before it and listed in `make_public.py`'s `EXTRA`, or it is never
 published.
 
 <!-- /rule 36 -->
+**2026-10-15 — what is new since the release of 2026-10-13**
+
+- **A Mac on a PC's network share waits on it less.** Hooks, the status
+  line and the channel run by path; such a project gets
+  `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1` and `MCP_TIMEOUT=120000`; a
+  slow project folder no longer holds a reply; a port's owner comes from
+  netstat. The archive map reads only what changed and is not built on a
+  share: a search there reads the latest records and says why.
+- **A slow share is waited out**: the restart gate asks again when the
+  bridge answered late, and a commit killed for time names every
+  iteration not saved.
+- **A replacement is handed the thread only once its client listens**,
+  and one that reports late still closes the window it replaced.
+- **needs_you reaches you without Telegram**, in the panel; its tone is
+  `panel_sound`, off on a Mac.
+- **Fewer false calls**: a `wait` on a background task, or a helper stuck
+  on the share, calls nobody.
+- **The Bypass Permissions screen** is named with its keys, never answered.
+- **A saved executor mode stays**, the last run's Terminal window closes
+  after a restart, and `bridge.command` keeps LF in a Windows clone.
+- **A replaced window's jobs outlive it on a Mac too**: it is killed
+  alone, as `/F` does on Windows. The journal says they keep running only
+  when its shells answer 10 s later.
+- **The handoff a wall asks for** is the file the last one went into, else
+  one the project's rules name - never the root's freshest.
+- **A replaced channel no longer takes its successor's seat.**
+- **The public scan's private words live outside the repository.**
+
 **2026-10-13 — what is new since the release of midday 2026-10-12 (6fe3d8c)**
 
 - **The bridge runs on a Mac.** `bridge.command` beside `bridge.bat` starts

@@ -25,6 +25,7 @@ Runs on 127.0.0.1 only. Start with bridge.bat or python -m bridgecore.daemon.
 
 import calendar
 import datetime
+import functools
 import glob
 import hashlib
 import io
@@ -603,6 +604,11 @@ STATE_PATHS = {
     # Rule 36: what was already said over the limit, per file and size, and
     # the one line waiting for the planner's next delivery. -> check_rent
     "rent_told": "path", "rent_line": "path",
+    # A call for the person that can close by itself, held CALL_HOLD_SEC
+    # before its delivery and asked again then: "<family>|<about>" ->
+    # record, under the project. In STATE, so a restart inside the hold
+    # still delivers or closes it. -> open_call, calls_pass
+    "calls": "path",
     # keyed by the project AND the role
     # One decision, one record: the fingerprint of the last handover
     # decision written down for this half, so a decision re-taken every
@@ -677,6 +683,12 @@ STATE_PATHS = {
     # A half's window asking a person for permission, one record per open
     # dialog, with its once-latch (note_permission_ask). -> DECISIONS.md 8.26
     "asks": "pair",
+    # restart_session's tries of the last ten minutes, "<path>|<role>" ->
+    # times. Missing here until 132b: case 49 walked before any restart, and
+    # the walk of case 183, after every case, found it - a moved project kept
+    # its tries under the old path, a removed one for good. -> DECISIONS.md
+    # 8.151
+    "restart_tries": "pair",
     # A half whose window was up through the last restart and has not yet
     # been told of it, nor finished a turn since (begin_run,
     # restart_notice_for). Keyed by pair because the restart touched one
@@ -687,6 +699,7 @@ STATE_PATHS = {
     # it is here because the guard would otherwise report it as unlisted,
     # and an exception nobody wrote down is how the first two lists rotted.
     "channels_view": "pair", "compactions": "pair", "rc": "pair",
+    "agent_compactions": "pair",
     "said": "pair", "telemetry": "pair", "tscript": "pair",
     "windows": "pair",
     # the path is inside the value, not in the key
@@ -710,6 +723,15 @@ PAIR_KEYED = tuple(n for n, k in STATE_PATHS.items() if k == "pair")
 # that can never be matched again.
 STATE_PATH_PREFIXES = ("acted:", "cut_for_handover:", "hoheld:", "jump:",
                        "pctgap:", "tight:")
+
+# Records of what the BRIDGE did to a project, a move or a removal, kept on
+# purpose by both readers: a removal does not erase the evidence of itself
+# (drop_project_state), a move does not rewrite history. `forget_trace` rows
+# carry `path`, so the walk of cases 49 and 183 took it for a container
+# nobody listed; this is the exception written down, the way `channels_view`
+# is. `moved_trace` rows carry from/to and never looked like one.
+# -> DECISIONS.md 8.151
+STATE_PATH_RECORDS = ("forget_trace", "moved_trace")
 
 
 def migrate_keys():
@@ -1678,14 +1700,53 @@ def idle_compaction_seen(tp, offset):
     return False if seen else None
 
 
+def ceiling_note(model, path, rec, restore):
+    """What became of the ceiling a compaction's PreCompact lowered, as a
+    clause for the journal; `restore` puts it back (8.149).
+
+    Since 8.149 a record says whether calib_miss ran (`miss`) and what it
+    changed (`ceil`, before and after). Only a subagent's compaction is put
+    back (settle_compaction) - an idle one was the window's own - and only
+    while the entry still holds what that miss left: another miss since, or
+    a clean streak's step up, would be undone with it (calib_put_back). A
+    record written before 8.149 kept no `before`, so it is not put back.
+    """
+    if "miss" not in rec:
+        return "the ceiling it lowered is not restored"
+    if not rec.get("miss"):
+        return "it lowered no ceiling (rotate_policy compact)"
+    ceil = rec.get("ceil") or {}
+    before, after = ceil.get("before") or {}, ceil.get("after") or {}
+    if not (restore and model and before and after):
+        return "the ceiling it lowered is not restored"
+    expect = {k: after.get(k) for k in ("ceiling_pct", "multiplier",
+                                        "misses")}
+    try:
+        streak = int((store.load_calibration().get(
+            store.calib_key(model, path)) or {}).get("clean_streak") or 0)
+        moved = store.calib_put_back(model, path, expect, dict(
+            before, clean_streak=int(before.get("clean_streak") or 0)
+            + streak))
+    except Exception as e:
+        return "the ceiling it lowered could not be restored (%s)" % e
+    if moved is not None:
+        return ("the ceiling it lowered is not restored - the entry has "
+                "moved since (now %s %% / %s, %s misses)"
+                % (moved.get("ceiling_pct"), moved.get("multiplier"),
+                   moved.get("misses")))
+    return ("the ceiling it lowered is restored, %s %% / %s back to %s %% / "
+            "%s" % (after.get("ceiling_pct"), after.get("multiplier"),
+                    before.get("ceiling_pct"), before.get("multiplier")))
+
+
 def drop_idle_sample(model, path, role, tokens):
     """Take an idle compaction's size back out of the calibration samples.
 
     The PreCompact wrote it before anybody could know the session was idle.
     Only the sample comes out and the point is derived again from what is
-    left; the ceiling the same PreCompact lowered (calib_miss) is NOT put
-    back, and the answer says so, because that is a step down nobody can
-    undo exactly. Never creates an entry. Returns a sentence for the journal.
+    left; what became of the ceiling is ceiling_note's clause, which the
+    callers add (8.149). Never creates an entry. Returns a sentence for the
+    journal.
     """
     tokens = int(tokens or 0)
     try:
@@ -1706,7 +1767,7 @@ def drop_idle_sample(model, path, role, tokens):
     except Exception as e:
         return "its sample could not be taken back (%s)" % e
     return ("its calibration sample under %s was taken back, the point is "
-            "now %s; the ceiling it lowered is not restored"
+            "now %s"
             % (model, "%dk" % (point // 1000) if point else "not measured"))
 
 
@@ -1741,21 +1802,625 @@ def mark_idle_compactions(path, role, sid, settle):
             if found[h.get("t")] is True:
                 h["idle"] = True
                 h["idle_checked"] = True
-                marked.append((int(h.get("tokens") or 0), h.get("calib")))
+                marked.append((int(h.get("tokens") or 0), h.get("calib"),
+                               dict(h)))
                 changed = True
             elif settle and not h.get("idle_checked"):
                 h["idle_checked"] = True
                 changed = True
         if changed:
             store.save_state(STATE)
-    for tokens, calib in marked:
+    for tokens, calib, rec in marked:
         what = (drop_idle_sample(calib, path, role, tokens) if calib else
                 "the record names no calibration key, so no sample is taken "
                 "back")
+        what += "; " + ceiling_note(calib, path, rec, False)
         store.journal("loop", "compaction at %dk was done while idle (the "
                       "client's own notice) - not counted towards the wall; %s"
                       % (tokens // 1000, what), project_name(path), role,
                       "log", project_dir=path)
+
+
+# A SUBAGENT'S COMPACTION IS NOT THE WINDOW'S. The client sends a subagent's
+# PreCompact and SessionStart(compact) with the window's session_id and
+# transcript_path and no agent_id (probe of 2026-10-15), so each was recorded
+# as the window's: one project, 09:00-11:43 that day, had 13 boundaries in the
+# window's transcript, 13 in its subagents' and 26 records. They counted
+# towards its wall, put the window's size of that moment into the
+# calibration samples, and the WALL line and the thread went to the
+# subagent. Only the transcripts tell: the compact_boundary row lands in the
+# file of whoever compacted - the window's own, or
+# <session>/subagents/**/agent-<id>.jsonl - and it is written only after the
+# SessionStart hook has RETURNED, so the landing is settled from a thread.
+# A subagent's record leaves STATE["compactions"] for
+# STATE["agent_compactions"], so nothing that counts or measures the window
+# reads it. Asked only when a subagent of the session made a call within
+# AGENT_ACTIVE_SEC of the PreCompact; with none, nothing changes.
+# -> DECISIONS.md 8.148
+AGENT_ACTIVE_SEC = 300
+LANDING_SETTLE_SEC = 90
+LANDING_POLL_SEC = 0.5
+WHOSE_SPAN = (-5, 600)
+WHOSE_CHUNK = 8 * 1024 * 1024
+LANDINGS = set()
+
+
+def agent_active(path, role, sid, at=None):
+    """Did a subagent of this session make a call within AGENT_ACTIVE_SEC?"""
+    edge = TURN_EDGE.get("%s|%s|%s" % (norm(path), role, sid or "")) or {}
+    seen = float(edge.get("agent") or 0)
+    return bool(seen) and (at or time.time()) - seen <= AGENT_ACTIVE_SEC
+
+
+def agent_files(tp, since=None):
+    """The subagent transcripts beside the window's transcript `tp`, sorted;
+    with `since` (epoch), only those written at or after it."""
+    tp = str(tp or "")
+    if not tp.endswith(".jsonl"):
+        return []
+    try:
+        found = glob.glob(os.path.join(tp[:-len(".jsonl")], "subagents", "**",
+                                       "agent-*.jsonl"), recursive=True)
+    except Exception:
+        return []
+    out = []
+    for f in found:
+        try:
+            if since is None or os.path.getmtime(f) >= since:
+                out.append(f)
+        except OSError:
+            continue
+    return sorted(out)
+
+
+def boundary_lines(fp, offset=0):
+    """The lines of `fp` from byte `offset` that hold "compact_boundary",
+    read in WHOSE_CHUNK pieces to the end of the file. A subagent's
+    transcript is not small: one project's of 2026-10-15 were 99 MB and
+    121 MB, and a read capped at 64 MB never saw a boundary past it."""
+    out = []
+    try:
+        with open(fp, "rb") as fh:
+            fh.seek(max(0, int(offset or 0)))
+            carry = b""
+            while True:
+                chunk = fh.read(WHOSE_CHUNK)
+                data = carry + chunk
+                cut = len(data) if not chunk else data.rfind(b"\n") + 1
+                body, carry = data[:cut], data[cut:]
+                i = body.find(b"compact_boundary")
+                while i != -1:
+                    s = body.rfind(b"\n", 0, i) + 1
+                    e = body.find(b"\n", i)
+                    e = len(body) if e == -1 else e
+                    out.append(body[s:e])
+                    i = body.find(b"compact_boundary", e)
+                if not chunk:
+                    break
+    except (OSError, TypeError, ValueError):
+        return out
+    return out
+
+
+def boundaries_in(fp, offset=0, window=False):
+    """[(epoch, uuid, whose)] for the compact_boundary rows of transcript
+    `fp` from byte `offset`. `whose` is "window" for the window's own
+    transcript, else the subagent's id - the row's agentId, else the file's."""
+    name = os.path.basename(str(fp))
+    own = name[len("agent-"):-len(".jsonl")] if name.startswith("agent-") \
+        else name
+    out = []
+    for raw in boundary_lines(fp, offset):
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or \
+                row.get("subtype") != "compact_boundary":
+            continue
+        at = _ts_epoch(row.get("timestamp"))
+        if not at:
+            continue
+        uid = str(row.get("uuid") or "%s@%s" % (name, row.get("timestamp")))
+        whose = "window" if window else str(
+            (row.get("isSidechain") and row.get("agentId")) or own)
+        out.append((at, uid, whose))
+    return out
+
+
+def claimed_boundaries(key):
+    """The boundaries already given to a record of this half. Under _lock."""
+    got = set()
+    for name in ("compactions", "agent_compactions"):
+        for h in (STATE.get(name) or {}).get(key) or []:
+            if isinstance(h, dict) and h.get("boundary"):
+                got.add(h["boundary"])
+    return got
+
+
+def time_candidates(recs):
+    """{tp: [(epoch, uuid, whose)]}: every boundary a record of `recs` may
+    have written - in the window's transcript from where the earliest of
+    them stood, in a subagent's written since the earliest PreCompact."""
+    out = {}
+    for tp in {r.get("tp") or "" for r in recs if r.get("t")} - {""}:
+        mine = [r for r in recs if r.get("tp") == tp and r.get("t")]
+        got = boundaries_in(tp, min(int(r.get("tp_at") or 0) for r in mine),
+                            window=True)
+        lo = min(float(r["t"]) for r in mine) + WHOSE_SPAN[0]
+        for f in agent_files(tp, since=lo):
+            got += boundaries_in(f)
+        out[tp] = got
+    return out
+
+
+def match_by_time(recs, claimed, rows=None):
+    """Whose compaction each record is when there is no landing to go by
+    (the Stop, a start-up): {t: (whose, uuid)} for the records a boundary
+    was found for. A summary takes half a minute to a minute and a half, so
+    the pairs are taken NEAREST FIRST - every (record, boundary nobody has)
+    within WHOSE_SPAN of the PreCompact, by distance, each record and each
+    boundary used once. Taking each record's earliest boundary in turn
+    cascaded: a record whose own was out of order took the next record's,
+    that one the next's, down the chain - one project's dry migration of
+    2026-10-15 left five records "unknown" that had a boundary each
+    (-> DECISIONS.md 8.148). `rows` as
+    time_candidates gives them, when the caller has read them already."""
+    if rows is None:
+        rows = time_candidates(recs)
+    pairs = []
+    for rec in recs:
+        t = float(rec.get("t") or 0)
+        for at, uid, whose in (rows.get(rec.get("tp") or "") or []) if t \
+                else []:
+            if uid not in claimed and \
+                    WHOSE_SPAN[0] <= at - t <= WHOSE_SPAN[1]:
+                pairs.append((abs(at - t), t, uid, whose))
+    out, used = {}, set()
+    for _, t, uid, whose in sorted(pairs):
+        if t not in out and uid not in used:
+            out[t] = (whose, uid)
+            used.add(uid)
+    return out
+
+
+def landing_marks(tp):
+    """Where the window's transcript and each subagent's stand: {file: size}."""
+    out = {}
+    for f in ([tp] if tp else []) + agent_files(tp):
+        try:
+            out[f] = os.path.getsize(f)
+        except OSError:
+            pass
+    return out
+
+
+def whose_at_landing(tp, marks, at, claimed):
+    """The boundary a SessionStart(compact) at `at` announced: written since
+    `marks` were taken, the nearest to `at` in time. (whose, uuid) or None."""
+    best = None
+    for f in ([tp] if tp else []) + agent_files(tp):
+        for b_at, uid, whose in boundaries_in(f, marks.get(f, 0),
+                                              window=(f == tp)):
+            if uid in claimed or abs(b_at - at) > LANDING_SETTLE_SEC:
+                continue
+            if best is None or abs(b_at - at) < abs(best[0] - at):
+                best = (b_at, uid, whose)
+    return (best[2], best[1]) if best else None
+
+
+def settle_compaction(path, role, t, whose, uid, how, say=True):
+    """Give the record the PreCompact wrote at `t` to whoever compacted.
+
+    The window's stays and is marked. A subagent's leaves the window's books
+    with what it put there: the record goes to STATE["agent_compactions"], a
+    `landed` or `after` written onto it by position goes to the window's
+    record before it when that one lacks it, the window's pending compaction
+    is put back the way it was, the calibration sample comes out
+    (drop_idle_sample) and the ceiling its PreCompact lowered goes back
+    (ceiling_note), and its `t` leaves the turn's compacted_this_turn, so
+    the turn's cost is measured (8.149). "unknown" marks a record nobody's
+    boundary was found for: it stays counted, as before. Returns the journal
+    sentence, or "".
+    """
+    key = "%s|%s" % (norm(path), role)
+    moved = None
+    with _lock:
+        hist = (STATE.get("compactions") or {}).get(key) or []
+        i = next((j for j, h in enumerate(hist) if isinstance(h, dict)
+                  and h.get("t") == t and not h.get("whose")), None)
+        if i is None or (uid and uid in claimed_boundaries(key)):
+            return ""
+        rec = hist[i]
+        if whose in ("window", "unknown"):
+            rec["whose"] = whose
+            if uid:
+                rec["boundary"] = uid
+        else:
+            moved = hist.pop(i)
+            sid = moved.get("session") or ""
+            prev = next((w for w in reversed(hist[:i]) if isinstance(w, dict)
+                         and (w.get("session") or "") == sid), None)
+            for mark in ("landed", "after"):
+                if (moved.get(mark) and prev is not None
+                        and not prev.get(mark)
+                        and int(prev.get("tokens") or 0) > int(moved[mark])):
+                    prev[mark] = moved[mark]
+            for s in (STATE.get("sessions") or {}).values():
+                if not (isinstance(s, dict) and s.get("session_id") == sid):
+                    continue
+                # whether or not the window has drawn itself since (8.149)
+                _ct = s.get("compacted_this_turn")
+                if isinstance(_ct, list) and t in _ct:
+                    _ct.remove(t)
+                    if not _ct:
+                        s.pop("compacted_this_turn", None)
+                pend = s.get("compaction_pending") or {}
+                if pend.get("t") != t:
+                    continue
+                if (prev is not None and prev.get("tokens")
+                        and not (prev.get("landed") or prev.get("after")
+                                 or prev.get("not_landed"))
+                        and time.time() - float(prev.get("t") or 0)
+                        < WHOSE_SPAN[1]):
+                    s["compaction_pending"] = {
+                        "at": prev.get("t"), "tokens": int(prev["tokens"]),
+                        "session": sid, "t": prev.get("t")}
+                else:
+                    s.pop("compaction_pending", None)
+            moved.update({"whose": whose, "boundary": uid,
+                          "moved_at": time.time()})
+            led = STATE.setdefault("agent_compactions", {}).setdefault(key,
+                                                                      [])
+            led.append(moved)
+            del led[:-60]
+        store.save_state(STATE)
+        tokens = int(rec.get("tokens") or 0)
+    if moved is None:
+        line = ("compaction at %dk was this window's own (%s) - counted"
+                % (tokens // 1000, how) if whose == "window" else
+                "compaction at %dk: no boundary of it was found in the "
+                "window's transcript or its subagents' (%s) - it stays "
+                "counted as the window's" % (tokens // 1000, how))
+    else:
+        calib = moved.get("calib")
+        what = (drop_idle_sample(calib, path, role, tokens)
+                if calib and tokens else "it wrote no calibration sample")
+        what += "; " + ceiling_note(calib, path, moved, True)
+        line = ("compaction at %dk was subagent %s's, not this window's (%s) "
+                "- not counted towards the wall, its record moved out; %s"
+                % (tokens // 1000, whose, how, what))
+    if say:
+        store.journal("loop", line, project_name(path), role, "log",
+                      project_dir=path)
+    return line
+
+
+def landing_unsure(path, role, sid):
+    """The `t` of this session's OLDEST compaction record that a subagent
+    may have made and that no landing has taken and nobody has settled,
+    else None.
+    THE OLDEST, NOT THE NEWEST. Two PreCompacts in a row, the window's and
+    a subagent's, write two records before either lands. Read from the
+    newest, the first landing took the second record and the second landing
+    found it taken: it was not held, and 2026-10-15 15:35:42 a subagent of
+    a watched project was handed the executor's thread with its landing.
+    Landings come in the order the compactions were announced, so each
+    takes the oldest one still open. -> DECISIONS.md 8.148"""
+    key = "%s|%s" % (norm(path), role)
+    with _lock:
+        for h in (STATE.get("compactions") or {}).get(key) or []:
+            if (isinstance(h, dict) and (h.get("session") or "") == sid
+                    and h.get("unsure") and not h.get("whose")
+                    and not h.get("not_landed") and h.get("t")
+                    and (key, h["t"]) not in LANDINGS):
+                return h["t"]
+    return None
+
+
+def landing_parts(path, role, sid, sess, source):
+    """What a starting session is handed before the canon: the restart
+    notice, the human's note and, for an executor after a compaction,
+    its thread. One spelling for the SessionStart branch and for the
+    thread held at an unsure landing (8.148)."""
+    parts = []
+    # A CLEAN STOP IS NOT A CRASH, and the seed must not say it was.
+    # QUIET_REASONS knows the third reason - shut down properly while a
+    # loop happened to be on, which is what every restart through the
+    # gate looks like - and the CHAT was taught it on 2026-09-04. This
+    # sentence was not, and it is the one a session reads first:
+    # 2026-09-05 the journal says `Bridge stopped cleanly.` at 16:09:30
+    # and `recovery | The bridge was shut down normally, but a loop was
+    # still running` at 16:09:40, and the window that came up at
+    # 16:12:22 was told the machine had stopped without shutting down
+    # cleanly. Same fix as the notification, the other exit.
+    # -> DECISIONS.md 8.17
+    # AND ONLY TO A WINDOW THE STOP TOUCHED, ONCE. This read
+    # STATE["mode"], the panel's acknowledgement, which a restart
+    # through the gate leaves "recovered" for the daemon's whole life -
+    # so a compaction two hours later was told of a turn cut off by a
+    # restart it had worked straight through. -> DECISIONS.md 8.49
+    _restart = restart_notice_for(path, role, sid)
+    if _restart:
+        parts.append(_restart)
+    # Read, not taken: a session starting is not the note's delivery -
+    # the report is (run_review). Taking it here would mean a rotation
+    # swallowed the line the human wrote for the review.
+    note = note_for(path)
+    if note:
+        parts.append(note)
+    # 40.10: after a compaction the executor gets the thread back in
+    # the words it was given - before the canon, which stays last.
+    # Not under _lock: compact_context reads the state file.
+    if role == "executor" and source == "compact":
+        _thread = compact_context(path, landing_wall(
+            sess, path, sid))
+        if _thread:
+            parts.append(_thread)
+    return parts
+
+
+def landing_start_effects(path, role, later, at, found):
+    """What a SessionStart does to the window's books - its dialog and open
+    calls, the edge of its turn, its state, the say-once latches - for a
+    landing handle_event held back because a subagent may have made it.
+    Run by settle_landing once the compaction is known to be the window's,
+    or nobody can tell (as before 8.148, and the journal says so); never
+    for a subagent's. Run late, it touches only what stood at the landing:
+    a dialog drawn, a call made, a Stop or a state written since are the
+    window's own news. -> DECISIONS.md 8.148 (debt 1)"""
+    event = later.get("event") or {}
+    permission_witness("SessionStart", path, role, event, before=at)
+    k = "%s|%s|%s" % (norm(path), role, str(event.get("session_id") or ""))
+    with _lock:
+        edge = TURN_EDGE.setdefault(k, {})
+        edge["main"] = max(float(edge.get("main") or 0), at)
+        s = (STATE.get("sessions") or {}).get(session_key(event))
+        if isinstance(s, dict) and s.get("state") == later.get("state"):
+            s["state"] = "starting"
+        STATE.pop("tight:%s" % path, None)
+        STATE.pop("hoheld:%s" % path, None)
+        save_state()
+    if not found:
+        store.journal("loop", "the start at %s could not be told from a "
+                      "subagent's, so it was taken as the window's own: "
+                      "what a start closes and resets in the window's "
+                      "books was done now, for what stood at the landing "
+                      "(8.148)" % time.strftime("%H:%M:%S",
+                                                time.localtime(at)),
+                      project_name(path), role, "warn", project_dir=path)
+
+
+def state_before_compaction(path, role, event):
+    """What a compaction a subagent may have made writes "compacting" over,
+    kept with its record: the window's state, whether the half's dialog was
+    on record and whether a tracked command ran. Over the "compacting" of
+    an earlier record of the session still open - two subagents compacting
+    at once - that record's, the state the window was really in. None when
+    there is nothing to put back. -> DECISIONS.md 8.148 (debt 1, C)"""
+    sid = str(event.get("session_id") or "")
+    key = "%s|%s" % (norm(path), role)
+    with _lock:
+        s = (STATE.get("sessions") or {}).get(session_key(event)) or {}
+        state = s.get("state") or ""
+        if state == "compacting":
+            for h in reversed((STATE.get("compactions") or {}).get(key)
+                              or []):
+                if isinstance(h, dict) and (h.get("session") or "") == sid:
+                    if h.get("unsure") and not h.get("whose"):
+                        return dict(h.get("state_before") or {}) or None
+                    return None
+            return None
+        asked = bool((STATE.get("asks") or {}).get(key))
+    if not state:
+        return None
+    return {"state": state, "ask": asked, "procs": bool(inflight_live(path))}
+
+
+def state_after_agent(path, role, sid, t):
+    """A subagent's compaction is settled: put back the window's state its
+    PreCompact wrote "compacting" over (state_before_compaction) - only
+    while nothing has written another since, and no later compaction of
+    the session is on record: that one may be the window's own, and cannot
+    tell is busy. And only what is still true: "needs you" while the half's
+    dialog is on record, not the old state blindly; "waiting on a process"
+    while a tracked command runs, or when none ran at the PreCompact (a
+    `wait` verdict's); otherwise "idle", which is what the dialog's answer
+    or the command's end would have left had the state not been
+    "compacting" - process_ended turns only "waiting on a process" into
+    "idle". Returns what was written, or "". -> DECISIONS.md 8.148"""
+    key = "%s|%s" % (norm(path), role)
+    with _lock:
+        rec = next((h for h in reversed(
+            (STATE.get("agent_compactions") or {}).get(key) or [])
+            if isinstance(h, dict) and h.get("t") == t), None)
+        before = dict((rec or {}).get("state_before") or {})
+        later_open = any(
+            isinstance(h, dict) and (h.get("session") or "") == sid
+            and float(h.get("t") or 0) > t
+            for h in (STATE.get("compactions") or {}).get(key) or [])
+        if not before.get("state") or later_open:
+            return ""
+        asked = bool((STATE.get("asks") or {}).get(key))
+    state = before["state"]
+    if state == "needs you" and not asked:
+        state = "idle"
+    elif (state == "waiting on a process" and before.get("procs")
+          and not inflight_live(path)):
+        state = "idle"
+    with _lock:
+        s = (STATE.get("sessions") or {}).get("%s:%s" % (role, sid[:8]))
+        if not isinstance(s, dict) or s.get("state") != "compacting":
+            return ""
+        s["state"] = state
+        save_state()
+    store.journal("loop", "a subagent's compaction of %s is settled: the "
+                  "%s's state is %s again%s (8.148)"
+                  % (time.strftime("%H:%M:%S", time.localtime(t)), role,
+                     state, "" if state == before["state"] else
+                     " - it was %s before it, and that is over"
+                     % before["state"]),
+                  project_name(path), role, "log", project_dir=path)
+    return state
+
+
+def settle_landing(path, role, sid, t, tp, marks, at, hold, sess,
+                   later=None):
+    """Decide whose compaction a SessionStart(compact) announced, from the
+    boundary the client writes after the hook returns; and when what the
+    landing carries was held - the executor's thread, a planner's restart
+    notice or note - hand it over now if the compaction was the window's.
+    Runs in its own thread."""
+    key = "%s|%s" % (norm(path), role)
+    found = None
+    try:
+        deadline = time.time() + LANDING_SETTLE_SEC
+        while True:
+            with _lock:
+                claimed = claimed_boundaries(key)
+            found = whose_at_landing(tp, marks, at, claimed)
+            if found:
+                if settle_compaction(path, role, t, found[0], found[1],
+                                     "its boundary at the landing of %s"
+                                     % time.strftime("%H:%M:%S",
+                                                     time.localtime(at))):
+                    break
+                # another landing took that boundary first, or the record
+                # was settled meanwhile: look again, or stop if it was
+                with _lock:
+                    if not any(isinstance(h, dict) and h.get("t") == t
+                               and not h.get("whose") for h in
+                               (STATE.get("compactions") or {}).get(key)
+                               or []):
+                        break
+                continue
+            if time.time() >= deadline:
+                break
+            time.sleep(LANDING_POLL_SEC)
+        if not found:
+            store.journal("loop", "could not tell whose compaction landed at "
+                          "%s - no boundary was written within %d s; the "
+                          "record stays the window's until the Stop asks "
+                          "again" % (time.strftime("%H:%M:%S",
+                                                   time.localtime(at)),
+                                     LANDING_SETTLE_SEC),
+                          project_name(path), role, "warn", project_dir=path)
+    except Exception as e:
+        store.journal("bridge_error", "settle_landing failed (%s: %s)"
+                      % (e.__class__.__name__, e), project_name(path), role,
+                      "warn", project_dir=path)
+    finally:
+        LANDINGS.discard((key, t))
+    if later and not (found and found[0] != "window"):
+        try:
+            landing_start_effects(path, role, later, at, found)
+        except Exception as e:
+            store.journal("bridge_error", "landing_start_effects failed "
+                          "(%s: %s)" % (e.__class__.__name__, e),
+                          project_name(path), role, "warn",
+                          project_dir=path)
+    if found and found[0] != "window":
+        try:
+            state_after_agent(path, role, sid, t)
+        except Exception as e:
+            store.journal("bridge_error", "state_after_agent failed "
+                          "(%s: %s)" % (e.__class__.__name__, e),
+                          project_name(path), role, "warn",
+                          project_dir=path)
+    if not hold or (found and found[0] != "window"):
+        return found
+    parts = landing_parts(path, role, sid, sess, "compact")
+    if parts:
+        head = ("The thread after your compaction of %s" if role ==
+                "executor" else "What the start after your compaction of %s "
+                "carries") % time.strftime("%H:%M:%S", time.localtime(at))
+        ok, why = deliver_ex(path, role, (
+            "%s, held at the landing "
+            "until the bridge could tell it was this window's and not a "
+            "subagent's (DECISIONS.md 8.148):\n\n%s"
+            % (head, "\n\n".join(parts))), {"kind": "info"})
+        if not ok:
+            store.journal("loop", "what was held at the compaction landing "
+                          "could not be handed to the %s: %s" % (role, why),
+                          project_name(path), role, "warn", project_dir=path)
+    return found
+
+
+def settle_unsure_compactions(path, role, sid):
+    """At the Stop: a record a subagent may have made, that no landing
+    settled, is settled by time. One still unsettled WHOSE_SPAN after its
+    PreCompact is "unknown" and stays counted. The session's other unsettled
+    records of the span compete for the boundaries too - a window's own
+    compaction with no subagent at work is never asked, and its boundary
+    must not be handed to a record that is in doubt."""
+    if not (path and role and sid):
+        return
+    key = "%s|%s" % (norm(path), role)
+    with _lock:
+        own = [dict(h) for h in (STATE.get("compactions") or {}).get(key)
+               or [] if isinstance(h, dict)
+               and (h.get("session") or "") == sid
+               and not h.get("whose") and h.get("t")]
+        todo = [h for h in own if h.get("unsure")
+                and (key, h["t"]) not in LANDINGS]
+        claimed = claimed_boundaries(key)
+    if not todo:
+        return
+    lo = min(float(h["t"]) for h in todo) - WHOSE_SPAN[1] + WHOSE_SPAN[0]
+    got = match_by_time([h for h in own if float(h["t"]) >= lo], claimed)
+    for rec in sorted(todo, key=lambda h: float(h["t"])):
+        found = got.get(rec["t"])
+        if found:
+            settle_compaction(path, role, rec["t"], found[0], found[1],
+                              "the boundary nearest after its PreCompact")
+        elif time.time() - float(rec["t"]) > WHOSE_SPAN[1]:
+            settle_compaction(path, role, rec["t"], "unknown", "",
+                              "asked at the Stop")
+
+
+def migrate_agent_compactions():
+    """Records written before 8.148 were never asked whose they are. Asked
+    once, at start-up and in a thread, by time; one journal line per half
+    that had a subagent's compaction in its books."""
+    cutoff = time.time() - WHOSE_SPAN[1]
+    with _lock:
+        todo = {}
+        for key, rows in (STATE.get("compactions") or {}).items():
+            if not isinstance(rows, list):
+                continue
+            recs = [dict(h) for h in rows if isinstance(h, dict)
+                    and h.get("t") and h.get("tp") and not h.get("whose")
+                    and float(h["t"]) < cutoff]
+            if recs:
+                todo[key] = recs
+    for key, recs in todo.items():
+        path, _, role = key.rpartition("|")
+        try:
+            with _lock:
+                claimed = claimed_boundaries(key)
+            got_all = match_by_time(recs, claimed)
+            lines = []
+            for rec in sorted(recs, key=lambda h: float(h["t"])):
+                got = got_all.get(rec["t"])
+                if not got:
+                    settle_compaction(path, role, rec["t"], "unknown", "",
+                                      "asked at start-up", say=False)
+                    continue
+                line = settle_compaction(path, role, rec["t"], got[0], got[1],
+                                         "asked at start-up", say=False)
+                if got[0] != "window" and line:
+                    lines.append(line)
+            if lines:
+                store.journal("loop", "%d of %d compaction records written "
+                              "before 8.148 were a subagent's, not the "
+                              "window's - moved out of the wall's count: %s"
+                              % (len(lines), len(recs), " | ".join(lines)),
+                              project_name(path), role, "log",
+                              project_dir=path)
+        except Exception as e:
+            store.journal("bridge_error", "migrate_agent_compactions failed "
+                          "for %s (%s: %s)" % (key, e.__class__.__name__, e),
+                          level="warn")
 
 
 def presence_quiet():
@@ -2543,12 +3208,16 @@ def note_carried_paths(path):
     mine = norm(path)
     others = {p: n for p, n in (found.get("paths") or {}).items()
               if p and p != mine}
+    # The claims and the book under ONE lock: the history thread and
+    # /adopt-history both run this, and with the claims read under one
+    # acquisition and the book written under the next, the thread could
+    # read them before a claim and write after the claim's own recount -
+    # offering again the path the owner had just claimed. -> 8.144
     with _lock:
         claimed = [norm(p) for p in
                    ((CFG.get("projects") or {}).get(mine) or {})
                    .get("moved_from", [])]
-    others = {p: n for p, n in others.items() if p not in claimed}
-    with _lock:
+        others = {p: n for p, n in others.items() if p not in claimed}
         book = STATE.setdefault("carried_found", {})
         was = (book.get(mine) or {}).get("paths") or {}
         if others:
@@ -2607,8 +3276,9 @@ def merge_carried_history(why, only=None):
     move stayed invisible to the feed.
 
     A move is an event, not background work, so this runs at exactly two
-    moments and never on a tick: here at startup, and where a project enters
-    the watch list (/config, /add-project).
+    moments and never on a tick: at startup, and where a project enters
+    the watch list (/config, /add-project) - both through
+    merge_history_later, on the history thread, never on the caller's.
 
     Deliberately NOT under _lock and deliberately not touching STATE. It is
     file work - read the carrier, append what is missing to data/logs - and
@@ -2670,6 +3340,113 @@ def merge_carried_history(why, only=None):
                           project_name(path), "", "log", project_dir=path)
 
 
+# THE CARRIED HISTORY IS READ ON A THREAD OF ITS OWN. It ran inline at the
+# start, after the server was bound and before it served, and inline in
+# /config: on the Mac on 2026-10-15 the start read one project's carrier of
+# 131 753 lines over the share from 07:55:32 to 07:55:57, the port accepted
+# connections nobody read, and GET / timed out until 07:56:07.
+#
+# What reads what the merge writes, and why nothing waits for it:
+# - the feed of /state - a person reads it, so /state says which projects
+#   are still being read (`history_pending`) and the panel says so over the
+#   feed: a feed short of another machine's lines is labelled, not silent;
+# - idle_notice_since - recorded, not obeyed (8.10);
+# - the crash dump's last 50 lines - informational;
+# - migrate_calibration_windows - runs at the start BEFORE the merge was
+#   ever called, so it never read rows merged in the same start.
+# What the bridge decides from lives in STATE, and the merge touches no
+# STATE (note_carried_* keep their books under _lock, apart from it).
+#
+# Duplicates: the merge reads the carrier BEFORE it reads data/logs, and
+# journal() writes data/logs before it hands the project's copy to the
+# writer, so a row in the carrier is already in data/logs when the target
+# is read. Two merges of one project would race each other - so there is
+# one thread, and every merge goes through it. -> DECISIONS.md 8.144
+_HISTORY = {"queue": [], "pending": {}, "thread": None}
+_history_lock = threading.Lock()
+# A test seam, never a setting: while the file it names exists the history
+# thread holds before each project, so a suite can ask the daemon questions
+# in the middle of a merge (test_handover case 161).
+HISTORY_HOLD = os.environ.get("BRIDGE_HISTORY_HOLD", "")
+
+
+def history_pending():
+    """The projects whose carried history is queued or being read now."""
+    with _history_lock:
+        return sorted(p for p, n in _HISTORY["pending"].items() if n > 0)
+
+
+def merge_history_later(why, only=None):
+    """merge_carried_history on the history thread; returns at once.
+
+    Each project is pending from this call until its merge is done, so
+    /state never shows a feed as whole while its history is on the way."""
+    with _lock:
+        paths = [only] if only else list(CFG.get("projects") or {})
+    paths = [norm(p) for p in paths if p]
+    if not paths:
+        return []
+    with _history_lock:
+        for p in paths:
+            _HISTORY["pending"][p] = _HISTORY["pending"].get(p, 0) + 1
+        _HISTORY["queue"].append((why, paths))
+        t = _HISTORY["thread"]
+        if t is None or not t.is_alive():
+            t = _HISTORY["thread"] = threading.Thread(
+                target=_history_worker, name="bridge-history", daemon=True)
+            t.start()
+    return paths
+
+
+def _history_hold():
+    end = time.time() + 600
+    while HISTORY_HOLD and os.path.exists(HISTORY_HOLD) \
+            and time.time() < end:
+        time.sleep(0.05)
+
+
+def _history_worker():
+    while True:
+        with _history_lock:
+            if not _HISTORY["queue"]:
+                _HISTORY["thread"] = None
+                return
+            why, paths = _HISTORY["queue"].pop(0)
+        for p in paths:
+            try:
+                _history_hold()
+                with _lock:
+                    watched = p in (CFG.get("projects") or {})
+                # a project removed while it waited is not read for
+                if watched:
+                    merge_carried_history(why, p)
+            except Exception:              # the thread outlives one project
+                store.journal("bridge", "The carried history of %s could "
+                              "not be read: %s" % (project_name(p),
+                                                   traceback.format_exc()
+                                                   [-200:]),
+                              level="warn")
+            finally:
+                with _history_lock:
+                    n = _HISTORY["pending"].get(p, 0) - 1
+                    if n > 0:
+                        _HISTORY["pending"][p] = n
+                    else:
+                        _HISTORY["pending"].pop(p, None)
+
+
+def history_settle(timeout=60):
+    """Wait for the history thread to finish what it was given. Tests and
+    the daemon's own exit; never a request path."""
+    end = time.time() + timeout
+    while time.time() < end:
+        with _history_lock:
+            if not _HISTORY["queue"] and not any(_HISTORY["pending"].values()):
+                return True
+        time.sleep(0.05)
+    return False
+
+
 def migrate_compaction_points():
     """Recompute every stored compaction point from its own samples.
 
@@ -2714,6 +3491,104 @@ def migrate_compaction_points():
     return fixed
 
 
+# THE CHAT'S OWN THREAD. A hook waits for handle_event's return - SessionStart
+# for 8 s, after which the client starts the window without its start words -
+# and nothing said to Telegram may stand between the two. 2026-10-15, 8.142: the
+# tail of handle_event rewrote the status message in line, and a SessionStart
+# took 2.28-2.31 s against a Bot API that answered in 2 s, five runs of five;
+# the Bot API's own timeout is 10 s. It bites live where Telegram is set up -
+# the PC. -> DECISIONS.md 8.142
+#
+# One thread, one call at a time, in the order asked: the chat reads in the
+# order the bridge spoke. An error is a journal line, and the next call runs.
+# A pin or a links sweep already waiting is not queued again - each reads the
+# state when it runs, so a second would say nothing the first will not. Idle
+# for CHAT_IDLE seconds the thread ends, and the next call starts one.
+_CHAT_Q = []                    # (label, fn, args, kwargs), oldest first
+_CHAT_CV = threading.Condition()
+_CHAT = {"thread": None, "busy": None}
+_CHAT_ONCE = ("pin", "links")
+CHAT_IDLE = 15
+_HOOK = threading.local()       # .on while handle_event answers a hook
+
+
+def answering_hook():
+    """Is a hook waiting for the reply this thread is making?"""
+    return bool(getattr(_HOOK, "on", False))
+
+
+def hook_reply(fn):
+    """handle_event runs under this, so what it calls can ask
+    answering_hook() and hand its chat to chat_later."""
+    @functools.wraps(fn)
+    def answer(*a, **k):
+        was = answering_hook()
+        _HOOK.on = True
+        try:
+            return fn(*a, **k)
+        finally:
+            _HOOK.on = was
+    return answer
+
+
+def chat_later(label, fn, *args, **kwargs):
+    """fn(*args, **kwargs) on the chat's thread. False when a `label` of
+    _CHAT_ONCE was already waiting, and this one was dropped."""
+    with _CHAT_CV:
+        if label in _CHAT_ONCE and any(q[0] == label for q in _CHAT_Q):
+            return False
+        _CHAT_Q.append((label, fn, args, kwargs))
+        if _CHAT["thread"] is None:
+            _CHAT["thread"] = threading.Thread(target=_chat_run,
+                                               name="bridge-chat",
+                                               daemon=True)
+            _CHAT["thread"].start()
+        _CHAT_CV.notify_all()
+    return True
+
+
+def _chat_run():
+    while True:
+        with _CHAT_CV:
+            if not _CHAT_Q:
+                _CHAT_CV.wait(CHAT_IDLE)
+            if not _CHAT_Q:
+                _CHAT["thread"] = None
+                _CHAT_CV.notify_all()
+                return
+            label, fn, args, kwargs = _CHAT_Q.pop(0)
+            _CHAT["busy"] = label
+        try:
+            fn(*args, **kwargs)
+        except Exception as exc:
+            try:
+                store.journal("bridge_error", "The chat's %s raised and was "
+                              "dropped; the next one runs. %s: %s"
+                              % (label, type(exc).__name__, exc),
+                              level="log")
+            except Exception:
+                pass
+        finally:
+            with _CHAT_CV:
+                _CHAT["busy"] = None
+                _CHAT_CV.notify_all()
+
+
+def chat_settle(timeout=30.0):
+    """Wait until everything handed to the chat is done. True when it is;
+    False at the timeout, or when asked from the chat's own thread."""
+    if threading.current_thread() is _CHAT["thread"]:
+        return False
+    end = time.time() + timeout
+    with _CHAT_CV:
+        while _CHAT_Q or _CHAT["busy"]:
+            left = end - time.time()
+            if left <= 0:
+                return False
+            _CHAT_CV.wait(left)
+    return True
+
+
 def _notify_note(kind, lvl, where, text, path):
     """ONE journal line per notify() call, so "was a person rung?" is a
     question the journal can answer.
@@ -2741,7 +3616,8 @@ def _notify_note(kind, lvl, where, text, path):
         pass
 
 
-def notify(kind, text, level=None, buttons=None, path=None, planner=False):
+def notify(kind, text, level=None, buttons=None, path=None, planner=False,
+           about="", call=None):
     """Say something, and decide where it is allowed to be said.
 
     path names the pair this is about: it puts the pair's colour at the
@@ -2752,6 +3628,11 @@ def notify(kind, text, level=None, buttons=None, path=None, planner=False):
 
     needs_you also goes to the panel and, when the chat did not carry it or
     `planner` says so, to the pair's planner (needs_you_elsewhere, 8.109).
+    `about` names the half that is stuck, when it is one: a planner that is
+    itself the one asking is not told through its own channel. `call` is
+    (family, ref) for a call that can close by itself before anybody reads
+    it - its deliveries past the chat and the panel wait CALL_HOLD_SEC and
+    ask again (open_call). -> DECISIONS.md 8.151
     """
     lvl = level or CFG.get("notify", {}).get(kind) or \
         ("sound" if kind in SOUND_DEFAULT else "silent")
@@ -2787,6 +3668,22 @@ def notify(kind, text, level=None, buttons=None, path=None, planner=False):
                         if kind not in TELEGRAM_KINDS else "level is log"),
                      text, path)
         return lvl
+    if answering_hook():
+        # A HOOK IS WAITING for the reply this call is part of, and the send
+        # is a Bot API call with a 10 s timeout. The level is decided above
+        # and is what the caller gets; the send, its journal line and
+        # needs_you's other places go on the chat's thread, in the order
+        # they were asked. -> DECISIONS.md 8.142
+        chat_later("say", _notify_send, kind, lvl, text, buttons, path,
+                   planner, about, call)
+        return lvl
+    _notify_send(kind, lvl, text, buttons, path, planner, about, call)
+    return lvl
+
+
+def _notify_send(kind, lvl, text, buttons, path, planner, about="",
+                 call=None):
+    """notify's send, its journal line, and needs_you's other places."""
     where = "telegram"
     mid = None
     try:
@@ -2802,15 +3699,21 @@ def notify(kind, text, level=None, buttons=None, path=None, planner=False):
         if h.get("ok") is not None:
             telegram_note(h["ok"], h.get("why"), h.get("code"))
         if not mid:
-            where = "telegram - no message id came back"
+            # NOT CONFIGURED IS NOT A FAILED SEND. telegram.send returns
+            # None before any call when the token or the chat id is empty,
+            # and on a Mac with no chat every needs_you read "no message id
+            # came back", as if a send had been tried. -> DECISIONS.md 8.151
+            _tg = CFG.get("telegram") or {}
+            where = ("telegram not configured"
+                     if not (_tg.get("token") and _tg.get("chat_id"))
+                     else "telegram - no message id came back")
     finally:
         # In a finally, because the line has to exist even when the send
         # raised: "we tried and it blew up" is the answer somebody will be
         # looking for, and it is the one a return-value check cannot give.
         _notify_note(kind, lvl, where, text, path)
         if kind == "needs_you":
-            needs_you_elsewhere(text, path, bool(mid), planner)
-    return lvl
+            needs_you_elsewhere(text, path, bool(mid), planner, about, call)
 
 
 # THE PANEL'S COPY OF needs_you, newest last. In memory: the journal keeps
@@ -2827,7 +3730,8 @@ def panel_sound_on():
     return store.panel_sound_default() if v is None else bool(v)
 
 
-def needs_you_elsewhere(text, path, reached, planner=False):
+def needs_you_elsewhere(text, path, reached, planner=False, about="",
+                        call=None):
     """needs_you where a person can see it when the chat did not carry it.
 
     2026-10-13 on a Mac with no Telegram token: at 07:32:11 and 07:42:12
@@ -2845,6 +3749,10 @@ def needs_you_elsewhere(text, path, reached, planner=False):
     the chat did not carry it, or when the caller says the planner has to
     know anyway (planner=True). Each delivery is a journal line. Never
     raises: this runs in notify's finally. -> DECISIONS.md 8.109
+
+    Past the panel it goes through spread_call - the planner of home_pair
+    and the Mac's notification as well - and a `call` that can close by
+    itself is held first (open_call). -> DECISIONS.md 8.151
     """
     try:
         at = time.time()
@@ -2857,22 +3765,270 @@ def needs_you_elsewhere(text, path, reached, planner=False):
                 "project": project_name(path) if path else "",
                 "sound": not reached and panel_sound_on()})
             del PANEL_ALERTS[:-PANEL_ALERTS_MAX]
-        if not path or (reached and not planner):
+        if path and call and call[0] in CALL_FAMILIES:
+            open_call(path, call[0], about, call[1], text, reached, planner)
             return
-        _ok, how = deliver_ex(
-            path, "planner",
-            "The bridge needs the human for %s, and %s. Tell them, in your "
-            "next words to them: %s"
-            % (project_name(path),
-               "it went to the chat as well" if reached else
-               "the chat did not carry it (no Telegram on this machine, or "
-               "the send failed)", text),
-            {"kind": "info"})
-        store.journal("notify", "needs_you to the planner of %s through its "
-                      "channel: %s" % (project_name(path), how),
-                      project_name(path), "planner", "log", project_dir=path)
+        spread_call(path, text, reached, planner, about)
     except Exception:
         pass
+
+
+# A call for the person that can close by itself is delivered past the chat
+# and the panel only after this, and only if it is still open: of 47 calls
+# counted over 12-15.10, 12 closed in under a minute - five permission
+# dialogs, four reports, three waits. -> DECISIONS.md 8.151
+CALL_HOLD_SEC = 45
+# The families that can close, and how each is asked (call_open).
+CALL_FAMILIES = ("permission", "waiting", "report")
+# The Mac's own notification: one a pair in ten minutes, six an hour in all.
+MAC_NOTE_PAIR_SEC = 600
+MAC_NOTE_HOUR_MAX = 6
+MAC_NOTE_SCRIPT = ("on run argv",
+                   "display notification (item 1 of argv) "
+                   "with title (item 2 of argv)",
+                   "end run")
+MAC_NOTE_TIMES = []          # (at, pair key) of each one handed over
+MAC_NOTE_HELD = {}           # pair key -> held back since its last one
+IS_MAC = sys.platform == "darwin"
+_HOME_TOLD = set()
+
+
+def _mac_note_launch(argv):
+    """Hand one notification to osascript and do not wait for it."""
+    subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     close_fds=True)
+
+
+MAC_NOTIFY = _mac_note_launch     # the seam the suite replaces
+
+
+def home_pair():
+    """The pair whose planner the person talks to, as a project key, or "".
+
+    CFG["home_pair"], set by the owner or a planner, never by the code: with
+    none, nothing goes anywhere extra, and the published bridge keeps its
+    chat as the way to a person. A path that is not a watched project is one
+    journal line per value and is not used. -> DECISIONS.md 8.151
+    """
+    h = CFG.get("home_pair") or ""
+    if not h:
+        return ""
+    k = norm(h)
+    if k in {norm(p) for p in (CFG.get("projects") or {})}:
+        return k
+    if h not in _HOME_TOLD:
+        _HOME_TOLD.add(h)
+        store.journal("notify", "home_pair %s is not a watched project - "
+                      "it is not used" % h, "", "", "warn")
+    return ""
+
+
+def mac_notify(path, text):
+    """The Mac's notification about one call: True when it was handed over.
+
+    /usr/bin/osascript with `display notification`, the text and title in
+    argv only, never inside the script, and never a `sound name` - which is
+    the only thing that makes it play a sound. Only on a Mac with mac_notify
+    on (off by default). osascript ends 0 whether the notification was shown
+    or swallowed by a permission nobody has given yet, so the line says
+    "handed to Notification Center", not "shown". -> DECISIONS.md 8.151
+    """
+    if not (IS_MAC and CFG.get("mac_notify")):
+        return False
+    now_ts = time.time()
+    k = norm(path) if path else ""
+    name = project_name(path) if path else "the bridge"
+    with _lock:
+        MAC_NOTE_TIMES[:] = [(a, p) for a, p in MAC_NOTE_TIMES
+                             if now_ts - a < 3600]
+        why = ""
+        if any(p == k and now_ts - a < MAC_NOTE_PAIR_SEC
+               for a, p in MAC_NOTE_TIMES):
+            why = "one a pair in %d min" % (MAC_NOTE_PAIR_SEC // 60)
+        elif len(MAC_NOTE_TIMES) >= MAC_NOTE_HOUR_MAX:
+            why = "%d an hour in all" % MAC_NOTE_HOUR_MAX
+        if why:
+            MAC_NOTE_HELD[k] = held = MAC_NOTE_HELD.get(k, 0) + 1
+        else:
+            MAC_NOTE_TIMES.append((now_ts, k))
+            held = MAC_NOTE_HELD.pop(k, 0)
+    if why:
+        store.journal("notify", "macOS notification about %s suppressed (%s)"
+                      " - %d held back since the last one"
+                      % (name, why, held), name if path else "", "", "log",
+                      project_dir=path)
+        return False
+    argv = ["/usr/bin/osascript"]
+    for line in MAC_NOTE_SCRIPT:
+        argv += ["-e", line]
+    argv += [brief(text, 240), "Bridge - %s" % name]
+    try:
+        MAC_NOTIFY(argv)
+        how = "handed to Notification Center"
+    except Exception as e:
+        how = "osascript could not be started: %s" % e
+    store.journal("notify", "macOS notification about %s: %s%s"
+                  % (name, how, (" (%d held back before it)" % held)
+                     if held else ""),
+                  name if path else "", "", "log", project_dir=path)
+    return True
+
+
+def spread_call(path, text, reached, planner=False, about=""):
+    """needs_you past the chat and the panel: the pair's planner, the home
+    planner, the Mac's notification.
+
+    The pair's planner, as before (8.109) - unless `about` says it is the
+    planner that is stuck: a window on a dialog does not read its channel,
+    and on 2026-10-14 five calls about one planner went into that planner's
+    channel and to nobody else. The home planner when it is another pair
+    and the chat did not carry it. A call about the planner that reaches
+    no other planner says so in the journal. -> DECISIONS.md 8.151
+    """
+    name = project_name(path) if path else ""
+    k = norm(path) if path else ""
+    home = home_pair()
+    went = []
+    if path and not (reached and not planner):
+        if about == "planner":
+            store.journal("notify", "needs_you not to the planner of %s: it "
+                          "is the one asking" % name, name, "planner", "log",
+                          project_dir=path)
+        else:
+            _ok, how = deliver_ex(
+                path, "planner",
+                "The bridge needs the human for %s, and %s. Tell them, in "
+                "your next words to them: %s"
+                % (name, "it went to the chat as well" if reached else
+                   "the chat did not carry it (no Telegram on this machine, "
+                   "or the send failed)", text),
+                {"kind": "info"})
+            store.journal("notify", "needs_you to the planner of %s through "
+                          "its channel: %s" % (name, how), name, "planner",
+                          "log", project_dir=path)
+    if path and home and home != k and not reached:
+        _ok, how = deliver_ex(
+            home, "planner",
+            "The bridge needs the human for %s: %s. Tell them in your next "
+            "words." % (name, text), {"kind": "info"})
+        store.journal("notify", "needs_you about %s to the home planner, of "
+                      "%s, through its channel: %s"
+                      % (name, project_name(home), how), project_name(home),
+                      "planner", "log", project_dir=home)
+        went.append("the home planner")
+    if mac_notify(path, text):
+        went.append("the Mac's notification")
+    if path and about == "planner" and not reached \
+            and "the home planner" not in went:
+        store.journal("notify", "needs_you about the planner of %s reaches "
+                      "a person by %s" % (name, " and ".join(
+                          ["the panel"] + went[-1:]) if went else
+                          "the panel alone - mac_notify is off and no other "
+                          "planner is home_pair"), name, "planner",
+                      "log" if went else "warn", project_dir=path)
+    return went
+
+
+def open_call(path, family, about, ref, text, reached, planner):
+    """Hold a call that can close by itself; calls_pass delivers it.
+
+    One record per (project, family, about). The same call again while it is
+    open - the same dialog, the same report - delivers nothing new; another
+    one of the family replaces it. -> DECISIONS.md 8.151
+    """
+    k, key, now_ts = norm(path), "%s|%s" % (family, about), time.time()
+    name = project_name(path)
+    with _lock:
+        book = STATE.setdefault("calls", {}).setdefault(k, {})
+        old = book.get(key)
+        same = bool(old) and old.get("ref") == ref
+        if not same:
+            book[key] = {"id": "%s-%d" % (family, int(now_ts * 1000)),
+                         "family": family, "about": about, "ref": ref,
+                         "opened_at": now_ts, "text": text[:2000],
+                         "reached": bool(reached), "planner": bool(planner),
+                         "sent": 0}
+            save_state()
+    if same:
+        store.journal("notify", "needs_you about %s (%s) is the call open "
+                      "since %s - nothing more is delivered for it"
+                      % (name, key, clock_at(old.get("opened_at") or now_ts)),
+                      name, about or "", "log", project_dir=path)
+    else:
+        store.journal("notify", "needs_you about %s (%s) is held %d s before "
+                      "it goes past the chat and the panel: it can close by "
+                      "itself" % (name, key, CALL_HOLD_SEC), name,
+                      about or "", "log", project_dir=path)
+
+
+def call_open(path, rec):
+    """Is this call still open? (True, "") or (False, what closed it)."""
+    fam, about, k = rec.get("family"), rec.get("about") or "", norm(path)
+    if fam == "permission":
+        ask = open_permission_ask(path, about)
+        if ask and float(ask.get("at") or 0) == float(rec.get("ref") or 0):
+            return True, ""
+        return False, ("the dialog being answered" if not ask else
+                       "another dialog being drawn")
+    if fam == "waiting":
+        if (STATE.get("waiting_on_you") or {}).get(k):
+            return True, ""
+        return False, "the pair no longer waiting on you"
+    if fam == "report":
+        lv = (STATE.get("last_verdict") or {}).get(k) or {}
+        at = float(lv.get("at") or 0)
+        if at < float(rec.get("opened_at") or 0):
+            return True, ""
+        return False, "a verdict reaching the bridge at %s" % clock_at(at)
+    return False, "a family this bridge does not know (%s)" % fam
+
+
+def calls_pass(now_ts=None):
+    """Each held call: closed -> one line and no delivery; open past
+    CALL_HOLD_SEC -> delivered once (spread_call). session_watch runs it.
+    -> DECISIONS.md 8.151"""
+    now_ts = time.time() if now_ts is None else now_ts
+    for k, book in list((STATE.get("calls") or {}).items()):
+        for key, rec in list((book or {}).items()):
+            if not isinstance(rec, dict):
+                continue
+            name = project_name(k)
+            age = now_ts - float(rec.get("opened_at") or now_ts)
+            try:
+                live, by = call_open(k, rec)
+            except Exception as e:
+                live, by = True, ""
+                _wdbg("call_open %s %s: %s" % (k, key, e))
+            if k not in {norm(p) for p in (CFG.get("projects") or {})}:
+                live, by = False, "the project no longer being watched"
+            if not live:
+                with _lock:
+                    if (STATE.get("calls") or {}).get(k, {}).get(key) is rec:
+                        STATE["calls"][k].pop(key, None)
+                        if not STATE["calls"][k]:
+                            STATE["calls"].pop(k, None)
+                        save_state()
+                store.journal("notify", "needs_you about %s (%s) %s after %d"
+                              " s (by %s)"
+                              % (name, key, "closed" if rec.get("sent") else
+                                 "closed before delivery - nothing went past "
+                                 "the chat and the panel,", int(age), by),
+                              name, rec.get("about") or "", "log",
+                              project_dir=k)
+                continue
+            if age < CALL_HOLD_SEC:
+                continue
+            with _lock:
+                if rec.get("sent"):
+                    continue
+                rec["sent"] = now_ts
+                save_state()
+            store.journal("notify", "needs_you about %s (%s) still open after"
+                          " %d s - delivered" % (name, key, int(age)), name,
+                          rec.get("about") or "", "log", project_dir=k)
+            spread_call(k, rec.get("text") or "", rec.get("reached"),
+                        rec.get("planner"), rec.get("about") or "")
 
 
 def take_panel_alerts(seen):
@@ -4757,6 +5913,101 @@ def calib_miss(model, path, at_pct, how):
                        measured_at=time.strftime("%Y-%m-%d %H:%M"), how=how)
 
 
+def ceiling_fields(model, path):
+    """What calib_miss changes, as it stands now - kept on the compaction's
+    record, before and after, so that it can be put back (8.149)."""
+    cal = store.calib_get(model, path, 0)
+    return {k: cal.get(k) for k in ("ceiling_pct", "multiplier", "misses",
+                                    "clean_streak", "how", "measured_at")}
+
+
+# The `how` every PreCompact wrote before 8.149; reset_compact_ceilings
+# reads it to know whose step down an entry's last one was.
+PRECOMPACT_MISS = "PreCompact fired - estimate was high"
+
+
+def reset_compact_ceilings():
+    """Put back, once, the ceiling earlier PreCompacts lowered where a
+    compaction was no miss (8.149).
+
+    Until 8.149 every PreCompact called calib_miss, and under rotate_policy
+    compact - every project on both machines - that held each 222k
+    executor's entry at 40 % and 3.0. An entry whose last step down is still
+    that PreCompact's (`how`), of a project on compact, goes back to the
+    initial ceiling of its window and 1.5. Once: the reset writes its own
+    `how`. A wall's miss is never undone (handle_wall_hit writes "wall
+    hit"), nor a project not on compact. The window is the one a session of
+    that key reports; a key no session reports is left for a later start,
+    and the journal says so when the set of them changes.
+    Each key is journalled with what it was and what it is.
+    """
+    with _lock:
+        wins = {}
+        for s in (STATE.get("sessions") or {}).values():
+            if not (isinstance(s, dict) and s.get("path")
+                    and s.get("window")):
+                continue
+            k = store.calib_key(calib_model(s.get("model"), s["path"],
+                                            s.get("role")), s["path"])
+            wins.setdefault(k, int(s["window"]))
+    try:
+        cal = store.load_calibration()
+    except Exception:
+        return
+    left = []
+    for key, entry in sorted(cal.items()):
+        # 8.62 appends "; merged from ..." to the how it carried over
+        if not (isinstance(entry, dict) and "|" in key
+                and str(entry.get("how") or "").startswith(
+                    PRECOMPACT_MISS)):
+            continue
+        model, proj = key.split("|", 1)
+        if store.project_config(CFG, proj).get("rotate_policy",
+                                               "compact") != "compact":
+            continue
+        if not wins.get(key):
+            left.append(key)
+            continue
+        init = store.calib_initial_ceiling(wins[key])
+        was = (entry.get("ceiling_pct"), entry.get("multiplier"))
+        back = (max(float(was[0] or 0), init), 1.5)
+        if back == was:
+            continue
+        store.calib_update(model, proj, ceiling_pct=back[0],
+                           multiplier=back[1], clean_streak=0,
+                           measured_at=time.strftime("%Y-%m-%d %H:%M"),
+                           how="reset at start-up: under rotate_policy "
+                               "compact a compaction is no miss (8.149)")
+        store.journal("bridge", "Calibration %s: ceiling %s %% / multiplier "
+                      "%s -> %s %% / %s - the PreCompacts that lowered it "
+                      "were no misses under rotate_policy compact (8.149); "
+                      "its count of misses, %s, is kept"
+                      % (model, was[0], was[1], back[0], back[1],
+                         entry.get("misses", 0)), project_name(proj), "",
+                      "warn", project_dir=proj)
+    # the same keys were journalled at every start - sixteen on the PC, a
+    # line each restart, nothing new in any but the first: only a changed
+    # set is said. What was said is kept as a hash, so STATE holds no path
+    # (STATE_PATHS), and a moved project's keys read as a new set, once
+    sig = hashlib.sha1("\n".join(left).encode("utf-8")).hexdigest()[:16] \
+        if left else ""
+    with _lock:
+        seen = STATE.get("calib_left_said") or ""
+        if sig != seen:
+            if sig:
+                STATE["calib_left_said"] = sig
+            else:
+                STATE.pop("calib_left_said", None)
+            save_state()
+    if left and sig != seen:
+        store.journal("bridge", "Calibration: %d entr%s lowered by "
+                      "PreCompact under rotate_policy compact left as they "
+                      "are - no session reports their window yet; said "
+                      "again only when the set changes (8.149)"
+                      % (len(left), "y" if len(left) == 1 else "ies"),
+                      level="log")
+
+
 def calib_clean(model, path):
     cal = store.calib_get(model, path, 0)
     streak = cal.get("clean_streak", 0) + 1
@@ -5846,6 +7097,20 @@ def assess(path):
     # (planner_recovery_seed). -> DECISIONS.md 8.18
     if pl["alive"] and pl["plan"].get("do") == "handover" \
             and not sit["handover"]:
+        # NOT FOR A PAIR NOBODY WORKS (132b), and asked FIRST - before the
+        # demand below is written, and before acted_recently, which writes
+        # its stamp. A demand written with the loop off starts its ceiling
+        # clock then, and a planner whose loop came back after
+        # HANDOFF_WAIT_MAX_SEC would be replaced at once, never asked for
+        # its handoff. Said once, by the decision's own fingerprint.
+        # -> DECISIONS.md 8.151
+        _idle = lock_idle_why(path)
+        if _idle:
+            return done("the planner at the end of its runway",
+                        "not replaced: %s" % _idle,
+                        say=handover_decision_new(path, "planner",
+                                                  pl["plan"],
+                                                  "idle: " + _idle))
         # BEFORE acted_recently, and that order is load-bearing:
         # acted_recently WRITES its stamp when it answers False, so a hold
         # asked after it would spend the one-per-hour allowance without
@@ -5980,6 +7245,17 @@ def assess(path):
                     "cancelled it and told the executor to carry on")
 
     if plan["do"] == "handover":
+        # NOT FOR A PAIR NOBODY WORKS - the same question handover() asks of
+        # a wall replacement (132b), asked here first: this pass runs every
+        # minute for a pair whose loop is off, and a decision forgotten and
+        # dropped each time would write both lines every minute. Said once,
+        # by the decision's own fingerprint.
+        _idle = lock_idle_why(path)
+        if _idle:
+            return done("the executor at the end of its runway",
+                        "not replaced: %s" % _idle,
+                        say=handover_decision_new(path, "executor", plan,
+                                                  "idle: " + _idle))
         # ASKED BEFORE THE LINE IS WRITTEN, which is the whole of the fix:
         # what is blocking it is part of the decision, so it has to be known
         # before the decision can be recognised as one already recorded.
@@ -6174,6 +7450,38 @@ def shares_at_start(platform=None):
         store.journal("bridge", "the shares were not checked: %s" % exc,
                       level="warn")
         return []
+
+
+SHARE_WATCH_SEC = 30
+
+
+def shares_while_running(platform=None):
+    """On a Mac, a share that dropped while the bridge runs is asked back,
+    for the projects the bridge WORKS now - the loop on and no person's
+    pause, as the lock reads it (lock_idle_why): a folder a person stepped
+    away from is left as it is. netshare.while_running does the asking: no
+    more often than its RETRY_SEC a share, only with the password in the
+    keychain, a journal line each. M4 asked shares back at the start alone
+    (8.90); the one that dropped on 2026-10-15 at 21:33 came back only by
+    hand (132a, 8.150). Lines said, for the tests; never raises."""
+    if (sys.platform if platform is None else platform) != "darwin":
+        return []
+    try:
+        return netshare.while_running(
+            [p for p in pair_paths() if not lock_idle_why(p)])
+    except Exception as exc:
+        store.journal("bridge", "a share that dropped was not asked back: "
+                      "%s" % exc, level="warn")
+        return []
+
+
+def share_watch():
+    while True:
+        try:
+            shares_while_running()
+        except Exception:
+            pass
+        time.sleep(SHARE_WATCH_SEC)
 
 
 LOCK_WATCH_SEC = 10
@@ -7787,6 +9095,15 @@ def git_commit_iteration(path, n, verdict):
     pconf = store.project_config(CFG, path)
     if not pconf.get("commit_each_iteration"):
         return
+    off = commit_off(path, pconf)
+    if off:
+        # Said once per project per run, like the archive map's (8.133): it
+        # is a setting's consequence, not an iteration that failed.
+        if path not in _commit_off_said:
+            _commit_off_said.add(path)
+            store.journal("git", "NOT COMMITTING in %s: %s" % (path, off),
+                          project_name(path), "", "warn", project_dir=path)
+        return
     try:
         where, why = repo_dir(path)
         if where is None:
@@ -7836,9 +9153,9 @@ def git_commit_iteration(path, n, verdict):
                           % (where, out[:300]), project_name(path), "",
                           "warn", project_dir=path)
             return
-        rc, out = _git(["commit", "-m",
-                        "bridge: iteration %d (%s)" % (n, verdict)], where,
-                       git_dir=gdir)
+        rc, out = _git(commit_identity(path, where) + [
+            "commit", "-m", "bridge: iteration %d (%s)" % (n, verdict)],
+            where, git_dir=gdir)
         if rc != 0:
             # NOTHING TO COMMIT IS NOT A FAILURE. A verdict on a report that
             # changed no files is the ordinary case - reconnaissance, a
@@ -7870,6 +9187,59 @@ def git_commit_iteration(path, n, verdict):
             store.journal("git", "NOT COMMITTING: %s while committing in %s"
                           % (exc, path), project_name(path), "", "warn",
                           project_dir=path)
+
+
+# The projects told this run that their iterations are not committed because
+# they sit on a share, and those told whose name the bridge commits under.
+_commit_off_said = set()
+_identity_said = set()
+
+
+def commit_off(path, pconf=None):
+    """Why this project's iterations are not committed, or "" when they are.
+
+    ON A NETWORK SHARE, NOT UNLESS ASKED. A Mac committing a project on the
+    PC's share reads the files through SMB, and SMB can hand it bytes the
+    share had not caught up with: one project's a064b18 (2026-10-14) stored an
+    image as blob 7e589b71 where the file on the PC was 11f12d31, and
+    ef3f885 had to put it back. The repository belongs to the machine whose
+    disk it is on; commit_on_share is the project's own switch for a person
+    who wants it anyway. -> DECISIONS.md 8.145
+    """
+    pconf = pconf if pconf is not None else store.project_config(CFG, path)
+    if pconf.get("commit_on_share") or not project_on_share(path):
+        return ""
+    return ("the project is on a network share, and a commit read over it "
+            "can store bytes the share had not caught up with (seen once, "
+            "2026-10-14). Commit it on the machine whose disk it is "
+            "on, or set commit_on_share for this project to commit anyway. "
+            "Said once per run. (8.145)")
+
+
+def commit_identity(path, where):
+    """`-c` pairs for a commit: nothing when the repository (or the global
+    or system config) names its author, `bridge <bridge@invalid>` when it
+    does not - never git's guess. A Mac with no user.email committed
+    a project as the owner's name at the Mac's .local host name (167111a,
+    2026-10-15): a guessed identity is a stranger's address in a history
+    that may be published. Said once per project per run. -> 8.146
+    """
+    out = []
+    for key, fallback in (("user.name", "bridge"),
+                          ("user.email", "bridge@invalid")):
+        rc, val = _git(["config", "--get", key], where, timeout=8)
+        if rc != 0 or not val.strip():
+            out += ["-c", "%s=%s" % (key, fallback)]
+    if out and path not in _identity_said:
+        _identity_said.add(path)
+        store.journal("git", "Iterations in %s are committed as bridge "
+                      "<bridge@invalid>: no %s is configured for that "
+                      "repository or globally, and git's guess is not used "
+                      "(8.146)" % (where, " or ".join(
+                          out[i + 1].split("=")[0]
+                          for i in range(0, len(out), 2))),
+                      project_name(path), "", "log", project_dir=path)
+    return out
 
 
 RC_URL = re.compile(r"https://claude\.ai/code/session_[A-Za-z0-9_-]+")
@@ -8076,6 +9446,12 @@ def sync_links(reason=""):
     global CFG
     if not (CFG.get("telegram") or {}).get("chat_id"):
         return ""
+    if answering_hook():
+        # a hook's reply does not wait on a getChat and an edit: the sweep
+        # runs on the chat's thread and reads the registry when it runs
+        # -> DECISIONS.md 8.142
+        chat_later("links", sync_links, reason)
+        return ""
     text = links_text()
     before = (CFG.get("telegram") or {}).get("links_text")
     if not text and before:
@@ -8256,7 +9632,69 @@ CONFIG_KEYS = ("notify", "thresholds", "retention", "projects",
                # copies only the keys named here, so a switch left out
                # of this tuple is one no panel and no endpoint can
                # reach. -> store.DEFAULT_CONFIG, "nudge_console"
-               "nudge_console", "archive_map_on_share", "panel_sound")
+               "nudge_console", "archive_map_on_share", "panel_sound",
+               # who hears a call the chat did not carry, and the Mac's
+               # notification of it: set by the owner or a planner, so both
+               # must be reachable here. -> DECISIONS.md 8.151
+               "home_pair", "mac_notify")
+
+
+def _folded(projects):
+    return {norm(k): v for k, v in (projects or {}).items()}
+
+
+def config_added(was, after):
+    """The projects a /config write put into the watch list."""
+    if "projects" not in was:
+        return []
+    return sorted(set(_folded(after.get("projects"))) -
+                  set(_folded(was.get("projects"))))
+
+
+def config_change_lines(was, after):
+    """What a /config write changed: [(project path or "", line)], one line
+    per project that came or went and per key whose value changed.
+
+    The panel posts the whole projects dict on every toggle, and /config
+    wrote no line about what a write had changed: a switch flipped there -
+    one project's commit_each_iteration on 2026-10-15 - was on record only in
+    config.json, with no time and no "was". A key that did not change says
+    nothing, so a toggle is one line and not a dump. -> DECISIONS.md 8.147
+    """
+    def show(v):
+        if v is _UNSET:
+            return "unset"
+        return brief(json.dumps(v, ensure_ascii=False, sort_keys=True), 160)
+
+    out = []
+    for key in sorted(was):
+        if key == "projects":
+            continue
+        if was.get(key) != after.get(key):
+            out.append(("", "Setting %s: was %s, now %s (/config)"
+                        % (key, show(was.get(key)), show(after.get(key)))))
+    if "projects" not in was:
+        return out
+    old, new = _folded(was.get("projects")), _folded(after.get("projects"))
+    for p in sorted(set(old) | set(new)):
+        name = project_name(p)
+        if p not in old:
+            out.append((p, "%s entered the watch list (/config)" % name))
+            continue
+        if p not in new:
+            out.append((p, "%s left the watch list (/config)" % name))
+            continue
+        a = old[p] if isinstance(old[p], dict) else {}
+        b = new[p] if isinstance(new[p], dict) else {}
+        for k in sorted(set(a) | set(b)):
+            va, vb = a.get(k, _UNSET), b.get(k, _UNSET)
+            if va != vb:
+                out.append((p, "%s: %s was %s, now %s (/config)"
+                            % (name, k, show(va), show(vb))))
+    return out
+
+
+_UNSET = object()
 
 
 def warn_config_handedits(being_set):
@@ -9952,6 +11390,84 @@ def executor_is_working(path):
         return False
 
 
+# A turn of the executor's that has not ended for this long is news for its
+# planner: no report can come until it does. Above the p99 gap between
+# turns, 1889 s, which stalled() measured. -> DECISIONS.md 8.151
+LONG_TURN_SEC = 2700
+LONG_TURN_AGAIN_SEC = 3600
+LONG_TURN_TOLD = {}          # project key -> (transcript, turn start, at)
+
+
+def long_turn_note(path, now_ts=None):
+    """Tell the planner that no report comes because the executor's turn has
+    not ended - once a turn, again at most once an hour.
+
+    2026-10-15, a watched project: its executor's window wrote no Stop and no
+    turn end from 15:35 to 18:57 - thirteen compactions inside one turn -
+    and at 18:56 the planner told its executor the bridge was not carrying
+    reports. Nothing in the bridge said otherwise: stalled() wants a frozen
+    transcript, silence counts reports, the idle spin counts empty turns.
+    News, not needs_you: the executor is working and nobody is needed.
+
+    The turn's start is the newest turn end the transcript of the session
+    on record shows (_turn_markers), or its last Stop (stop_seen), whichever
+    is later - both survive a restart. Returns what it decided.
+    """
+    now_ts = time.time() if now_ts is None else now_ts
+    k = norm(path)
+    if not ((STATE.get("loops") or {}).get(k) or {}).get("active") \
+            or (STATE.get("paused") or {}).get(k):
+        return "loop off or paused"
+    pid = pid_of(path, "executor")
+    try:
+        alive = bool(pid) and sessions.pid_alive(int(pid))
+    except Exception:
+        alive = False
+    if not alive:
+        return "no executor window"
+    if PENDING.get(k):
+        return "a report is with the planner"
+    tp = transcript_path_for(path, "executor")
+    state, last_end = _turn_markers(tp)
+    end = max(last_end, float((STATE.get("stop_seen") or {})
+                              .get("%s|executor" % k) or 0))
+    if state != "open" or not end:
+        return "no open turn with a known start"
+    if now_ts - end < float(CFG.get("thresholds", {})
+                         .get("long_turn", LONG_TURN_SEC)):
+        return "the turn is younger than long_turn"
+    if not executor_is_working(path):
+        return "not working - a frozen window is stalled()'s"
+    told = LONG_TURN_TOLD.get(k)
+    if told and told[:2] == (tp, end) \
+            and now_ts - told[2] < LONG_TURN_AGAIN_SEC:
+        return "said already"
+    try:
+        wrote = os.path.getmtime(tp)
+    except OSError:
+        wrote = 0
+    rs = (STATE.get("report_sent") or {}).get(k) or {}
+    LONG_TURN_TOLD[k] = (tp, end, now_ts)
+    name = project_name(path)
+    ok, how = deliver_ex(
+        path, "planner",
+        "No report from the executor since %s: its turn has not ended since "
+        "%s (the last turn end in its transcript, or its last Stop), %d min "
+        "ago; its transcript last wrote at %s. A report is carried when a "
+        "turn ends - there is none to carry yet. This is not a carrying "
+        "fault. Said once a turn, and again at most once an hour."
+        % (("report %s at %s" % (rs.get("n"), clock_at(float(rs["at"]))))
+           if rs.get("at") else "this bridge started",
+           clock_at(end), int((now_ts - end) // 60),
+           clock_at(wrote) if wrote else "an unknown time"),
+        {"kind": "info"})
+    store.journal("loop", "The executor's turn has not ended for %d min - "
+                  "the planner told that no report is lost: %s"
+                  % (int((now_ts - end) // 60), how), name, "executor", "log",
+                  project_dir=path)
+    return "told"
+
+
 def check_stalls():
     grace = float(CFG.get("thresholds", {}).get("stall_grace", 180))
     for path, w in list((STATE.get("awaiting") or {}).items()):
@@ -10022,6 +11538,17 @@ def session_watch():
             check_sessions(grace)
         except Exception:
             pass
+        # the calls held for CALL_HOLD_SEC, and a turn that has not ended
+        # (8.151) - each in its own try, so one cannot stop the other
+        try:
+            calls_pass()
+        except Exception:
+            pass
+        for _p in list((CFG.get("projects") or {})):
+            try:
+                long_turn_note(_p)
+            except Exception:
+                pass
 
 
 def _wdbg(msg):
@@ -12637,6 +14164,32 @@ def handover(path, reason, roles=("executor", "planner"), own_handoff="",
     path = norm(path)
     name = project_name(path)
     _, lp = loop_state(path)
+    # A WALL REPLACEMENT IS FOR A PAIR THAT GOES ON WORKING, asked NOW - not
+    # when it was decided. The Stop's wall branch decides before run_review
+    # and starts this after it, and the verdict in between can turn the loop
+    # off: 2026-10-15 22:42:33 a planner's `stop` (the pair was moving to
+    # another machine), and at 22:42:35 a new executor window opened in a
+    # pair nobody was working. Asked before the orphaned swap too, because
+    # finishing one stops a window. NOTHING IS PUT BACK: the wall branch
+    # runs only for a loop that works, and with no demand on record its next
+    # Stop asks for a CURRENT handoff and replaces at the one after. A demand
+    # put back here would start its clock at the refusal, and after a loop
+    # off for longer than HANDOFF_WAIT_MAX_SEC its first Stop would read it
+    # as overdue: a needs_you for the executor, a planner replaced without
+    # a current handoff (planner_wall_holds). The panel's button
+    # (at_wall False) is the owner's and is not refused. -> DECISIONS.md 8.151
+    if at_wall:
+        _idle = lock_idle_why(path)
+        if _idle:
+            store.journal("rotation",
+                          "Handover at the wall dropped: %s. No window is "
+                          "opened for the %s; it is asked again at its next "
+                          "Stop with the loop working (%s)"
+                          % (_idle, " and the ".join(roles), reason),
+                          name, roles[0] if roles else "executor", "log",
+                          project_dir=path)
+            return {"ok": False, "error": "handover at the wall dropped: %s"
+                    % _idle, "dropped": _idle}
     # A REPLACEMENT THE BRIDGE ALREADY OPENED IS STILL WAITING - an orphaned
     # swap's newcomer. The swap is finished to it; opening another is how a
     # pair got a third planner on 2026-09-26. -> DECISIONS.md 8.36
@@ -12977,6 +14530,22 @@ def handoff_heard(path, body):
         if got is None:
             return "unread"
     return "no"
+
+
+def retired_start(path, role, event):
+    """Is this SessionStart one of the session a pending handover of this
+    half retires (its `retired` sid)? Then it is not the replacement:
+    the old window compacting, or a subagent of it landing, between the
+    launch and the new window's start. resume_after_handover took any
+    start for the new window's - it put the old window out before the new
+    one was up and dropped the record, and a planner's start popped the
+    seed meant for its replacement. -> DECISIONS.md 8.148 (debt 1, E)"""
+    hv = (STATE.get("handover") or {}).get(norm(path)) or {}
+    if role not in (hv.get("roles") or []):
+        return False
+    sid = str(event.get("session_id") or "")
+    old = str((hv.get("retired") or {}).get(role) or "")
+    return bool(sid and old and sid == old)
 
 
 def resume_after_handover(path, role, seed=None):
@@ -16044,6 +17613,10 @@ def note_turn_edge(path, role, event, name):
     elif name in ("PreToolUse", "PostToolUse", "PostToolUseFailure",
                   "SessionStart") and not event.get("agent_id"):
         TURN_EDGE.setdefault(k, {})["main"] = time.time()
+    elif name in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
+        # a subagent of this session is working: a compaction now may be
+        # its, not the window's (agent_active). -> DECISIONS.md 8.148
+        TURN_EDGE.setdefault(k, {})["agent"] = time.time()
 
 
 def half_turn_over(path, role, sid):
@@ -16558,6 +18131,16 @@ def close_at_stop(path, role, event):
         agent = str(meta.get("agent") or "")
         if meta.get("bg"):
             if not mine or agent:
+                continue
+            # HANDED OVER AT A SWAP, NOT LAUNCHED HERE. bg_session_gone moves
+            # the old window's job onto the new session (`from_session`), and
+            # the new client's list never named it - it did not start it - so
+            # "the list no longer names it" says nothing about this job. On
+            # 2026-10-15 at 22:31:27 it closed two the old window had left
+            # running, and the next `wait` was parked on a person. Such a
+            # record ends by its shell (inherited_jobs_over) or at BG_MAX_SEC.
+            # -> DECISIONS.md 8.31, 8.151
+            if meta.get("from_session"):
                 continue
             bgid = str(meta.get("bgid") or "")
             if listed is None or not bgid:
@@ -17279,7 +18862,7 @@ def nudge_stalled(path, role, since, owed=""):
         pass
     notify("needs_you", "%s: the %s has been silent for %dm with nothing "
            "running and %s still owed, and the bridge cannot reach it."
-           % (name, role, mins, what), path=path)
+           % (name, role, mins, what), path=path, about=role)
     return "called you"
 
 
@@ -20389,11 +21972,13 @@ def note_open_call(path, role, event):
             book.pop(next(iter(book)))
 
 
-def forget_open_calls(path, role, tid="", sid="", whole=False):
+def forget_open_calls(path, role, tid="", sid="", whole=False, before=None):
     """A call finished (by its id), or a turn or a session ended (by the
     session): what it had open is no longer open. A turn ending leaves a
     subagent's calls alone - a background subagent outlives the turn that
-    started it - and a session ending takes everything of that session."""
+    started it - and a session ending takes everything of that session.
+    `before` (epoch): only calls opened by then - a start run late, by
+    settle_landing, closes what stood at its landing (8.148)."""
     key = "%s|%s" % (norm(path), role)
     with _lock:
         book = OPEN_CALLS.get(key)
@@ -20404,7 +21989,8 @@ def forget_open_calls(path, role, tid="", sid="", whole=False):
             return
         for t, c in list(book.items()):
             if (not sid or c.get("sid") == sid) \
-                    and (whole or not c.get("agent")):
+                    and (whole or not c.get("agent")) \
+                    and (before is None or float(c.get("at") or 0) <= before):
                 book.pop(t, None)
 
 
@@ -20605,7 +22191,7 @@ def tell_permission_ask(path, role, behind):
            "nothing: Enter in a dialog chooses whatever is highlighted."
            % (project_name(path), role, pid_of(path, role) or "unknown",
               ask_words(rec), behind, what),
-           path=path)
+           path=path, about=role, call=("permission", rec.get("at")))
     return True
 
 
@@ -20652,7 +22238,8 @@ def ask_is_only_window(path, role):
     return True
 
 
-def end_permission_ask(path, role, by, sid="", agent=None, call="", tool=""):
+def end_permission_ask(path, role, by, sid="", agent=None, call="", tool="",
+                       before=None):
     """The dialog was answered - by the window's own evidence. One line.
 
     The witness is the half moving on in its own window: the very call the
@@ -20660,11 +22247,14 @@ def end_permission_ask(path, role, by, sid="", agent=None, call="", tool=""):
     session ending or starting again, or - for the planner - the verdict
     reaching the bridge, which only the verdict tool can send. Each is an
     event the client cannot send while that dialog is still drawn.
+    `before` (epoch): a start run late closes only a dialog drawn by then.
     """
     key = "%s|%s" % (norm(path), role)
     with _lock:
         rec = (STATE.get("asks") or {}).get(key)
         if not rec or not ask_answered_by(rec, sid, agent, call, tool):
+            return False
+        if before is not None and float(rec.get("at") or 0) > before:
             return False
         STATE["asks"].pop(key, None)
         save_state()
@@ -20685,11 +22275,14 @@ PERMISSION_LIFTS = {
 }
 
 
-def permission_witness(name, path, role, event):
+def permission_witness(name, path, role, event, before=None):
     """Keep the open-call book, and close a dialog this event proves over.
 
     ONE CALL, at the top of handle_event, for every event - so no branch
-    below can return before it, and a new branch cannot forget it.
+    below can return before it, and a new branch cannot forget it. The
+    one exception is a landing a subagent may have made: settle_landing
+    makes the call once it is known, with `before` - the landing's time,
+    so that what was opened since stays open (8.148).
     """
     sid = str(event.get("session_id") or "")
     tid = str(event.get("tool_use_id") or "")
@@ -20702,7 +22295,7 @@ def permission_witness(name, path, role, event):
     if own:
         forget_open_calls(path, role, tid=tid)
     elif whole or name in ("Stop", "StopFailure"):
-        forget_open_calls(path, role, sid=sid, whole=whole)
+        forget_open_calls(path, role, sid=sid, whole=whole, before=before)
     how = PERMISSION_LIFTS.get(name)
     if how is None:
         return False
@@ -20713,7 +22306,7 @@ def permission_witness(name, path, role, event):
                                    (", " + tool_label(tool)) if own and tool
                                    else ""),
         sid=sid, agent=None if whole else agent,
-        call=tid if own else "", tool=tool if own else "")
+        call=tid if own else "", tool=tool if own else "", before=before)
 
 
 def nudge_deaf_window(path, role, delivered_at, why=""):
@@ -21321,7 +22914,7 @@ def note_silence(path, project, n):
            "held - work is NOT being reviewed. Check the planner window; the "
            "unanswered reports are in bridge-logs/.../inbox/. Resume from the "
            "panel, or just answer with a verdict." % (project, run),
-           path=path)
+           path=path, about="planner")
     return True
 
 
@@ -22110,7 +23703,8 @@ def run_review(event, path, lp, msg, project, role):
                        "since" if moved else
                        "its transcript could not be read to see whether "
                        "the window moved"),
-                      inbox), path=path)
+                      inbox), path=path, about="planner",
+                   call=("report", n))
         # the rest of the review's own time - and a check started late in
         # it stops the clock as well (8.33)
         got = review_wait(path, waiter, timeout - waited)
@@ -22130,7 +23724,8 @@ def run_review(event, path, lp, msg, project, role):
         notify("needs_you",
                "%s: the planner has not answered report %d in %d min. The "
                "loop is holding - look at the planner's window."
-               % (project, n, int(timeout // 60)), path=path)
+               % (project, n, int(timeout // 60)), path=path,
+               about="planner", call=("report", n))
         # Rule 27 has to be enforced HERE, because this is what silence
         # actually looks like: the waiter never fires at all. The counting
         # used to live below, past this return, so the only shape of
@@ -22348,7 +23943,8 @@ def run_review(event, path, lp, msg, project, role):
             notify("needs_you",
                    "%s: the planner is waiting on YOU - nothing is running,"
                    " so the pair is stopped until you say something. Its"
-                   " words: %s" % (project, feedback[:600]), path=path)
+                   " words: %s" % (project, feedback[:600]), path=path,
+                   call=("waiting", None))
         # AND THE WORDS THEMSELVES, which used to go nowhere at all. On
         # 2026-09-03 a watched project's planner wrote the next piece into
         # a `wait` - two concrete edits, named - and the executor never
@@ -22367,6 +23963,7 @@ def run_review(event, path, lp, msg, project, role):
 # ---------------------------------------------------------------------------
 # hook events
 
+@hook_reply
 def handle_event(event):
     name = event.get("hook_event_name", "?")
     project = project_name(event)
@@ -22390,11 +23987,23 @@ def handle_event(event):
         # not belong on the intake path.
         note_stranger(path, event.get("session_id"))
 
+    # A LANDING A SUBAGENT MAY HAVE MADE comes with the window's session id
+    # and no agent_id, and whose it was shows only in the boundary the
+    # client writes after this hook returns. What a start does to the
+    # window's books - A-D: its dialog and open calls, the edge of its
+    # turn, its state, the say-once latches - waits for settle_landing
+    # (landing_start_effects): a subagent compacting while the window was
+    # on a dialog closed the dialog's record. -> DECISIONS.md 8.148
+    _land_t = (landing_unsure(path, role, str(event.get("session_id") or ""))
+               if name == "SessionStart" and event.get("source") == "compact"
+               else None)
+    _later = bool(_land_t)
     # BEFORE ANY BRANCH CAN RETURN: a call finishing, a turn or a session
     # ending is what says a dialog of this half is over. -> DECISIONS.md 8.26
-    permission_witness(name, path, role, event)
-    # ...and the edges of this half's turn, for a subagent's call (8.51)
-    note_turn_edge(path, role, event, name)
+    if not _later:
+        permission_witness(name, path, role, event)
+        # ...and the edges of this half's turn, for a subagent's call (8.51)
+        note_turn_edge(path, role, event, name)
 
     if name == "Stop":
         note_stop_seen(path, role)
@@ -22420,6 +24029,9 @@ def handle_event(event):
                       % (project_name(path), role), path, role)
         if (STATE.get("model_limit") or {}).get("%s|%s" % (path, role)):
             end_limit("model", "stop", path, role)
+        # 8.148: a subagent's record leaves before anything below writes
+        # onto the last record by position.
+        settle_unsure_compactions(path, role, event.get("session_id"))
         mark_idle_compactions(path, role, event.get("session_id"),
                               settle=True)
         _nl_line = ""
@@ -22526,7 +24138,9 @@ def handle_event(event):
                 # difference: the context went up by the turn and then down
                 # by the summary, and what is left is neither. The sample is
                 # dropped rather than averaged in - this number sets the
-                # margin that decides when the session is replaced.
+                # margin that decides when the session is replaced. A
+                # subagent's compaction is not one: settle_compaction took
+                # its `t` out, and settle_unsure_compactions ran above.
                 straddled = bool(sess.pop("compacted_this_turn", None))
                 if cur and last and cur > last and not straddled:
                     hist = sess.setdefault("turn_costs", [])
@@ -22969,6 +24583,18 @@ def handle_event(event):
                                   project, role, "log", project_dir=path)
 
     elif name == "PreCompact":
+        # Taken first: the record's `t` is matched against the boundary's
+        # own stamp, and what runs below takes seconds. -> DECISIONS.md 8.148
+        _t = time.time()
+        _unsure = agent_active(path, role, event.get("session_id") or "", _t)
+        # ...AND WHAT "compacting" GOES OVER, kept with a record a subagent
+        # may have made: it comes with the window's session id, and the
+        # window's "needs you" or "waiting on a process" was lost here,
+        # before any landing. Still written - cannot tell is busy - and
+        # settle_landing puts back what is still true if it was a
+        # subagent's (state_after_agent). -> DECISIONS.md 8.148
+        _before = (state_before_compaction(path, role, event) if _unsure
+                   else None)
         sess = touch_session(event, state="compacting")
         ref = sess if sess.get("model") else best_session(path, role)
         model = calib_model(ref.get("model"), path, role)
@@ -23016,8 +24642,22 @@ def handle_event(event):
                           "neighbouring session's size is not a measurement "
                           "of this one", project, role, "log",
                           project_dir=path)
-        calib_miss(model, path, pct_now,
-                   "PreCompact fired - estimate was high")
+        # A MISS ONLY WHERE THE PAIR WAS MEANT TO ROTATE BEFORE IT. Under
+        # rotate_policy compact a compaction is the road the pair is on,
+        # and calib_miss on every one of them held all four 222k executors
+        # of one machine at 40 % and 3.0 on 2026-10-15: the percentage is
+        # read against the million the client reports, the compaction comes
+        # at 222k, so the first one already gave max(40, 15 - 3). Where it
+        # is still a miss, the record keeps what it changed, so that a
+        # subagent's can be put back (ceiling_note). -> DECISIONS.md 8.149
+        policy = store.project_config(CFG, path).get("rotate_policy",
+                                                     "compact")
+        _ceil = None
+        if policy != "compact":
+            _ceil = {"before": ceiling_fields(model, path)}
+            calib_miss(model, path, pct_now,
+                       "PreCompact fired - estimate was high")
+            _ceil["after"] = ceiling_fields(model, path)
         # Where the transcript stands now: the compact_boundary and the
         # client's idle notice, if any, come after it (40.4(a)). Read before
         # the lock. `calib` is the key the sample went under, so a floor is
@@ -23033,8 +24673,14 @@ def handle_event(event):
             hist.append({"at": time.strftime("%Y-%m-%d %H:%M"),
                          "tokens": at,
                          "session": event.get("session_id", ""),
-                         "t": time.time(), "tp": _tp, "tp_at": _tp_at,
-                         "calib": model})
+                         "t": _t, "tp": _tp, "tp_at": _tp_at,
+                         "calib": model, "miss": _ceil is not None})
+            if _ceil:
+                hist[-1]["ceil"] = _ceil
+            if _unsure:
+                hist[-1]["unsure"] = True
+                if _before:
+                    hist[-1]["state_before"] = _before
             # Sixty, not twenty: a 222k executor compacts fifteen times
             # before its wall, and records that never landed sit between.
             del hist[:-60]
@@ -23045,12 +24691,22 @@ def handle_event(event):
                 sess["compaction_pending"] = {"at": time.time(),
                                               "tokens": int(at),
                                               "session": event.get(
-                                                  "session_id", "")}
-            sess["compacted_this_turn"] = True
+                                                  "session_id", ""),
+                                              "t": _t}
+            # The `t` of each, not a flag: settle_compaction takes a
+            # subagent's back out, and the turn's cost is a measurement
+            # again. An older daemon's True stays True. (8.149)
+            _ct = sess.get("compacted_this_turn")
+            sess["compacted_this_turn"] = ((_ct if isinstance(_ct, list)
+                                            else [True] if _ct else [])
+                                           + [_t])
             save_state()
         n_done = compactions_done(path, role)
-        store.journal("loop", "Compaction %d for this %s session"
-                      % (n_done, role), project, role, "log",
+        store.journal("loop", "Compaction %d for this %s session%s"
+                      % (n_done, role,
+                         " - a subagent of it was working, so whose it was "
+                         "is decided when it lands (8.148)" if _unsure
+                         else ""), project, role, "log",
                       project_dir=path)
         if at:
             # This is where the turn *ended*, not where the threshold is.
@@ -23133,8 +24789,6 @@ def handle_event(event):
                         "setting."
                         % (role, want, round(got), at // 1000, win // 1000),
                         project, role, "log", project_dir=path)
-        policy = store.project_config(CFG, path).get("rotate_policy",
-                                                     "compact")
         if policy == "compact":
             # Everything worth keeping is already on disk - the handoff just
             # written, the transcript snapshot, INDEX.md - so compaction can
@@ -23251,6 +24905,12 @@ def handle_event(event):
             rec = {"cmd": cmd[:160], "started": time.time(),
                    "session": event.get("session_id", ""),
                    "sig": first, "tid": tid, "told": False, "role": role}
+            # THE COMMAND PAST ITS CD, beside the cut, made from the whole
+            # command: a cd into a deep folder fills the 160 characters by
+            # itself, and the words of a hung call were the cd again
+            # (hung_call_words; 8.132, addendum of 2026-10-15).
+            if command_past_cd(cmd) != cmd:
+                rec["past_cd"] = command_past_cd(cmd)[:160]
             # A SUBAGENT'S CALL SAYS SO: `agent_id` rides with it, beside
             # the parent's session id. close_at_stop needs it, because a
             # background subagent's call outlives the parent's turn.
@@ -23410,7 +25070,23 @@ def handle_event(event):
         return None, None
 
     elif name == "SessionStart":
-        sess = touch_session(event, state="starting")
+        # C: "starting" waits with A, B and D (settle_landing) - it wrote
+        # over "needs you" and "waiting on a process"
+        sess = touch_session(event, **({} if _later else
+                                       {"state": "starting"}))
+        _state_at_land = sess.get("state")
+        # E: the session a pending handover retires starting again - its
+        # own compaction, or a subagent's landing - is not its replacement
+        _retired_start = retired_start(path, role, event)
+        if _retired_start:
+            store.journal("rotation", "the %s session %s started again "
+                          "(%s) while the handover that retires it waits "
+                          "for its replacement - not the replacement: "
+                          "nothing of the swap is done, and the seed "
+                          "waits (8.148)" % (role, (event.get("session_id")
+                                                   or "?")[:8],
+                                             event.get("source") or "?"),
+                          project, role, "log", project_dir=path)
         _late = late_replacement(path, role, event)
         mark_registered(path, role, source=event.get("source"))
         # EVERY SessionStart, not only the first: a compaction restart,
@@ -23435,10 +25111,11 @@ def handle_event(event):
         if role == "planner":
             planner_window_replaced(path, event.get("session_id") or "")
         prune_sessions()
-        with _lock:
-            STATE.pop("tight:%s" % path, None)
-            STATE.pop("hoheld:%s" % path, None)
-            save_state()
+        if not _later:                      # D, else settle_landing's
+            with _lock:
+                STATE.pop("tight:%s" % path, None)
+                STATE.pop("hoheld:%s" % path, None)
+                save_state()
         threading.Thread(target=watch_rc_link,
                          args=(path, role, event.get("transcript_path"),
                                event.get("session_id")),
@@ -23481,7 +25158,7 @@ def handle_event(event):
             # runs the swap, and the planner's start pops nothing.
             # -> DECISIONS.md 8.17
             seed = (STATE.get("seed") or {}).get(path) \
-                if role == "executor" else None
+                if role == "executor" and not _retired_start else None
         if role == "planner":
             parts.append(
                 "You are the PLANNER of a bridge pair working this project "
@@ -23544,8 +25221,10 @@ def handle_event(event):
                 clear_handover_pending(path, "planner")
             pseed = None
             with _lock:
-                pseed = (STATE.get("planner_seed") or {}).pop(path, None)
-                save_state()
+                if not _retired_start:      # the replacement's, not its
+                    pseed = (STATE.get("planner_seed") or {}).pop(path,
+                                                                 None)
+                    save_state()
             if pseed:
                 also = "executor" in (pseed.get("roles") or
                                       ["executor", "planner"])
@@ -23570,48 +25249,54 @@ def handle_event(event):
         if (STATE.get("handover") or {}).get(path):
             # THE SEED GOES WITH IT. `seed` above was popped off the state
             # for an executor, so the thread cannot read it back.
-            threading.Thread(target=resume_after_handover,
-                             name="resume_after_handover:" + role,
-                             args=(path, role), kwargs={"seed": seed},
-                             daemon=True).start()
+            if not _retired_start:
+                threading.Thread(target=resume_after_handover,
+                                 name="resume_after_handover:" + role,
+                                 args=(path, role), kwargs={"seed": seed},
+                                 daemon=True).start()
         elif _late:
             threading.Thread(target=close_after_late_start,
                              name="close_after_late_start:" + role,
                              args=(path, role, _late), daemon=True).start()
-        # A CLEAN STOP IS NOT A CRASH, and the seed must not say it was.
-        # QUIET_REASONS knows the third reason - shut down properly while a
-        # loop happened to be on, which is what every restart through the
-        # gate looks like - and the CHAT was taught it on 2026-09-04. This
-        # sentence was not, and it is the one a session reads first:
-        # 2026-09-05 the journal says `Bridge stopped cleanly.` at 16:09:30
-        # and `recovery | The bridge was shut down normally, but a loop was
-        # still running` at 16:09:40, and the window that came up at
-        # 16:12:22 was told the machine had stopped without shutting down
-        # cleanly. Same fix as the notification, the other exit.
-        # -> DECISIONS.md 8.17
-        # AND ONLY TO A WINDOW THE STOP TOUCHED, ONCE. This read
-        # STATE["mode"], the panel's acknowledgement, which a restart
-        # through the gate leaves "recovered" for the daemon's whole life -
-        # so a compaction two hours later was told of a turn cut off by a
-        # restart it had worked straight through. -> DECISIONS.md 8.49
-        _restart = restart_notice_for(path, role,
-                                      event.get("session_id") or "")
-        if _restart:
-            parts.append(_restart)
-        # Read, not taken: a session starting is not the note's delivery -
-        # the report is (run_review). Taking it here would mean a rotation
-        # swallowed the line the human wrote for the review.
-        note = note_for(path)
-        if note:
-            parts.append(note)
-        # 40.10: after a compaction the executor gets the thread back in
-        # the words it was given - before the canon, which stays last.
-        # Not under _lock: compact_context reads the state file.
-        if role == "executor" and event.get("source") == "compact":
-            _thread = compact_context(path, landing_wall(
-                sess, path, event.get("session_id") or ""))
-            if _thread:
-                parts.append(_thread)
+        # A COMPACTION A SUBAGENT MAY HAVE MADE: whose it was is known only
+        # once the client writes its boundary, after this hook returns. The
+        # executor's thread and WALL line are held until then and handed
+        # over the channel if it was the window's; a subagent gets nothing
+        # of the window's. With no channel to hand it later, the landing
+        # gets it as before, and the journal says so. A PLANNER'S TOO: its
+        # landing carries no thread, but the restart notice is said once
+        # (restart_notice_for), and a subagent's landing that took it
+        # handed it to the subagent - the window never heard of the
+        # restart. Held the same way where the planner has a channel; the
+        # Mac's planners do. -> DECISIONS.md 8.148
+        _sid = event.get("session_id") or ""
+        _hold = bool(_land_t and channel_for(path, role))
+        if _land_t:
+            _tp_land = event.get("transcript_path") or ""
+            LANDINGS.add(("%s|%s" % (norm(path), role), _land_t))
+            threading.Thread(target=settle_landing,
+                             name="settle_landing:" + role,
+                             args=(path, role, _sid, _land_t, _tp_land,
+                                   landing_marks(_tp_land), time.time(),
+                                   _hold, sess),
+                             kwargs={"later": {
+                                 "event": dict(event),
+                                 "state": _state_at_land} if _later
+                                 else None}, daemon=True).start()
+        if not _hold:
+            _had = len(parts)
+            parts.extend(landing_parts(path, role, _sid, sess,
+                                       event.get("source")))
+            # said only when there is something to hand: a planner's
+            # landing is mostly empty, and a line at each is noise
+            if _land_t and len(parts) > _had:
+                store.journal("loop", "a subagent may have made this "
+                              "compaction and the %s has no channel to be "
+                              "handed %s later - handed at the landing, as "
+                              "before 8.148" % (role, "its thread" if role
+                                                == "executor" else "its "
+                                                "restart notice or note"),
+                              project, role, "warn", project_dir=path)
         # Both roles, every start, including the replacement a handover
         # brings up - a rotated session is a new session and has been told
         # nothing. Last in the seed on purpose: it is the part that should
@@ -24675,6 +26360,12 @@ def proc_stat_word(pid):
         return None
 
 
+def command_past_cd(cmd):
+    """The command without its leading `cd <folder> &&`."""
+    return re.sub(r"""^\s*cd\s+("[^"]*"|'[^']*'|\S+)\s*&&\s*""", "",
+                  cmd or "")
+
+
 def hung_call_words(path, meta, table):
     """What hangs, in words a person can act on: the command without its
     leading cd, foreground or background, whose call it is, and the call's
@@ -24684,10 +26375,15 @@ def hung_call_words(path, meta, table):
     project>/r…"` - forty characters of a cd. Under it a grep had stood in
     state U for an hour, in a subagent's call; none of that was in the
     words. -> DECISIONS.md 8.132
+
+    2026-10-15, the Mac's acceptance: the record keeps 160 characters of
+    the command, and a cd 150 characters deep left no `&&` in them to strip
+    at - the words were the cd again. The part past the cd is cut from the
+    whole command when the call is recorded (`past_cd`); a record without
+    it is stripped here as before. -> DECISIONS.md 8.132, addendum
     """
     m = meta or {}
-    cmd = re.sub(r"""^\s*cd\s+("[^"]*"|'[^']*'|\S+)\s*&&\s*""", "",
-                 m.get("cmd") or "")
+    cmd = m.get("past_cd") or command_past_cd(m.get("cmd"))
     words = ["\"%s\"" % brief(cmd, 60),
              "background" if m.get("bg") else "foreground"]
     if m.get("agent"):
@@ -25197,12 +26893,21 @@ _last_pin = [0.0]
 
 
 def refresh_pin(force=False):
-    global CFG
+    """The status message, rewritten on the chat's thread and never in the
+    caller's: handle_event calls this on its way to answering a hook, and
+    handle_cmd on its way to answering the panel. The 20 s between two is
+    decided here, at the call; the text is read when the pin runs.
+    -> DECISIONS.md 8.142"""
     if not CFG.get("telegram", {}).get("chat_id"):
         return
     if not force and time.time() - _last_pin[0] < 20:
         return
     _last_pin[0] = time.time()
+    chat_later("pin", _pin_now)
+
+
+def _pin_now():
+    global CFG
     CFG = telegram.status_message(CFG, pinned_text())
     store.save_config(CFG)
 
@@ -26051,6 +27756,11 @@ class Handler(BaseHTTPRequestHandler):
                     # on the panel's clock. It is offered, not acted on -
                     # the claim belongs to the owner (/adopt-history).
                     "carried_found": snap.get("carried_found") or {},
+                    # Projects whose carried history is queued or being read
+                    # on the history thread: their feed may still lack the
+                    # lines another machine wrote, and the panel says so
+                    # rather than show it as whole. -> 8.144
+                    "history_pending": history_pending(),
                     "moved_from": {norm(p): (c or {}).get("moved_from") or []
                                    for p, c in cfg_projects.items()},
                     "headline": status_headline(),
@@ -26904,6 +28614,8 @@ class Handler(BaseHTTPRequestHandler):
                 warn_config_handedits([k for k in CONFIG_KEYS
                                        if k in body])
                 with _lock:
+                    was_cfg = json.loads(json.dumps(
+                        {k: CFG.get(k) for k in CONFIG_KEYS if k in body}))
                     # What the owner CLAIMED must survive a settings write.
                     # This endpoint replaces the whole projects dict with
                     # the panel's copy, so anything the panel does not know
@@ -26953,13 +28665,22 @@ class Handler(BaseHTTPRequestHandler):
                         CFG["projects"] = folded
                         _warn_unmarked_projects(folded)
                     store.save_config(CFG)
-                if "projects" in body:
-                    # OUTSIDE the lock on purpose: this reads and appends
-                    # journal files, and file I/O under _lock is what once
-                    # serialised the whole daemon behind half a megabyte of
-                    # JSON. A project entering the watch list is one of the
-                    # two moments a carried history is read back.
-                    merge_carried_history("it entered the watch list")
+                    now_cfg = json.loads(json.dumps(
+                        {k: CFG.get(k) for k in was_cfg}))
+                # OUTSIDE the lock: journal lines are file work (8.147)
+                for at, line in config_change_lines(was_cfg, now_cfg):
+                    if at:
+                        store.journal("project", line, project_name(at), "",
+                                      "log", project_dir=at)
+                    else:
+                        store.journal("bridge", line, level="log")
+                # A project ENTERING the watch list is one of the two moments
+                # a carried history is read back - only that one, on the
+                # history thread. Every toggle in the panel posts the whole
+                # projects dict, and each re-read every project's carrier
+                # over the share before it answered. -> 8.144, 8.147
+                for at in config_added(was_cfg, now_cfg):
+                    merge_history_later("it entered the watch list", at)
                 return self._send(200, {"ok": True})
             if p.startswith("/remove-project"):
                 # "Stop watching": take the hooks back OUT of the folder,
@@ -27496,9 +29217,9 @@ def handle_add_project(body):
         # second project that existed in config.json and nowhere else.
         CFG.setdefault("projects", {}).setdefault(norm(path), {})
         store.save_config(CFG)
-    # The other of the two moments (see merge_carried_history). Outside the
-    # `with _lock` above, because it is file work.
-    merge_carried_history("it was added to the bridge", norm(path))
+    # The other of the two moments (see merge_carried_history). On the
+    # history thread: the reply does not wait for somebody's disk (8.144).
+    merge_history_later("it was added to the bridge", norm(path))
     return {"ok": True, "added": added, "path": path}
 
 
@@ -28106,6 +29827,7 @@ def shutdown(*_):
     except Exception:
         pass
     store.journal("bridge", "Bridge stopped cleanly.", level="log")
+    chat_settle(5)          # what was handed to the chat goes first (8.142)
     if CFG.get("telegram", {}).get("chat_id"):
         t = threading.Thread(target=farewell, args=(mid, live_roles),
                              daemon=True)
@@ -28244,6 +29966,10 @@ def main():
     migrate_compaction_points()
     migrate_unearned_failure()
     migrate_calibration_windows()   # 8.62: a sample in its window's key
+    reset_compact_ceilings()        # 8.149: a compaction is no miss
+    # 8.148: reads transcripts, so in a thread
+    threading.Thread(target=migrate_agent_compactions,
+                     name="agent-compactions", daemon=True).start()
     migrate_handover_holds()
     reseed_proctrack()
     moved = migrate_keys()
@@ -28262,10 +29988,11 @@ def main():
     seed_window_numbers()
 
     # AFTER the key migrations, because a project whose key is about to be
-    # folded should be merged under the key it will end up with, and BEFORE
-    # the watchers below, because at this point nothing else is reading or
-    # writing the journal files.
-    merge_carried_history("the bridge started")
+    # folded should be merged under the key it will end up with. On the
+    # history thread, not here: here the port is bound and nobody serves it
+    # until main() reaches serve_forever (8.144 - why journal lines written
+    # meanwhile are not doubled is in the note over _HISTORY).
+    merge_history_later("the bridge started")
     # Fold the calibration keys before anything reads them, then apply
     # any move the owner has claimed. Both are no-ops after the first
     # run; both are here, after the key migrations and before the
@@ -28385,6 +30112,9 @@ def main():
     threading.Thread(target=disk_watch, daemon=True).start()
     threading.Thread(target=lock_watch, name="lock-watch",
                      daemon=True).start()
+    if sys.platform == "darwin":
+        threading.Thread(target=share_watch, name="share-watch",
+                         daemon=True).start()
     threading.Thread(target=rent_watch, daemon=True).start()
     threading.Timer(2.0, lambda: reconcile()).start()
     maybe_auto_probe()   # fill the model registry before anyone launches

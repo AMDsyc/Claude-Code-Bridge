@@ -35,9 +35,14 @@ It does three things:
 - mounts the PC's network folder **by name**, `smb://<account>@<PC>.local/
   <share>`, so a new address of the PC changes nothing. On the first run it
   asks the PC's name, the share and the account, and keeps them in
-  `bridge-mac.json` beside it. **No password is asked or kept there**: Finder
-  asks for it once - tick *Remember this password in my keychain* - and takes
-  it from the keychain after that. Delete `bridge-mac.json` to be asked again;
+  `bridge-mac.json` beside it. **No password is asked or kept there, and none
+  is asked for on the screen**: the share is mounted only with its password in
+  the keychain - by name while `<PC>.local` leads to the PC, else by the
+  address the PC answers at. Without one it is not mounted, the bridge starts
+  anyway, and the line says what to type in Finder's *Go → Connect to Server*
+  to mount it once - tick *Remember this password in my keychain*; after
+  that `bridge.command` mounts it itself. Delete `bridge-mac.json` to be asked
+  again;
 - starts the bridge, which opens the panel at `http://127.0.0.1:8765/` and
   keeps the Mac awake while it runs. The panel opens in the default browser,
   or in the one `"browser"` in the bridge's `data/config.json` names by its
@@ -161,12 +166,13 @@ lives and how to see it.
   suites run on the Mac's own `python3` (3.9); its thread names and frames
   differ from 3.10 and later, and the bridge and the suites are written for
   both.
-- **The share is brought back at the bridge's start only with its password
-  in the keychain** (`netshare.at_start`, `netshare.remount`) - without one,
-  mounting would put a dialog on the screen, so it says why instead. Not
-  exercised live: the test Mac had no keychain item for its share. A share
-  lost while the bridge runs is said in the journal, not mounted again.
-  `bridge.command` mounts it itself at every start. To see it: mount the
+- **The share is brought back only with its password in the keychain** -
+  by `bridge.command` before the start (`maclaunch.mount`), at the bridge's
+  start (`netshare.at_start`) and while it runs (`daemon.share_watch`, every
+  30 s, no more often than `netshare.RETRY_SEC` a share), all three through
+  `netshare.host_for` (DECISIONS 8.150, 8.151) - without one, mounting
+  would put a dialog on the screen, so it says why instead. Not exercised
+  live: the test Mac had no keychain item for its share. To see it: mount the
   share in Finder with the password remembered, stop the bridge, eject the
   share, and start the bridge with `python3 -m bridgecore.daemon`: the
   journal says *mounted again*.

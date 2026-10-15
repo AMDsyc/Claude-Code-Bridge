@@ -7,10 +7,15 @@ the bridge with a double-click in Finder:
       PATH - Finder starts Terminal with a short one - and whatever is
       missing is named in ONE line with the command that installs it;
   (b) the PC's network folder is mounted BY NAME, smb://<account>@<PC>.local
-      /<share>, so a new address of the PC changes nothing. Name, share and
-      account are asked on the first run and kept in bridge-mac.json beside
-      bridge.command. No password is ever asked or kept: Finder takes it
-      from the keychain, or asks for it once on the screen;
+      /<share>, so a new address of the PC changes nothing - decided as the
+      bridge decides a share asked back (netshare.host_for, 132b): by the
+      name while it leads to the server proven to be the PC and the keychain
+      holds the password under it, else by that server's address with one
+      there. Name, share and account are asked on the first run and kept in
+      bridge-mac.json beside bridge.command. No password is ever asked or
+      kept, and none is asked for on the screen: with none in the keychain
+      nothing is mounted, and the line says how to mount it once in Finder
+      with the password remembered;
   (c) the layout move is finished and the daemon started, which opens the
       panel and keeps the Mac awake itself (sessions.keep_awake).
 
@@ -92,8 +97,9 @@ def load_settings(home):
 def ask_settings(home, ask=input, say=print):
     """Ask the three on the first run, keep them beside the launcher.
     Nothing else is written there - never a password."""
-    say("First run: where is the PC's network folder? (no password - Finder "
-        "takes it from the keychain or asks for it itself)")
+    say("First run: where is the PC's network folder? (no password - the "
+        "mount takes it from the keychain, and says how to put it there "
+        "when it is not)")
     d = {}
     for key, question in ASKED:
         while not d.get(key):
@@ -109,10 +115,22 @@ def ask_settings(home, ask=input, say=print):
     return d
 
 
-def smb_url(d):
-    return "smb://%s@%s.local/%s" % (
-        urllib.parse.quote(d["account"]), d["server"],
+def smb_url(d, host=""):
+    """The share's URL by `host` - by default by name, <server>.local."""
+    return "smb://%s@%s/%s" % (
+        urllib.parse.quote(d["account"]), host or d["server"] + ".local",
         urllib.parse.quote(d["share"]))
+
+
+def last_address(d):
+    """The address the bridge last found the share's server at (kept by
+    netshare.at_start), or "": find() asks it first, as remount does."""
+    for rec in netshare.known().values():
+        if isinstance(rec, dict) and rec.get("addr") \
+                and str(rec.get("server", "")).upper() == d["server"].upper() \
+                and str(rec.get("share", "")).lower() == d["share"].lower():
+            return rec["addr"]
+    return ""
 
 
 def mounted_at(d, now=None):
@@ -127,32 +145,61 @@ def mounted_at(d, now=None):
 
 
 def mount(d, check=False, now=None, run=subprocess.call,
-          wait=MOUNT_WAIT_SEC, sleep=time.sleep):
+          wait=MOUNT_WAIT_SEC, sleep=time.sleep, query=None, lookup=None):
     """(where it is mounted or "", the line that says so). With `check`
-    nothing is asked: it only says."""
+    nothing is asked: it only says. Else asked as netshare.remount asks a
+    share back (132b): of the server proven by name - the address the
+    bridge last found it at, then the name - by the host netshare.host_for
+    gives, and not at all while the keychain holds no password for it: the
+    system would put a password dialog on the screen. `query` is what asks
+    the system (netshare's run), `lookup` what resolves a name."""
     now = now or netshare.mounted
     point = mounted_at(d, now())
     if point:
         return point, "The share is mounted: %s at %s" % (smb_url(d), point)
     if check:
         return "", ("The share is NOT mounted: %s - bridge.command would "
-                    "open it" % smb_url(d))
-    run([OPEN, smb_url(d)])
+                    "ask for it if the keychain holds its password"
+                    % smb_url(d))
+    query = query or netshare._run
+    addr, why = netshare.find(
+        d["server"], last_address(d),
+        ask=lambda a: netshare.server_name(a, query),
+        candidates=lambda name: netshare.resolve(name, query, lookup),
+        say=lambda text, level: None)
+    if not addr:
+        return "", ("The share is NOT mounted, and nothing is asked: %s - is "
+                    "the PC on, and is %s its name? The bridge starts anyway; "
+                    "projects on that share are missing until it is mounted"
+                    % (why, d["server"]))
+    host, why = netshare.host_for(d["account"], d["server"], addr, query,
+                                  lookup)
+    url = smb_url(d, host)
+    if why:
+        return "", ("The share is NOT mounted: %s. To mount it once: Finder, "
+                    "Go > Connect to Server, %s, with \"Remember this "
+                    "password in my keychain\" ticked - after that "
+                    "bridge.command mounts it itself. The bridge starts "
+                    "anyway; projects on that share are missing until it is "
+                    "mounted" % (why, url))
+    how = ("by name" if host != addr else
+           "by address: the server there says it is %s" % d["server"])
+    run([OPEN, url])
     end = time.monotonic() + wait
     while time.monotonic() < end:
         point = mounted_at(d, now())
         if point:
-            return point, "The share is mounted: %s at %s, by name" % (
-                smb_url(d), point)
+            return point, "The share is mounted: %s at %s, %s" % (
+                url, point, how)
         sleep(1)
     return "", ("The share did not mount in %d s: %s - is the PC on and is "
                 "%s its name? The bridge starts anyway; projects on that "
                 "share are missing until it is mounted" % (
-                    wait, smb_url(d), d["server"]))
+                    wait, url, d["server"]))
 
 
 def main(argv=None, home=None, find=find_tool, now=None, run=subprocess.call,
-         ask=input, say=print, tty=None, start=None):
+         ask=input, say=print, tty=None, start=None, query=None, lookup=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     check = "--check" in argv
     argv = [a for a in argv if a != "--check"]
@@ -176,7 +223,8 @@ def main(argv=None, home=None, find=find_tool, now=None, run=subprocess.call,
                 "Mac's screen, it asks for them" % settings_path(home))
             return 1
         d = ask_settings(home, ask, say)
-    point, line = mount(d, check=check, now=now, run=run)
+    point, line = mount(d, check=check, now=now, run=run, query=query,
+                        lookup=lookup)
     say(line)
     if check:
         say("check: %s" % ("everything is in place" if point else

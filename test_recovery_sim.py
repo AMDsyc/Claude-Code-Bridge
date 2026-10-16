@@ -609,7 +609,29 @@ def sit_background(ctx):
 
 # --------------------------------------------------------------- 2
 def sit_wait_words(ctx):
-    """`wait` hands its words back only while something is running."""
+    """`wait` hands its words back only while something is running.
+
+    With the hold off for this pair while it runs (8.152): this is the
+    planner's `wait` meeting a running background, and with the hold on
+    - the default - a report made while a background runs is the
+    bridge's to answer and never reaches the planner; the hold is
+    test_multipair's case 183. Without this the acceptance of 2026-10-16
+    10:06 was red here in seeds 3, 8 and 10 on both machines, and seed 5,
+    one of the seven green, was green only because a call left open by an
+    earlier situation carried the report at once.
+    """
+    with daemon._lock:
+        daemon.CFG.setdefault("projects", {}).setdefault(
+            ctx.key, {})["hold_reports_on_background"] = False
+    try:
+        _wait_words(ctx)
+    finally:
+        with daemon._lock:
+            (daemon.CFG.get("projects") or {}).get(ctx.key, {}).pop(
+                "hold_reports_on_background", None)
+
+
+def _wait_words(ctx):
     reset(ctx)
     cmd = ctx.plan["cmd"]
     hook(ctx.proj, "PreToolUse", "executor", ctx.sid["executor"],

@@ -13,6 +13,34 @@ file before it and listed in `make_public.py`'s `EXTRA`, or it is never
 published.
 
 <!-- /rule 36 -->
+**2026-10-16 — what is new since the morning release of 2026-10-15 (67112c0)**
+
+- **A Mac mounts the PC's share without a password dialog.**
+  `bridge.command` asks the keychain first and opens the share by name
+  or by a proven address, whichever holds the password; with none it
+  says how to mount it once and starts anyway. A share mounted by address
+  counts as its server's, and one that drops while the bridge runs is
+  mounted back.
+- **needs_you finds a person**: the planner of `home_pair`, the pair you
+  talk to, hears every call of another pair the chat did not carry; a
+  call about a planner never goes into that planner's own channel; an
+  optional Mac notification (`mac_notify`), with no sound. A call that
+  closes within 45 s goes no further than the chat and the panel.
+- **A turn running over 45 minutes is told to its planner**, as news.
+- **Nothing waits on the network at the wrong moment**: a hook's reply
+  no longer waits on Telegram, a restart calls back only once the bridge
+  answers, and moved history is read on its own thread.
+- **A project on a network volume is not committed unless asked**
+  (`commit_on_share`), and a commit with no author set goes as
+  `bridge <bridge@invalid>`. `/config` says what it changed.
+- **A helper's compaction is not the window's**, and a routine
+  compaction does not lower the ceiling.
+- **A job handed to a new window at a swap is not ended by that
+  window's Stop**, so a `wait` calls nobody while the old window's run
+  goes on.
+- **No wall replacement for a pair nobody works**: with the loop off or
+  paused it is asked again at the next Stop with the loop on.
+
 **2026-10-15 — what is new since the release of 2026-10-13**
 
 - **A Mac on a PC's network share waits on it less.** Hooks, the status

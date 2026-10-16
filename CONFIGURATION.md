@@ -22,6 +22,8 @@ Part of [README.md](README.md), moved out whole under rule 36.
 | `thresholds.idle_hold` | `1200` | how long an idling pair is held rather than answered, in seconds. `0` disables |
 | `thresholds.review_timeout` | `1200` | how long a report may wait for a verdict |
 | `thresholds.long_turn` | `2700` | an executor turn running this long is told to its planner, once a turn and again at most hourly |
+| `thresholds.bg_report_hold` | `3600` | how long reports the bridge answered `wait` itself, while the executor's background ran, may wait before they go to the planner as news, in seconds |
+| `projects.<path>.hold_reports_on_background` | `true` | a report whose Stop lists a running background is answered `wait` by the bridge and goes to the planner with the first report that has nothing running; a line `Planner now: <why>` sends it at once. `false` carries every report as it comes |
 | `archive_parallel` | `2` | archive searches at once across all projects |
 | `archive_model` | `sonnet` | the model the search agent runs on |
 | `retention.days` | `7` | how long the bridge keeps its own logs |

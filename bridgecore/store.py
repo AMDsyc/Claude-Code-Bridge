@@ -278,6 +278,12 @@ DEFAULT_CONFIG = {
         # and the hook's own (1800s), so the hold always ends on
         # the bridge's terms rather than by something expiring.
         "idle_hold": 1200,
+        # How long reports the bridge answered `wait` itself, while the
+        # executor's background ran, may wait for the planner before they
+        # go to it as news. Measured: at the turn ends where a background
+        # Bash was running, everything running then had ended within
+        # 3 598 s. -> daemon.BG_HOLD_SEC, DECISIONS.md 8.152
+        "bg_report_hold": 3600,
         # Reports that may go unanswered in a row before the pair is held.
         # Three, because the median gap between unanswered reports on the
         # night this came from was 21 minutes - so three is about an hour
@@ -393,6 +399,11 @@ PROJECT_DEFAULTS = {
     # set: a commit read over SMB stored stale bytes once (one project,
     # a064b18, 2026-10-14). daemon.commit_off says so once per run. -> 8.145
     "commit_on_share": False,
+    # A report whose Stop lists a running background is answered `wait` by
+    # the bridge instead of waking the planner, and goes to it with the
+    # first report that has nothing running. False carries every report as
+    # it comes. -> daemon.hold_bg_report, DECISIONS.md 8.152
+    "hold_reports_on_background": True,
     # WHERE THIS PROJECT'S REPOSITORY IS, relative to the project path.
     # Empty means "the project path itself", which is the only thing the
     # bridge ever assumed and which is right for most projects. It is

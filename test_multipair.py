@@ -4225,7 +4225,7 @@ def inventory_walk():
     inventory does not say, whether a prefixed top-level key was seen). The
     walk of case 49, a function since 132b: case 49 stood at 49 of 177 and
     called itself LAST, so a container first filled by a later case was
-    never walked - the suite's last case walks again (183)."""
+    never walked - the suite's last case walks again (185)."""
     unlisted, prefixed = [], False
     for name, v in sorted(daemon.STATE.items()):
         if name in getattr(daemon, "STATE_PATH_RECORDS", ()):
@@ -7347,7 +7347,13 @@ print("    PostToolUse, then the deciding call - never a hand-built STATE.")
 _p68 = os.path.join(TMP, "bg-blind")
 os.makedirs(_p68, exist_ok=True)
 _k68 = canon(_p68)
-post("/config", {"projects": {A: {}, B: {}, C: {}, _p68: {}}})
+# The hold off for this pair (8.152): this case is the planner's `wait`
+# meeting a running background, and with the hold on - the default - a
+# report made while a background runs is the bridge's to answer and
+# never reaches the planner. The wait path is still the one a report
+# carried at once takes (carry_now_why); the hold is case 183's.
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p68: {
+    "hold_reports_on_background": False}}})
 post_rc("/loop", {"action": "start", "project": _p68})
 _s68 = "bg68-ex"
 post_rc("/event", {"hook_event_name": "SessionStart", "role": "executor",
@@ -24836,7 +24842,13 @@ print("    2026-10-14 (DECISIONS.md 8.137).")
 _p174 = os.path.join(TMP, "stop-listed")
 os.makedirs(_p174, exist_ok=True)
 _k174 = canon(_p174)
-post("/config", {"projects": {A: {}, B: {}, C: {}, _p174: {}}})
+# The hold off for this pair (8.152): this case is the planner's `wait`
+# meeting a running background, and with the hold on - the default - a
+# report made while a background runs is the bridge's to answer and
+# never reaches the planner. The wait path is still the one a report
+# carried at once takes (carry_now_why); the hold is case 183's.
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p174: {
+    "hold_reports_on_background": False}}})
 post_rc("/loop", {"action": "start", "project": _p174})
 _s174 = "sl174-ex"
 post_rc("/event", {"hook_event_name": "SessionStart", "role": "executor",
@@ -25870,7 +25882,13 @@ print("    by the ceiling (BG_MAX_SEC), never by the new client's list.")
 _p182 = os.path.join(TMP, "handed-182")
 os.makedirs(_p182, exist_ok=True)
 _k182 = canon(_p182)
-post("/config", {"projects": {A: {}, B: {}, C: {}, _p182: {}}})
+# The hold off for this pair (8.152): this case is the planner's `wait`
+# meeting a running background, and with the hold on - the default - a
+# report made while a background runs is the bridge's to answer and
+# never reaches the planner. The wait path is still the one a report
+# carried at once takes (carry_now_why); the hold is case 183's.
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p182: {
+    "hold_reports_on_background": False}}})
 post_rc("/loop", {"action": "start", "project": _p182})
 _A182, _B182, _C182, _PL182 = ("ha182-ex", "hb182-ex", "hc182-ex",
                                "hp182-pl")
@@ -26102,7 +26120,667 @@ post_rc("/loop", {"action": "stop", "project": _p182})
 post("/config", {"projects": {A: {}, B: {}, C: {}}})
 
 
-print("\n183. the walk of case 49 again, as the suite's LAST case: a")
+print("\n183. a report made while the executor's own background runs is")
+print("    not carried: the bridge answers it `wait` itself")
+print("    A watched project, 2026-10-16: reports 152-156 in 47 minutes and")
+print("    162-165 in 2 h 07 min were each made at a turn end with exactly")
+print("    one background Bash running, and each was answered `wait` within")
+print("    seconds - nine planner wakes, not one decision among them. Such a")
+print("    report is held: written down as an iteration, answered `wait` by")
+print("    the bridge, and carried in ONE delivery with the first report")
+print("    whose Stop lists nothing running, or after bg_report_hold (3600 s,")
+print("    measured). A marker, a restart a minute away, a red background, a")
+print("    person's note or call, a handover: carried at once (8.152).")
+_p183 = os.path.join(TMP, "bg-held-183")
+os.makedirs(_p183, exist_ok=True)
+_k183 = canon(_p183)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p183: {}}})
+post_rc("/loop", {"action": "start", "project": _p183})
+_s183, _pl183 = "bh183-ex", "bh183-pl"
+for _r, _s in (("executor", _s183), ("planner", _pl183)):
+    post_rc("/event", {"hook_event_name": "SessionStart", "role": _r,
+                       "session_id": _s, "project_dir": _p183,
+                       "cwd": _p183})
+    register(_p183, _r, _s)
+_NO183 = object()
+_SH183 = {"id": "b183soak1", "type": "shell", "status": "running",
+          "description": "soak the import for an hour",
+          "command": "bash tools/soak_183.sh"}
+_AG183 = {"id": "a183agent0000001", "type": "subagent",
+          "status": "running", "description": "audit the gate sheet",
+          "agent_type": "general-purpose"}
+_MON183 = {"id": "bmon183ab", "type": "shell", "status": "running",
+           "description": "watch the soak log",
+           "command": "tail -f soak.log"}
+_out183 = {}
+check("both new records are in the inventory, keyed by the project's path, "
+      "so a move or a removal of the project takes them along",
+      (daemon.STATE_PATHS.get("bg_held"), daemon.STATE_PATHS.get("bg_red")),
+      ("path", "path"))
+
+
+def _g183(name, blank=None):
+    """The mechanism, or one FAIL and a stand-in - red on the code before
+    it, never a traceback that takes the rest of the case (as have80)."""
+    fn = getattr(daemon, name, None)
+    if fn is not None:
+        return fn
+    check("the package has daemon.%s" % name, False, True)
+    return lambda *a, **k: blank
+
+
+# The transcript the client writes: the launch of each background Bash and,
+# for the two that end in this case, the notice that ends it - what
+# bg_finished reads for the status.
+_t183 = os.path.join(TMP, "bg183.jsonl")
+
+
+def _tw183(rows):
+    with open(_t183, "a", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+_tw183([{"type": "user", "message": {"content": "start"},
+         "timestamp": "2026-10-16T07:00:00.000Z"}])
+_tof183 = daemon.sessions.transcript_of
+daemon.sessions.transcript_of = (lambda sid, cwd=None: _t183
+                                 if sid == _s183 else _tof183(sid, cwd))
+
+
+def _ev183(name, **extra):
+    body = {"hook_event_name": name, "role": "executor",
+            "session_id": _s183, "project_dir": _p183, "cwd": _p183}
+    body.update(extra)
+    return post_rc("/event", body)
+
+
+def _launch183(bgid, cmd):
+    """A background Bash launch in the shape a real client sends it, and
+    its tool_use in the transcript (as case 182)."""
+    tin = {"command": cmd, "description": "run it",
+           "run_in_background": True}
+    _ev183("PreToolUse", tool_name="Bash", tool_input=tin,
+           tool_use_id="toolu_" + bgid)
+    _tw183([{"type": "assistant", "timestamp": "2026-10-16T07:10:00.000Z",
+             "message": {"content": [{"type": "tool_use",
+                                      "id": "toolu_" + bgid, "name": "Bash",
+                                      "input": tin}]}}])
+    _ev183("PostToolUse", tool_name="Bash", tool_input=tin,
+           tool_use_id="toolu_" + bgid, duration_ms=900,
+           tool_response={"stdout": "", "stderr": "", "interrupted": False,
+                          "isImage": False, "noOutputExpected": False,
+                          "backgroundTaskId": bgid})
+
+
+def _ended183(bgid, status):
+    _tw183([{"type": "user", "timestamp": "2026-10-16T07:20:00.000Z",
+             "message": {"content":
+                         "<task-notification>\n<task-id>%s</task-id>\n"
+                         "<tool-use-id>toolu_%s</tool-use-id>\n"
+                         "<status>%s</status>\n</task-notification>"
+                         % (bgid, bgid, status)}}])
+
+
+def _stop183(tag, text, tasks=_NO183):
+    """One executor turn ends with this Stop. Gives back (carried, bodies):
+    carried when its report reached the planner's queue - answered
+    `continue` here, so the hook lets go - and what the planner was given
+    meanwhile, the envelope off."""
+    box = DELIVERED.setdefault((_k183, "planner"), [])
+    n0 = len(box)
+    ev = {"hook_event_name": "Stop", "role": "executor",
+          "session_id": _s183, "project_dir": _p183, "cwd": _p183,
+          "last_assistant_message": text}
+    if tasks is not _NO183:
+        ev["background_tasks"] = tasks
+    _t = threading.Thread(
+        target=lambda: _out183.__setitem__(tag, post("/event", ev)),
+        daemon=True)
+    _t.start()
+    until(lambda: _k183 in daemon.PENDING or not _t.is_alive(), 25)
+    carried = _k183 in daemon.PENDING
+    if carried:
+        post("/verdict", {"project": _p183, "verdict": "continue",
+                          "feedback": "Checked: no artifacts - releasing the "
+                                      "executor for the next step of this "
+                                      "case"}, secret=True)
+    _t.join(40)
+    check("(%s) precondition: the Stop hook has its answer" % tag,
+          _t.is_alive(), False)
+    return carried, [body_of(b.get("content")) for b in box[n0:]]
+
+
+def _said183(words):
+    return [r.get("text") or "" for r in daemon.store.recent_events(
+        800, project=_p183) if words in (r.get("text") or "")]
+
+
+def _held183():
+    return list((daemon.STATE.get("bg_held") or {}).get(_k183) or [])
+
+
+def _age183(secs):
+    """The oldest held report made `secs` earlier, in memory and on disk."""
+    with daemon._lock:
+        for h in ((daemon.STATE.get("bg_held") or {}).get(_k183) or [])[:1]:
+            h["at"] = float(h.get("at") or time.time()) - secs
+        daemon.save_state()
+
+
+def _file183(n, role):
+    try:
+        with open(os.path.join(daemon.store.project_log_dir(_p183) or TMP,
+                               "dialogue", "%03d-%s.md" % (n, role)),
+                  encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def _index183():
+    try:
+        with open(os.path.join(_p183, "bridge-logs", "INDEX.md"),
+                  encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+_WAIT183 = "Started the soak; nothing engine-free is left. Waiting for it."
+_ih183 = daemon.CFG.setdefault("thresholds", {}).get("idle_hold", _NO183)
+daemon.CFG["thresholds"]["idle_hold"] = 0
+_dx183 = daemon.deliver_ex
+# what the bridge says about this pair while (a)-(b2) hold its reports:
+# a person is called at notify, so that is where this listens - every
+# call passed on unchanged
+_rn183, _rang183 = daemon.notify, []
+
+
+def _note183(kind, text, *a, **kw):
+    # path is notify's fifth argument: (kind, text, level, buttons, path)
+    _pa = kw.get("path", a[2] if len(a) > 2 else None)
+    if _pa and canon(_pa) == _k183:
+        _rang183.append(kind)
+    return _rn183(kind, text, *a, **kw)
+
+
+try:
+    daemon.notify = _note183
+    print("   (a) a turn ends with a background Bash running")
+    print("   FAILURE WOULD LOOK LIKE: the report goes to the planner, which")
+    print("   wakes at its 700k window only to answer `wait`")
+    check("(a) precondition: nothing waits for the planner",
+          _k183 in daemon.PENDING, False)
+    _ca, _ba = _stop183("a", _WAIT183, [_SH183])
+    check("(a) the report is not carried: nothing reached the planner",
+          (_ca, _ba), (False, []))
+    _ha = _held183()
+    check("(a) it is held under its own number, naming what runs",
+          (len(_ha), bool(_ha) and "shell b183soak1 (soak the import"
+           in (_ha[0].get("running") or "")), (1, True))
+    _na = int((_ha[0].get("n") if _ha else 0) or 0)
+    _la = _said183("Report %d held, not carried" % _na)
+    check("(a) the journal says so once, naming the task",
+          (len(_la), bool(_la) and "b183soak1" in _la[0]), (1, True))
+    check("(a) the bridge's `wait` is the planner's half of the iteration, "
+          "saying whose it is",
+          until(lambda: "verdict: wait" in _file183(_na, "planner")
+                and "Answered by the bridge" in _file183(_na, "planner"),
+                10), True)
+    check("(a) the report itself is the executor's half",
+          "Started the soak" in _file183(_na, "executor"), True)
+    check("(a) and its row in the index says wait",
+          until(lambda: bool(re.search(r"^\| %03d \|.*\| wait \|$" % _na,
+                                       _index183(), re.M)), 10), True)
+
+    print("   (b) the next turn ends with a background Agent and a Monitor")
+    _cb, _bb = _stop183("b", "The audit agent and the log watch run; nothing "
+                             "else is left.", [_AG183, _MON183])
+    _hb = _held183()
+    check("(b) held as well, naming both",
+          (_cb, _bb, len(_hb), bool(_hb) and "subagent a183agent0000001"
+           in (_hb[-1].get("running") or "") and "bmon183ab"
+           in (_hb[-1].get("running") or "")), (False, [], 2, True))
+
+    print("   (b2) an older client sends no list: what the bridge tracks")
+    print("   itself counts")
+    _launch183("b183tail2", "bash tools/tail_183.sh")
+    _cb2, _ = _stop183("b2", "The tail job runs; waiting.")
+    _hb = _held183()
+    check("(b2) held, naming the tracked job",
+          (_cb2, len(_hb), bool(_hb) and "tracked: bash tools/tail_183.sh"
+           in (_hb[-1].get("running") or "")), (False, 3, True))
+    daemon.notify = _rn183
+
+    print("   (a3) and while they are held nobody is called - the shape of")
+    print("   cases 68, 174 and 182 with the hold on; none is lost either,")
+    print("   (c) carries all three with the next report")
+    print("   FAILURE WOULD LOOK LIKE: a pair whose background runs is")
+    print("   announced to a person as parked on them")
+    print("   an iteration's own line, iteration_done, is no call: a held")
+    print("   report is spent as an iteration like any other")
+    check("(a3) nothing but iteration_done was said about the pair in (a)-(b2)",
+          [k for k in _rang183 if k != "iteration_done"], [])
+    check("(a3) not on record as parked on a person, and no call open",
+          (bool((daemon.STATE.get("waiting_on_you") or {}).get(_k183)),
+           sorted((daemon.STATE.get("calls") or {}).get(_k183) or {})),
+          (False, []))
+
+    print("   (h) while reports are held the pair is no clinch: the")
+    print("   executor waits for its own background on purpose")
+    _sit183 = {"loop": True, "paused": False, "reviewing": False,
+               "verdict_in_flight": False, "handover": False, "inflight": 0,
+               "roles": {r: {"alive": True, "tail": []}
+                         for r in ("executor", "planner")}}
+    _mv183, _wr183 = daemon.last_movement, daemon.executor_wrote_recently
+    _, _lp183 = daemon.loop_state(_p183)
+    _st183 = _lp183.get("started_at")
+    _keep183 = _held183()
+    daemon.last_movement = lambda p: time.time() - 3600
+    daemon.executor_wrote_recently = lambda p, q: False
+    try:
+        with daemon._lock:
+            _lp183["started_at"] = time.time() - 7200
+            daemon.save_state()
+        check("(h) an hour of quiet with three reports held: no clinch",
+              daemon.clinch(_p183, _sit183, grace=900), None)
+        print("   CONTROL: the same quiet with nothing held IS one - the")
+        print("   line the person would have read about a pair at work")
+        with daemon._lock:
+            (daemon.STATE.get("bg_held") or {}).pop(_k183, None)
+        _c183 = daemon.clinch(_p183, _sit183, grace=900)
+        check("(h) nothing held: a clinch, \"no report reached the planner\"",
+              "no report reached the planner" in (_c183 or {}).get("said",
+                                                                   ""), True)
+    finally:
+        daemon.last_movement, daemon.executor_wrote_recently = _mv183, _wr183
+        with daemon._lock:
+            if _keep183:
+                daemon.STATE.setdefault("bg_held", {})[_k183] = _keep183
+            if _st183 is None:
+                _lp183.pop("started_at", None)
+            else:
+                _lp183["started_at"] = _st183
+            daemon.save_state()
+
+    print("   (i) and assess() says so, instead of reading the tail as an")
+    print("   executor between pieces and carrying it to the planner")
+    _tail183 = [{"who": "assistant", "text": "Waiting for the soak."}]
+    _sitf183 = (lambda p: {
+        "loop": True, "paused": False, "reviewing": False,
+        "verdict_in_flight": False, "handover": False, "inflight": 0,
+        "roles": {r: {"alive": True, "tail": _tail183 if r == "executor"
+                      else [], "silent_for": 3600, "plan": {"do": "nothing"},
+                      "sess": {}} for r in ("executor", "planner")}})
+    _real183 = {n: getattr(daemon, n) for n in (
+        "situation", "unread_channel", "clinch", "stalled",
+        "waiting_for_direction", "acted_recently")}
+    daemon.situation = _sitf183
+    daemon.unread_channel = lambda p: None
+    daemon.clinch = lambda p, s, **k: None
+    daemon.stalled = lambda p, s, **k: None
+    daemon.waiting_for_direction = lambda tail: True
+    daemon.acted_recently = lambda p, tag, *a, **k: True
+    try:
+        _sa = (daemon.assess(_p183) or {}).get("saw") or ""
+        check("(i) assess: an idle executor whose 3 reports are held",
+              "whose 3 reports the bridge holds" in _sa, True)
+        print("   CONTROL: nothing held, the same tail is read as between")
+        print("   pieces - the door the held tail would have gone by")
+        with daemon._lock:
+            (daemon.STATE.get("bg_held") or {}).pop(_k183, None)
+        check("(i) nothing held: an executor between pieces",
+              (daemon.assess(_p183) or {}).get("saw") or "",
+              "an executor between pieces, already passed on")
+    finally:
+        for _n, _f in _real183.items():
+            setattr(daemon, _n, _f)
+        with daemon._lock:
+            if _keep183:
+                daemon.STATE.setdefault("bg_held", {})[_k183] = _keep183
+            daemon.save_state()
+
+    print("   (c) a turn ends with nothing running: ONE delivery carries")
+    print("   that report and the three held, named")
+    _cc, _bc = _stop183("c", "The soak, the audit and the tail are done; the "
+                             "numbers are in section 5.", [])
+    _hn = [int(h.get("n") or 0) for h in _keep183]
+    check("(c) carried, in one delivery",
+          (_cc, len(_bc)), (True, 1))
+    _bc0 = _bc[0] if _bc else ""
+    check("(c) it opens with the three held, each by number",
+          (_bc0.startswith("3 reports came while the executor's background "
+                           "was running"),
+           [("- report %d at " % n) in _bc0 for n in _hn]),
+          (True, [True, True, True]))
+    check("(c) and the report itself follows them",
+          "the numbers are in section 5" in _bc0.split(
+              "nothing is owed on them", 1)[-1], True)
+    check("(c) nothing is held any more", _held183(), [])
+    check("(c) the journal names the three",
+          len(_said183("carries the 3 reports held while the executor's "
+                       "background ran: %s" % ", ".join(map(str, _hn)))), 1)
+    check("(c) the tracked job ended with that Stop, and not red",
+          ("b183tail2" in json.dumps(daemon.inflight_live(_p183)),
+           (daemon.STATE.get("bg_red") or {}).get(_k183)), (False, None))
+
+    print("   (d) the ceiling at a Stop: a report held for an hour goes")
+    print("   with the next report, though the background still runs")
+    _stop183("d1", _WAIT183, [_SH183])
+    _nd = int((_held183() or [{}])[0].get("n") or 0)
+    check("(d) precondition: one held", len(_held183()), 1)
+    _age183(3601)
+    _cd, _bd = _stop183("d2", "Still soaking.", [_SH183])
+    check("(d) the next report is carried, the held one with it",
+          (_cd, len(_bd), bool(_bd) and ("- report %d at " % _nd) in _bd[0]),
+          (True, 1, True))
+    check("(d) and the journal says why",
+          len(_said183("the oldest held report, %d, is 60 min old" % _nd)),
+          1)
+    check("(d) nothing is held any more", _held183(), [])
+
+    print("   (e) the ceiling with no Stop: the watch hands them on as news")
+    _pass183 = _g183("bg_held_pass")
+    _stop183("e1", _WAIT183, [_SH183])
+    _ne = int((_held183() or [{}])[0].get("n") or 0)
+    _box183 = DELIVERED.setdefault((_k183, "planner"), [])
+    _n183 = len(_box183)
+    _pass183()
+    check("(e) CONTROL: under the hour the watch carries nothing",
+          (len(_box183) - _n183, len(_held183())), (0, 1))
+    _age183(3601)
+    daemon.deliver_ex = lambda *a, **k: (False, "the case's refusal")
+    _pass183()
+    check("(e) a delivery that fails keeps them, and says so once",
+          (len(_held183()), len(_said183("did not reach the planner (the "
+                                         "case's refusal)"))), (1, 1))
+    _pass183()
+    check("(e) and it is not tried again inside the retry window",
+          len(_said183("did not reach the planner")), 1)
+    daemon.deliver_ex = _dx183
+    _pass183(time.time() + 301)
+    _be = [b for b in _box183[_n183:]]
+    check("(e) past it, one delivery to the planner, as news",
+          (len(_be), bool(_be) and (_be[0].get("meta") or {}).get("kind")),
+          (1, "info"))
+    _bodye = body_of(_be[0].get("content")) if _be else ""
+    check("(e) naming the report and saying no verdict is wanted",
+          (("- report %d at " % _ne) in _bodye,
+           "1 report of the executor was held for 6" in _bodye,
+           "News, not a report: no verdict is wanted" in _bodye),
+          (True, True, True))
+    check("(e) nothing is held, and the journal says it went",
+          (_held183(), len(_said183("1 held report went to the planner "
+                                    "after"))), ([], 1))
+    check("(e) and the bridge's own watch is what runs it",
+          "bg_held_pass()" in inspect.getsource(daemon.session_watch), True)
+
+    print("   (e2) with the loop off nothing is owed: dropped, not carried")
+    _stop183("e3", _WAIT183, [_SH183])
+    _age183(3601)
+    post_rc("/loop", {"action": "stop", "project": _p183})
+    _n183 = len(_box183)
+    _pass183(time.time() + 301)
+    check("(e2) nothing delivered, nothing held, and a line says so",
+          (len(_box183) - _n183, _held183(),
+           len(_said183("not carried: the loop is off"))), (0, [], 1))
+    post_rc("/loop", {"action": "start", "project": _p183})
+
+    print("   (f) what goes at once, though a background runs")
+    _all183 = lambda: len(_said183("goes to the planner all the same"))
+
+    def _now183(tag, text, words, tasks=None):
+        n0 = _all183()
+        c, _ = _stop183(tag, text, [_SH183] if tasks is None else tasks)
+        lines = _said183("goes to the planner all the same: " + words)
+        check("(%s) carried at once, and the journal says why" % tag,
+              (c, _all183() - n0, len(lines) >= 1), (True, 1, True))
+
+    _now183("f1", "The soak is still running.\nPlanner now: the first "
+                  "block shows a regression - decide whether to stop it.",
+            "the executor marked it `Planner now:`")
+    print("   CONTROL: the words in a sentence are prose, not the marker")
+    _cf, _ = _stop183("f1c", "I told the planner now: nothing to decide.",
+                      [_SH183])
+    check("(f1c) held", (_cf, len(_held183())), (False, 1))
+    # The pair's own words for it are hints.local.json's, not this file's:
+    # this file is published, and check_public refuses them in it.
+    _rw183 = list(getattr(daemon, "RESTART_WORDS", []) or [])
+    if os.path.exists(daemon.HINTS_FILE):
+        check("(f2) hints.local.json gives the pair's own words for it",
+              bool(_rw183), True)
+        for _i, _w in enumerate(_rw183):
+            _now183("f2.%d" % _i,
+                    "All built. %s." % (_w[:1].upper() + _w[1:]),
+                    "it says a restart is a minute away")
+    else:
+        print("   this checkout has no hints.local.json: the English alone")
+    _now183("f2e", "All built; restart in a minute.",
+            "it says a restart is a minute away")
+    print("   a background that ended RED, seen by the watch")
+    _launch183("b183red03", "bash tools/red_183.sh")
+    _ended183("b183red03", "failed")
+    daemon.check_background()
+    check("(f3) precondition: the watch closed it and marked it red",
+          ("b183red03" in json.dumps(daemon.inflight_live(_p183)),
+           ((daemon.STATE.get("bg_red") or {}).get(_k183) or {})
+           .get("state")), (False, "failed"))
+    _now183("f3", "Waiting for the soak.", "a background command ended "
+                                           "failed at")
+    check("(f3) the report that carried it takes the mark away",
+          (daemon.STATE.get("bg_red") or {}).get(_k183), None)
+    print("   CONTROL: one that ended completed marks nothing")
+    _launch183("b183okay4", "bash tools/okay_183.sh")
+    _ended183("b183okay4", "completed")
+    daemon.check_background()
+    _cf3, _ = _stop183("f3c", "Waiting for the soak.", [_SH183])
+    check("(f3c) not red, and held",
+          ((daemon.STATE.get("bg_red") or {}).get(_k183), _cf3,
+           len(_held183())), (None, False, 1))
+    print("   a background that ended RED, seen by the Stop's own list")
+    _launch183("b183red05", "bash tools/red2_183.sh")
+    _ended183("b183red05", "failed")
+    _now183("f4", "Waiting for the soak.", "a background command ended "
+                                           "failed at")
+    check("(f4) its record was closed by that Stop",
+          "b183red05" in json.dumps(daemon.inflight_live(_p183)), False)
+    with daemon._lock:
+        daemon.STATE.setdefault("waiting_on_you", {})[_k183] = {
+            "since": time.time(), "why": "case 183"}
+        daemon.save_state()
+    _now183("f5", "Waiting for the soak.", "the pair is parked on a person")
+    with daemon._lock:
+        daemon.STATE.get("waiting_on_you", {}).pop(_k183, None)
+        daemon.save_state()
+
+    print("   (f6) the rest, asked of the rule itself, one at a time")
+    with daemon._lock:              # its own blank slate: a red left by (f)
+        (daemon.STATE.get("bg_red") or {}).pop(_k183, None)    # is not this
+    _cw183 = _g183("carry_now_why", "")
+    check("(f6) CONTROL: with nothing set, nothing carries it",
+          _cw183(_p183, "Waiting for the soak."), "")
+    for _tag, _where, _key, _val in (
+            ("a person's note", "note", _k183, "look at the soak first"),
+            ("a permission dialog", "asks", "%s|executor" % _k183,
+             {"at": time.time(), "message": "Allow Bash?"}),
+            ("an open call", "calls", _k183,
+             {"c183": {"family": "report", "about": "",
+                       "opened_at": time.time() + 60}}),
+            ("a planner handover pending", "handover_pending",
+             "%s|planner" % _k183, {"why": "case 183"}),
+            ("a handover record", "handover", _k183,
+             {"at": time.time(), "roles": ["planner"], "waiting": []})):
+        with daemon._lock:
+            daemon.STATE.setdefault(_where, {})[_key] = _val
+        try:
+            check("(f6) %s carries it" % _tag,
+                  bool(_cw183(_p183, "Waiting for the soak.")), True)
+        finally:
+            with daemon._lock:
+                (daemon.STATE.get(_where) or {}).pop(_key, None)
+    _wv183 = getattr(daemon, "WALL_VERDICT", {})
+    _wv183[_k183] = {}
+    try:
+        check("(f6) a verdict caught at the wall carries it",
+              bool(_cw183(_p183, "Waiting for the soak.")), True)
+    finally:
+        _wv183.pop(_k183, None)
+    with daemon._lock:
+        daemon.STATE.setdefault("calls", {})[_k183] = {
+            "c183": {"family": "waiting", "about": ""}}
+    try:
+        check("(f6) CONTROL: a call that is closed does not",
+              _cw183(_p183, "Waiting for the soak."), "")
+    finally:
+        with daemon._lock:
+            (daemon.STATE.get("calls") or {}).pop(_k183, None)
+
+    print("   (g) the switch: off, a report goes as it comes")
+    post("/config", {"projects": {A: {}, B: {}, C: {},
+                                  _p183: {"hold_reports_on_background":
+                                          False}}})
+    _hs183 = _g183("bg_hold_secs", 0)
+    check("(g) precondition: the switch reads off", _hs183(_p183), 0)
+    _rg = len(_said183("(8.152)"))
+    _cg, _ = _stop183("g", _WAIT183, [_SH183])
+    check("(g) carried, and no line of the hold",
+          (_cg, len(_said183("(8.152)")) - _rg), (True, 0))
+    post("/config", {"projects": {A: {}, B: {}, C: {}, _p183: {}}})
+    check("(g) on by default, at the measured hour", _hs183(_p183), 3600.0)
+    daemon.CFG["thresholds"]["bg_report_hold"] = 900
+    try:
+        check("(g) and bg_report_hold sets the ceiling", _hs183(_p183), 900.0)
+    finally:
+        daemon.CFG["thresholds"].pop("bg_report_hold", None)
+finally:
+    daemon.notify = _rn183
+    daemon.deliver_ex = _dx183
+    daemon.sessions.transcript_of = _tof183
+    if _ih183 is _NO183:
+        daemon.CFG["thresholds"].pop("idle_hold", None)
+    else:
+        daemon.CFG["thresholds"]["idle_hold"] = _ih183
+    daemon.PROCTRACK.pop(_k183, None)
+    getattr(daemon, "BG_HELD_TRIED", {}).pop(_k183, None)
+    with daemon._lock:
+        for _c in ("waiting_on_you", "inflight", "bg_held", "bg_red", "note",
+                   "calls", "handover"):
+            (daemon.STATE.get(_c) or {}).pop(_k183, None)
+        for _c, _key in (("asks", "%s|executor" % _k183),
+                         ("handover_pending", "%s|planner" % _k183)):
+            (daemon.STATE.get(_c) or {}).pop(_key, None)
+        daemon.save_state()
+post_rc("/loop", {"action": "stop", "project": _p183})
+post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n184. a `wait` right after a task went to the executor does not")
+print("    call a person")
+print("    A watched project, 2026-10-16: report 162 at 09:06:18, a task")
+print("    delivered to the executor at 09:06:38, and the planner's `wait` -")
+print("    \"the task is already yours\" - at 09:06:42 was announced to the")
+print("    person as \"nothing is running, so the pair is stopped\". A task")
+print("    that went out after the report was made is the pair's next turn,")
+print("    not a pair parked on a person (8.152).")
+_p184 = os.path.join(TMP, "task-then-wait-184")
+os.makedirs(_p184, exist_ok=True)
+_k184 = canon(_p184)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p184: {}}})
+post_rc("/loop", {"action": "start", "project": _p184})
+for _r, _s in (("executor", "tw184-ex"), ("planner", "tw184-pl")):
+    post_rc("/event", {"hook_event_name": "SessionStart", "role": _r,
+                       "session_id": _s, "project_dir": _p184,
+                       "cwd": _p184})
+    register(_p184, _r, _s)
+
+
+def _task184(tag):
+    """A task to the executor, and its delivery seen: /task delivers in a
+    thread of its own (deliver_task_later), and last_task is written when
+    the delivery is done (note_task_sent)."""
+    t0 = time.time()
+    post_rc("/task", {"project": _p184,
+                      "instructions": "the next piece, case 184"})
+    check("(%s) precondition: the task was delivered" % tag,
+          until(lambda: float((daemon.STATE.get("last_task") or {})
+                              .get(_k184) or 0) >= t0, 15), True)
+
+
+def _wait184(tag, task_before=False, task_after=False):
+    """A turn ends with nothing running, the planner answers wait; with a
+    task sent before the report was made or while it waited. Gives back
+    whether a person was called."""
+    with daemon._lock:
+        daemon.STATE.get("waiting_on_you", {}).pop(_k184, None)
+        daemon.save_state()
+    if task_before:
+        _task184(tag)
+    _t = threading.Thread(target=post, args=("/event", {
+        "hook_event_name": "Stop", "role": "executor",
+        "session_id": "tw184-ex", "project_dir": _p184, "cwd": _p184,
+        "last_assistant_message": "Piece done; " + tag,
+        "background_tasks": []}), daemon=True)
+    _t.start()
+    check("(%s) precondition: its report is waiting" % tag,
+          until(lambda: _k184 in daemon.PENDING, 25), True)
+    if task_after:
+        _task184(tag)
+    post("/verdict", {"project": _p184, "verdict": "wait",
+                      "feedback": "The task is already yours."}, secret=True)
+    _t.join(40)
+    check("(%s) precondition: the Stop hook has its answer" % tag,
+          _t.is_alive(), False)
+    return bool((daemon.STATE.get("waiting_on_you") or {}).get(_k184))
+
+
+def _said184(words):
+    return [r.get("text") or "" for r in daemon.store.recent_events(
+        400, project=_p184) if words in (r.get("text") or "")]
+
+
+_ih184 = daemon.CFG.setdefault("thresholds", {}).get("idle_hold", _NO183)
+daemon.CFG["thresholds"]["idle_hold"] = 0
+try:
+    print("   (a) the task goes out while the report waits, then `wait`")
+    print("   FAILURE WOULD LOOK LIKE: \"the pair is parked on you\" about a")
+    print("   pair whose executor has just been handed its next piece")
+    check("(a) nobody is called", _wait184("a", task_after=True), False)
+    check("(a) and the journal says why, once",
+          len(_said184("a task went to the executor at")), 1)
+    print("   CONTROL: no task at all - the pair IS parked, and rings")
+    check("(b) the person is called", _wait184("b"), True)
+    print("   CONTROL: a task sent before the report was made is the one")
+    print("   that report answers - it does not excuse the wait")
+    check("(c) the person is called", _wait184("c", task_before=True), True)
+    check("one 8.152 line in all, for (a)",
+          len(_said184("a task went to the executor at")), 1)
+
+    print("   (j) the role line that rides on every task and verdict names")
+    print("   the marker, in the form the bridge reads")
+    _rl184 = daemon.rules_for_delivery("task", "tw184-rules")
+    check("(j) the task's envelope names `Planner now: <why>`",
+          "a line `Planner now: <why>` sends it at once" in _rl184, True)
+    _pn184 = getattr(daemon, "PLANNER_NOW", None)
+    check("(j) and that form is the one the bridge reads",
+          bool(_pn184 and _pn184.search("Planner now: <why>")), True)
+    _de184 = DELIVERED.get((_k184, "executor")) or []
+    check("(j) it rode on the task the executor was given",
+          any("`Planner now: <why>`" in (b.get("content") or "")
+              for b in _de184), True)
+finally:
+    if _ih184 is _NO183:
+        daemon.CFG["thresholds"].pop("idle_hold", None)
+    else:
+        daemon.CFG["thresholds"]["idle_hold"] = _ih184
+    with daemon._lock:
+        daemon.STATE.get("waiting_on_you", {}).pop(_k184, None)
+        daemon.save_state()
+post_rc("/loop", {"action": "stop", "project": _p184})
+post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n185. the walk of case 49 again, as the suite's LAST case: a")
 print("   container first filled after case 49 is walked too")
 print("   case 49 called itself LAST and stood at 49 of 177, so a container")
 print("   a later case fills first was never walked - and one missing from")

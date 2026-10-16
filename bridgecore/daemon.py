@@ -143,7 +143,9 @@ RULES_CLOSE = ("=" * 70 + "\nAnswer a person in VISIBLE TEXT, as the LAST "
 # next message, without waiting for a rotation (rule 31). The canon itself
 # is a separate and deliberate change, and it is the owner's.
 # 256 characters, and every one of them rides on every task and every
-# verdict. The 179 it replaces said only "a background run is not a reason
+# verdict (since 8.152, 330: the last sentence names the marker that
+# carries a report past the hold for a running background). The 179 it
+# replaces said only "a background run is not a reason
 # to END the turn", and on 2026-09-03 that was read as permission to wait
 # inside the turn instead: at 23:50:11 and again at 00:01:48 a watched
 # project's executor ran `until grep -aq ...; do sleep 45; done` in the
@@ -155,7 +157,8 @@ _BG_TURN_LINE = ("Never WAIT for a background run - not by ending the turn, "
                  "not by an `until ... sleep` loop, which blocks the turn on "
                  "the one thing that was not blocking it. While it runs: "
                  "engine-free work; none left: end the turn in one line. "
-                 "The client says when it ends.")
+                 "The client says when it ends. Such a report waits for "
+                 "it; a line `Planner now: <why>` sends it at once.")
 RULES_ROLE_LINE = {
     "task": _BG_TURN_LINE,
     "verdict": _BG_TURN_LINE,
@@ -609,6 +612,11 @@ STATE_PATHS = {
     # record, under the project. In STATE, so a restart inside the hold
     # still delivers or closes it. -> open_call, calls_pass
     "calls": "path",
+    # Reports the bridge answered `wait` itself while the executor's
+    # background ran, waiting to go to the planner together; and a
+    # background command of the executor's that ended red, which sends
+    # the next report at once. -> hold_bg_report, DECISIONS.md 8.152
+    "bg_held": "path", "bg_red": "path",
     # keyed by the project AND the role
     # One decision, one record: the fingerprint of the last handover
     # decision written down for this half, so a decision re-taken every
@@ -7312,6 +7320,17 @@ def assess(path):
         return done("a half that has stopped writing",
                     nudge_stalled(path, hit[0], hit[1]))
 
+    # ITS REPORTS ARE HELD, so its tail is a report the bridge has already
+    # answered: an executor waiting for its own background, which the
+    # client wakes when that ends. Read as "between pieces" or as a
+    # question, the tail would be carried to the planner by this door
+    # instead - the wake the hold exists to save. -> DECISIONS.md 8.152
+    _bgh = (STATE.get("bg_held") or {}).get(norm(path)) or []
+    if _bgh:
+        return done("an idle executor whose %d report%s the bridge holds "
+                    "while its background runs"
+                    % (len(_bgh), "" if len(_bgh) == 1 else "s"))
+
     if waiting_for_direction(ex["tail"]):
         if acted_recently(path, "direction"):
             return done("an executor between pieces, already passed on")
@@ -11542,6 +11561,10 @@ def session_watch():
         # (8.151) - each in its own try, so one cannot stop the other
         try:
             calls_pass()
+        except Exception:
+            pass
+        try:
+            bg_held_pass()
         except Exception:
             pass
         for _p in list((CFG.get("projects") or {})):
@@ -18191,6 +18214,12 @@ def close_at_stop(path, role, event):
                          if meta.get("agent") else ""),
                       project_name(path), role, "log", project_dir=path)
     for key, meta in ended:
+        # ITS STATUS, for the hold: the list says only that it ended, and a
+        # red end must reach the planner with this very Stop's report
+        # (8.152). bg_finished never raises; a record it cannot read is
+        # simply not red.
+        if role == "executor":
+            note_bg_red(path, meta, bg_finished(path, role, meta)[2])
         store.journal("process",
                       "Background command ended after %.0f min - the Stop's "
                       "own list of running tasks no longer names it (%s): %s"
@@ -18290,6 +18319,7 @@ def check_background():
             # busy - the alibi stalled() and clinch() read - until the
             # executor's next Stop, and a frozen half has no next Stop.
             _freed = process_ended(path, "executor")
+            note_bg_red(path, meta, state)
             how = state or "no status given"
             if state and state.lower() not in BG_DONE_STATES:
                 how = "%s (a status this bridge has not seen before)" % state
@@ -18381,6 +18411,9 @@ def clinch(path, sit, grace=None):
         return None                      # nothing is owed; quiet is correct
     if (STATE.get("idle_holding") or {}).get(norm(path)):
         return None                      # the damper is holding on purpose
+    if (STATE.get("bg_held") or {}).get(norm(path)):
+        return None                      # reports held for a running
+        #                                  background, on purpose (8.152)
     if sit.get("reviewing") or sit.get("verdict_in_flight") \
             or sit.get("handover") or sit.get("inflight"):
         return None                      # something legitimately in flight
@@ -23410,6 +23443,285 @@ def watch_hook_caller(path, n, waiter, sock, project, role, sid, since):
         waiter["event"].wait(HOOK_WATCH_SEC)
 
 
+# ---- a report while the executor's background runs -----------------------
+#
+# A turn that ends while its own background job runs is a report about
+# waiting, and carrying it woke the planner with nothing to decide. One
+# watched project, 2026-10-16: reports 152-156 in 47 minutes and 162-165 in
+# 2 h 07 min, every one sent at a turn end with exactly one background Bash
+# running and answered `wait` within seconds - nine planner wakes, each at a
+# window of about 720k, and not one decision among them. So such a report is
+# not carried. The bridge answers it `wait` itself and writes it down as an
+# iteration like any other, and the reports it held go to the planner in one
+# delivery: with the first report whose Stop lists nothing running, or after
+# bg_report_hold, whichever is first. One verdict still answers one report -
+# the bridge's is that verdict, and the delivery says so.
+#
+# THE CEILING IS MEASURED, and how is DECISIONS.md 8.152: 609 background
+# Bash, Agent and Monitor tasks in 38 of the 41 executor sessions of
+# 2026-10-06..16 looked at. At the 167 turn ends where a background Bash
+# was running, everything running then had ended within 3 598 s (p95
+# 2 593, p99 3 510; 4.2 % past long_turn's 2 700), and a Monitor ends on
+# its own timeout (max 1 779 s). A background
+# Agent runs longer (p50 3 072 s, p90 12 025 s): with agents counted, 10.6 %
+# of the holds reach the hour, and once an hour is then the cadence - the
+# same as LONG_TURN_AGAIN_SEC. The ceiling is for the other kind: 26 of the
+# 609 tasks never had an end in their transcript. -> DECISIONS.md 8.152
+BG_HOLD_SEC = 3600
+# The executor's own word that this report is for the planner now - a red,
+# a question, a decision asked for. A line of its own, the shape of
+# `Debt:`; never guessed from the prose. Taught by RULES_ROLE_LINE.
+PLANNER_NOW = re.compile(r"^\s*planner now\s*:", re.I | re.M)
+
+
+def _load_restart_words():
+    """The pair's own words for "a restart is a minute away", or [].
+
+    From hints.local.json, beside the hint lists and the claim markers
+    and for their reason. An absent file - the public checkout - gives
+    none, and RESTART_SOON then knows the English alone; so does a file
+    that will not read, which the hint lists' HINTS_PROBLEM names.
+    """
+    if not os.path.exists(HINTS_FILE):
+        return []
+    try:
+        with open(HINTS_FILE, encoding="utf-8") as fh:
+            got = json.load(fh)
+    except Exception:
+        return []
+    return [str(w) for w in (got.get("restart_soon") or []) if str(w).strip()]
+
+
+# The one report a pair's protocol sends just before a restart: in English,
+# and in the pair's own words, "restart_soon" in hints.local.json and not
+# here - this file is published, and check_public refuses them in it as
+# characters or as \uXXXX escapes, the hint lists' arrangement. Any run of
+# white space stands between two words, and case does not matter.
+RESTART_WORDS = _load_restart_words()
+RESTART_SOON = re.compile("|".join(
+    [r"restart in a minute"] + [r"\s+".join(re.escape(w) for w in p.split())
+                                for p in RESTART_WORDS]), re.I)
+# A background command whose notice says this ended red (a non-zero exit
+# reads `failed`); `killed` is somebody's decision, not a result.
+BG_RED_STATES = ("failed", "timed_out")
+BG_HELD_RETRY_SEC = 300
+BG_HELD_TRIED = {}           # project key -> when its delivery last failed
+
+
+def bg_hold_secs(path):
+    """The hold's ceiling for this pair; 0 when its reports go as they come."""
+    if not store.project_config(CFG, path).get("hold_reports_on_background",
+                                               True):
+        return 0
+    t = CFG.get("thresholds", {}).get("bg_report_hold")
+    return float(BG_HOLD_SEC if t is None else t)
+
+
+def bg_running_now(path, event):
+    """What runs for the executor as its turn ends, in words, or "".
+
+    The Stop's own list first - a Monitor and a background Agent are only
+    there (8.137) - and then what the bridge tracks itself, which an older
+    client without the list still has (inflight_live)."""
+    listed = stop_running_tasks(event) or []
+    out = [tasks_brief(listed)] if listed else []
+    ids = set(str(t.get("id") or "") for t in listed)
+    own = [m for m in inflight_live(path) if isinstance(m, dict)
+           and (m.get("role") or "executor") == "executor"
+           and str(m.get("bgid") or "") not in ids]
+    if own:
+        out.append("tracked: " + "; ".join(brief(m.get("cmd"), 60)
+                                           for m in own[:4]))
+    return "; ".join(out)
+
+
+def note_bg_red(path, meta, state):
+    """A background command of the executor's ended red: the next report
+    goes at once (carry_now_why), and says which."""
+    if str(state or "").lower() not in BG_RED_STATES:
+        return
+    with _lock:
+        STATE.setdefault("bg_red", {})[norm(path)] = {
+            "at": time.time(), "state": str(state),
+            "cmd": brief((meta or {}).get("cmd"), 80)}
+        save_state()
+
+
+def carry_now_why(path, msg):
+    """Why this report goes to the planner although a background runs, or "".
+
+    The exceptions are what a person or the planner must not wait an hour
+    for, and each is a fact the bridge holds - never a reading of the prose.
+    """
+    k = norm(path)
+    if PLANNER_NOW.search(msg or ""):
+        return "the executor marked it `Planner now:`"
+    if RESTART_SOON.search(msg or ""):
+        return "it says a restart is a minute away"
+    red = (STATE.get("bg_red") or {}).get(k)
+    if red:
+        return "a background command ended %s at %s: %s" % (
+            red.get("state"), clock_at(float(red.get("at") or 0)),
+            red.get("cmd"))
+    if (STATE.get("note") or {}).get(k):
+        return "a note from a person goes with it"
+    if (STATE.get("waiting_on_you") or {}).get(k):
+        return "the pair is parked on a person"
+    for r in MANAGED_ROLES:
+        if open_permission_ask(path, r):
+            return "the %s's window is asking a person" % r
+    for rec in list(((STATE.get("calls") or {}).get(k) or {}).values()):
+        if isinstance(rec, dict) and call_open(path, rec)[0]:
+            return "a call for a person is open (%s)" % rec.get("family")
+    if k in WALL_VERDICT or (STATE.get("handover") or {}).get(path) \
+            or (STATE.get("handover") or {}).get(k) \
+            or any(handover_pending_for(path, r) for r in MANAGED_ROLES):
+        return "a handover is under way"
+    return ""
+
+
+def hold_bg_report(event, path, lp, msg, project):
+    """Answer this report `wait` here instead of carrying it. True if held.
+
+    Spent like any report - an iteration, its files, its line in the index,
+    its commit - so the record has no hole where it was; only the planner's
+    turn is not spent. No words go back on the hook: the executor is woken
+    by its background's end, and words here would wake it now.
+    """
+    ceiling = bg_hold_secs(path)
+    running = bg_running_now(path, event) if ceiling else ""
+    if not running:
+        return False
+    k = norm(path)
+    why = carry_now_why(path, msg)
+    held = (STATE.get("bg_held") or {}).get(k) or []
+    if not why and held \
+            and time.time() - float(held[0].get("at") or 0) >= ceiling:
+        why = ("the oldest held report, %d, is %d min old (bg_report_hold)"
+               % (held[0].get("n") or 0,
+                  (time.time() - float(held[0].get("at") or 0)) // 60))
+    if why:
+        store.journal("loop", "The executor's background runs (%s) and its "
+                      "report goes to the planner all the same: %s (8.152)"
+                      % (running, why), project, "executor", "log",
+                      project_dir=path)
+        return False
+    lp["iteration"] += 1
+    n = lp["iteration"]
+    save_state()
+    note_debt(path, project, msg, iteration=n)
+    words = ("Answered by the bridge, not by the planner: the executor's "
+             "background runs (%s). The report is held for the planner and "
+             "goes with the first report whose Stop lists nothing running, "
+             "or after %d min. (DECISIONS.md 8.152)"
+             % (running, int(ceiling) // 60))
+    store.iteration_file(path, n, "executor", msg)
+    store.dialogue(path, "%s  %s / executor - report %d" % (now(), project, n),
+                   msg)
+    store.iteration_file(path, n, "planner", "verdict: wait\n\n%s" % words)
+    store.dialogue(path, "%s  %s / bridge - verdict: wait" % (now(), project),
+                   words)
+    store.index_append(path, n, msg.splitlines()[0][:90] if msg else "",
+                       "wait")
+    with _lock:
+        STATE.setdefault("bg_held", {}).setdefault(k, []).append(
+            {"n": n, "at": time.time(), "head": brief(msg, 160),
+             "running": running[:300]})
+        save_state()
+    git_commit_iteration(path, n, "wait")
+    touch_session(event, state="waiting on a process")
+    store.journal("loop", "Report %d held, not carried - the bridge answered "
+                  "it wait itself: the executor's background runs (%s). %d "
+                  "held now; they go to the planner with the first report "
+                  "whose Stop lists nothing running, or after %d min (8.152)"
+                  % (n, running, len(held) + 1, int(ceiling) // 60),
+                  project, "executor", "log", project_dir=path)
+    return True
+
+
+def held_lines(held):
+    return "\n".join("- report %s at %s: %s" % (
+        h.get("n"), clock_at(float(h.get("at") or 0)), h.get("head") or "")
+        for h in held)
+
+
+def take_bg_held(path, n):
+    """The reports held for this pair, as the head of report n; and the red
+    mark goes, since this report carries it. "" when none were held."""
+    k = norm(path)
+    with _lock:
+        held = (STATE.get("bg_held") or {}).pop(k, None) or []
+        red = (STATE.get("bg_red") or {}).pop(k, None)
+        if held or red:
+            save_state()
+    if not held:
+        return ""
+    store.journal("loop", "Report %d carries the %d report%s held while the "
+                  "executor's background ran: %s (8.152)"
+                  % (n, len(held), "" if len(held) == 1 else "s",
+                     ", ".join(str(h.get("n")) for h in held)),
+                  project_name(path), "executor", "log", project_dir=path)
+    return ("%d report%s came while the executor's background was running "
+            "and %s not carried - the bridge answered each `wait` itself, so "
+            "nothing is owed on them (DECISIONS.md 8.152):\n%s\n\n"
+            % (len(held), "" if len(held) == 1 else "s",
+               "was" if len(held) == 1 else "were", held_lines(held)))
+
+
+def bg_held_pass(now_ts=None):
+    """Held reports past bg_report_hold go to the planner as news, once.
+    session_watch runs it. -> DECISIONS.md 8.152"""
+    now_ts = time.time() if now_ts is None else now_ts
+    for k, held in list((STATE.get("bg_held") or {}).items()):
+        if not held:
+            continue
+        age = now_ts - float(held[0].get("at") or now_ts)
+        if age < bg_hold_secs(k) or PENDING.get(k) \
+                or now_ts - BG_HELD_TRIED.get(k, 0) < BG_HELD_RETRY_SEC:
+            continue
+        name = project_name(k)
+        if not ((STATE.get("loops") or {}).get(k) or {}).get("active"):
+            with _lock:
+                (STATE.get("bg_held") or {}).pop(k, None)
+                save_state()
+            store.journal("loop", "%d held report%s not carried: the loop is "
+                          "off - they are in the iteration files (8.152)"
+                          % (len(held), "" if len(held) == 1 else "s"),
+                          name, "executor", "log", project_dir=k)
+            continue
+        if (STATE.get("paused") or {}).get(k):
+            continue
+        ok, how = deliver_ex(
+            k, "planner",
+            "%d report%s of the executor %s held for %d min while its "
+            "background ran - the bridge answered each `wait` itself, so "
+            "nothing is owed on them. Running at the last of them: %s.\n%s"
+            "\nNews, not a report: no verdict is wanted. (DECISIONS.md "
+            "8.152)" % (len(held), "" if len(held) == 1 else "s",
+                        "was" if len(held) == 1 else "were",
+                        age // 60, held[-1].get("running") or "?",
+                        held_lines(held)),
+            {"kind": "info"})
+        if not ok:
+            BG_HELD_TRIED[k] = now_ts
+            store.journal("loop", "%d held report%s past bg_report_hold did "
+                          "not reach the planner (%s) - again in %d s (8.152)"
+                          % (len(held), "" if len(held) == 1 else "s", how,
+                             BG_HELD_RETRY_SEC), name, "executor", "warn",
+                          project_dir=k)
+            continue
+        BG_HELD_TRIED.pop(k, None)
+        with _lock:
+            if (STATE.get("bg_held") or {}).get(k) == held:
+                STATE["bg_held"].pop(k, None)
+            save_state()
+        store.journal("loop", "%d held report%s went to the planner after "
+                      "%d min, the background still running: %s (8.152)"
+                      % (len(held), "" if len(held) == 1 else "s", age // 60,
+                         ", ".join(str(h.get("n")) for h in held)),
+                      name, "executor", "log", project_dir=k)
+
+
 def run_review(event, path, lp, msg, project, role):
     """Deliver the report, wait for the verdict. Returns hook_output or None."""
     hook_output = None
@@ -23429,6 +23741,12 @@ def run_review(event, path, lp, msg, project, role):
         store.journal("silence", "Turn finished while the pair is held - no "
                       "report made, nothing is reading them.", project,
                       role, "log", project_dir=path)
+        return None
+    # BEFORE THE DAMPER: a held report spends no planner turn, so there is
+    # nothing for the damper to save, and its 20-minute hold of the Stop
+    # hook would only keep the client from taking its background's end
+    # when it comes. Not counted as a spin either way. (8.152)
+    if role == "executor" and hold_bg_report(event, path, lp, msg, project):
         return None
     hold = float(CFG.get("thresholds", {}).get("idle_hold")
                  if CFG.get("thresholds", {}).get("idle_hold") is not None
@@ -23484,6 +23802,9 @@ def run_review(event, path, lp, msg, project, role):
     note_debt(path, project, msg, iteration=n)
 
     content = "Executor report %d:\n\n%s" % (n, msg)
+    # and what the bridge held while the executor's background ran (8.152)
+    if role == "executor":
+        content = take_bg_held(path, n) + content
     # The planner marked this piece as visual, so the report is expected to
     # open with the frames. Saying so at the top of the delivery means the
     # planner can send it back without reading the prose underneath - which
@@ -23928,7 +24249,21 @@ def run_review(event, path, lp, msg, project, role):
                                        "" if len(listed) == 1 else "s",
                                        tasks_brief(listed)),
                           project, "planner", "log", project_dir=path)
-        if running:
+        # A TASK WENT OUT AFTER THIS REPORT WAS MADE, so the executor has
+        # work and its next turn takes it up: not a pair parked on a person.
+        # 2026-10-16: report 162 at 09:06:18, a task delivered to the
+        # executor at 09:06:38, and the planner's `wait` - "the task is
+        # already yours" - at 09:06:42 was announced to the person as
+        # "nothing is running, so the pair is stopped". -> DECISIONS.md 8.152
+        _task_at = float((STATE.get("last_task") or {}).get(norm(path)) or 0)
+        if not running and _task_at >= float(waiter.get("made") or 0):
+            store.journal("loop", "The planner answered wait with nothing "
+                          "running, and a task went to the executor at %s, "
+                          "after report %d was made - the pair has work, "
+                          "nobody is called (8.152)"
+                          % (clock_at(_task_at), n), project, "planner",
+                          "log", project_dir=path)
+        elif running:
             notify("waiting_process", "%s: planner says wait - %s"
                    % (project, feedback[:200]), path=path)
         elif not (STATE.get("waiting_on_you") or {}).get(norm(path)):

@@ -13,6 +13,22 @@ file before it and listed in `make_public.py`'s `EXTRA`, or it is never
 published.
 
 <!-- /rule 36 -->
+**2026-10-16 — what is new since the night release of 2026-10-16 (677a552)**
+
+- **An executor that ends its turn to wait for its own background run
+  no longer wakes the planner.** When the client's Stop lists a running
+  background Bash, agent or monitor, or the bridge tracks a job of its
+  own, the bridge answers that report `wait` itself, writes the answer
+  into the iteration and the index, and hands the held reports to the
+  planner in one delivery, in front of the first report with nothing
+  running - or as news after `bg_report_hold` (one hour). A line
+  `Planner now: <why>`, a restart a minute away, a background that ended
+  red, and anything that already calls a person go at once.
+  `hold_reports_on_background`, per project and on by default, turns it
+  off.
+- **A planner's `wait` right after a task went to the executor calls
+  nobody**: the pair has its next piece.
+
 **2026-10-16 — what is new since the morning release of 2026-10-15 (67112c0)**
 
 - **A Mac mounts the PC's share without a password dialog.**

@@ -898,8 +898,19 @@ post("/channel/register", {"project": PROJ, "role": "executor",
                            "port": EX_PORT, "pid": 4343,
                            "session_id": EX2}, secret=True)
 statusline("executor", EX2, 30000)
+# The planner is not woken for the hands changing since 8.153 - it hears it
+# with its next wake - so what is waited for is the executor's handoff and
+# the line kept for the planner.
+
+
+def _kept_wh():
+    return [e for e in ((daemon.STATE.get("waited") or {})
+                        .get(daemon.norm(PROJ)) or [])
+            if e.get("tag") == "handover"]
+
+
 for _ in range(120):
-    if DELIVERED["executor"] and DELIVERED["planner"]:
+    if DELIVERED["executor"] and _kept_wh():
         break
     time.sleep(0.1)
 check("the handoff was delivered to the new executor",
@@ -927,12 +938,27 @@ check("naming the file they came from",
 check("and never says there was no handoff when there was one",
       any("left NO handoff of its own" in (d.get("content") or "")
           for d in DELIVERED["executor"]), False)
-check("and the surviving planner was told the hands changed",
-      any("has been replaced by a fresh session" in (d.get("content") or "")
-          for d in DELIVERED["planner"]), True)
-check("told through its channel, as information not a task",
-      any((d.get("meta") or {}).get("kind") == "info"
-          for d in DELIVERED["planner"]), True)
+# 8.153: the hands changing is status - kept for the surviving planner's
+# next wake, not a wake of its own. The receiver is asked twice: nothing
+# came when it happened, and the next thing that comes carries it.
+check("the surviving planner is not woken for the hands changing",
+      any("replaced by a fresh session" in (d.get("content") or "")
+          for d in DELIVERED["planner"]), False)
+check("it is kept for its next wake",
+      [("replaced by a fresh session" in (e.get("line") or ""))
+       for e in _kept_wh()], [True])
+_ok_wh = daemon.deliver_ex(PROJ, "planner", "NEXT-WAKE-WH",
+                           {"kind": "info"})[0]
+for _ in range(50):
+    if any("NEXT-WAKE-WH" in (d.get("content") or "")
+           for d in DELIVERED["planner"]):
+        break
+    time.sleep(0.1)
+check("and the next wake tells it the hands changed, through its channel",
+      (_ok_wh, [("replaced by a fresh session" in (d.get("content") or ""))
+                for d in DELIVERED["planner"]
+                if "NEXT-WAKE-WH" in (d.get("content") or "")]),
+      (True, [True]))
 check("the handover is no longer under way",
       bool((daemon.STATE.get("handover") or {}).get(daemon.norm(PROJ))), False)
 # THE OTHER HALF OF A4b's ORDER CLAIM. One stop, of the pid A4b

@@ -12559,9 +12559,15 @@ else:
                   % (_blob148, _blob148))
     # host() takes a known host's first label too: a PC's known_hosts
     # that gained github.com mid-scan had "github" refused (2026-10-15)
+    # ...and a service net is nobody's address: the PC's known_hosts of
+    # 2026-10-16 had a loopback host on its line 19, and "127.0.0." refused
+    # every 127.0.0.1 in the tree (8.153); a documentation net is the control
     with open(os.path.join(_home148, ".ssh", "known_hosts"), "w") as _fh:
         _fh.write("github.com ssh-ed25519 %s\ngitlab.com,otherbox.example "
                   "ssh-ed25519 %s\n" % (_blob148, _blob148))
+        for _h148 in ("127.0" + ".0.1", "[0.0" + ".0.0]:2222",
+                      "255.255" + ".255.255", "198.51" + ".100.7"):
+            _fh.write("%s ssh-ed25519 %s\n" % (_h148, _blob148))
     _env148 = dict((k, os.environ.get(k)) for k in ("HOME", "USERPROFILE"))
     try:
         os.environ["HOME"] = os.environ["USERPROFILE"] = _home148
@@ -12582,6 +12588,12 @@ else:
           "a hit in both forms",
           sorted(v for k, v in _vals148h if k == "ssh host"),
           ["otherbox", "otherbox.example"])
+    _nets148 = [v for k, v in _vals148h if k == "network address"]
+    check("a known host on a service net is no address of this machine - "
+          "loopback, 'this network', the broadcast - and one on a "
+          "documentation net is",
+          (any(v.startswith(("127.", "0.", "255.")) for v in _nets148),
+           "198.51" + ".100." in _nets148), (False, True))
 
 
 print("\n149. a long command's own tree is read off Windows too (8.99):")

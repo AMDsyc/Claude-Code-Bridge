@@ -355,12 +355,24 @@ def _key_values(line):
     return []
 
 
+# THE SERVICE NETS ARE NOBODY'S ADDRESS. Loopback, "this network" and the
+# broadcast stand in any machine's own records, and as a value "127.0.0."
+# refuses every 127.0.0.1 the bridge binds to. The ipconfig branch always
+# skipped them; known_hosts and the ssh config did not, and the PC's
+# known_hosts of 2026-10-16 carried "127.0.0.1 ssh-ed25519 ..." as its line
+# 19 - its acceptance went red on the whole tree. add() drops them whatever
+# branch found them. -> 8.153
+SERVICE_NETS = ("127.", "0.", "255.")
+
+
 def machine_values():
     """[(kind, value)] this machine says about itself and its neighbours."""
     out = []
 
     def add(kind, value):
         value = (value or "").strip().strip('"').strip("[]")
+        if kind == "network address" and value.startswith(SERVICE_NETS):
+            return
         if len(value) >= 3 and not generic(value) \
                 and (kind, value) not in out:
             out.append((kind, value))
@@ -437,7 +449,7 @@ def machine_values():
         ["/sbin/ifconfig"] if os.path.exists("/sbin/ifconfig")
         else ["ip", "-4", "addr"])
     for a in re.findall(r"(\d+\.\d+\.\d+)\.\d+", nets):
-        if not a.startswith(("127.", "0.", "255.")) \
+        if not a.startswith(SERVICE_NETS) \
                 and not a.endswith(".255"):
             add("network address", a + ".")
     return out

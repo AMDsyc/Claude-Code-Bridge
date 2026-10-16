@@ -153,6 +153,9 @@ RULES_CLOSE = ("=" * 70 + "\nAnswer a person in VISIBLE TEXT, as the LAST "
 # 2 h 45 min while the engine-free work it had been handed stood untouched.
 # A rule that forbids one way of waiting and not the other is a rule that
 # moves the waiting. -> DECISIONS.md 8.6
+# The planner's line carries its role rule of 8.153 as well, 108 characters
+# on every report: a running planner window hears it nowhere else, and the
+# planner that wrote "the bridge is not carrying reports" was one. -> 8.153
 _BG_TURN_LINE = ("Never WAIT for a background run - not by ending the turn, "
                  "not by an `until ... sleep` loop, which blocks the turn on "
                  "the one thing that was not blocking it. While it runs: "
@@ -164,7 +167,9 @@ RULES_ROLE_LINE = {
     "verdict": _BG_TURN_LINE,
     "executor report": "Answering `wait` to an executor with engine-free "
                        "work undone leaves it idle until the run ends - hand "
-                       "that work over with `task`, now.",
+                       "that work over with `task`, now. No report means the "
+                       "executor's turn has not ended; the bridge wakes you "
+                       "only for a hang or a fault (8.153).",
 }
 _RULES_MISSING_TOLD = [False]
 
@@ -617,11 +622,22 @@ STATE_PATHS = {
     # background command of the executor's that ended red, which sends
     # the next report at once. -> hold_bg_report, DECISIONS.md 8.152
     "bg_held": "path", "bg_red": "path",
+    # What the planner was not woken for - status - kept for its next wake,
+    # and what a long turn of the executor's was already told (kept, the
+    # two-hour line, the hang). -> waited_line, long_turn_note, 8.153
+    "waited": "path", "turn_watch": "path",
+    # The letters of the pairs' mailbox already carried to this project's
+    # planner, or there before its box was first watched: per box folder,
+    # the names. -> pairs_mail_pass, DECISIONS.md 8.153
+    "mail_seen": "path",
     # keyed by the project AND the role
     # One decision, one record: the fingerprint of the last handover
     # decision written down for this half, so a decision re-taken every
     # minute is journalled once. -> handover_decision_new
     "handover_said": "pair",
+    # When the stall nudge last went to this half: the witness of a hang,
+    # "nudged, and it did not move". -> nudge_stalled, DECISIONS.md 8.153
+    "stall_nudged": "pair",
     # A handoff asked for and not yet written: the file, its mtime and size
     # at the moment of asking, and whether the one line and the one call
     # have been spent. -> note_handover_pending
@@ -656,6 +672,9 @@ STATE_PATHS = {
     "pids": "pair", "down": "pair", "launches": "pair",
     "last_session": "pair", "channels": "pair", "autostart_tried": "pair",
     "autostart_told": "pair", "stopfail": "pair", "stop_seen": "pair",
+    # The bridge's own count of a half's turn ends, one a Stop and moved by
+    # nothing else: the turn a long turn's latch belongs to. -> 8.153
+    "stop_n": "pair",
     "compact_wait": "pair", "compact_failed": "pair", "chan_backlog": "pair",
     "chan_refused": "pair",
     # Reports handed to a window that never opened a turn for them - see
@@ -663,7 +682,8 @@ STATE_PATHS = {
     # written, so move_state_keys and drop_project_state both cover it.
     "deaf": "pair",
     "report_sent": "path",       # the last report that reached the channel
-    "last_verdict": "path",      # the planner's last verdict to this pair
+    "last_verdict": "path",      # the planner's last verdict to this pair,
+    #                              and the bridge's own wait since (held_at)
     "window_sessions": "pair",   # window pid -> the session in it (15.1)
     "window_no": "pair",         # the half's window numbers (8.75)
     # A compaction point this pair has run past without compacting, and so
@@ -2528,7 +2548,12 @@ PLANNER_CONTEXT_RULE = (
     "If you believe a rotation is genuinely needed sooner than the bridge "
     "would do it, say so to the human and let them decide - do not act as "
     "the bridge yourself. "
-    "Anything a person is meant to read goes LAST in your turn, after every tool call. Text written before a call is not shown to them. And waiting for the owner's word exists only as a question you actually asked, visibly, AND declared to the bridge - the `wait` verdict, which calls him, or an explicit hand-back. Waiting silently for a word you never asked for is rule 27: it is not consent, it is a pair stopped with nobody told. Measured on 2026-08-22: a planner stood 66 minutes on the owner's word, made 14 tool calls, and wrote NOT ONE line of text in the whole window.")
+    "Anything a person is meant to read goes LAST in your turn, after every tool call. Text written before a call is not shown to them. And waiting for the owner's word exists only as a question you actually asked, visibly, AND declared to the bridge - the `wait` verdict, which calls him, or an explicit hand-back. Waiting silently for a word you never asked for is rule 27: it is not consent, it is a pair stopped with nobody told. Measured on 2026-08-22: a planner stood 66 minutes on the owner's word, made 14 tool calls, and wrote NOT ONE line of text in the whole window. "
+    "No report from the executor means its turn has not ended - a report is "
+    "carried when a turn ends, and a long turn is work, not a fault. The "
+    "bridge wakes you only for a report, a call for the human, a hang or a "
+    "death it could not repair; status waits and comes in one line with "
+    "the next of these.")
 
 
 def pair_id(path):
@@ -5684,11 +5709,18 @@ def deliver_ex(path, role, content, meta, answer=None):
     missed = take_missed_reports(path) if role == "planner" else ""
     # Rule 36's line rides the same way, to the planner and once.
     rent = take_rent_line(path) if role == "planner" else ""
+    # AND STATUS: what the planner was not woken for - a long turn, the
+    # hands changing, the loop switched on - is one line on the first thing
+    # it is woken for. -> waited_line, DECISIONS.md 8.153
+    waited = take_waited(path) if role == "planner" else []
     content = with_rules(content, meta, last_session_id(path, role))
     if riding:
         content = content + "\n\n" + riding
     if rent:
         content = content + "\n\n" + rent
+    wline = waited_line(path, waited) if waited else ""
+    if wline:
+        content = content + "\n\n" + wline
     if missed:
         content = missed + "\n\n" + content
     try:
@@ -5734,6 +5766,7 @@ def deliver_ex(path, role, content, meta, answer=None):
         # where they were and wait for the next ride or for the limit.
         put_held_verdict_back(path, riding)
         put_rent_line_back(path, rent)
+        put_waited_back(path, waited)
         store.journal("channel", "The %s channel is listening on port %d but "
                       "would not take the message: %s. The window is up; it "
                       "is the channel inside it that did not answer."
@@ -5859,6 +5892,43 @@ def _tokens(cw):
     return used or None
 
 
+def key_window(path, role):
+    """The compaction window this half's live window runs under when it is
+    below a million, or None.
+
+    The status line reports the model's window - a million for both roles -
+    and since 2026-10-10 the executor compacts in 222 000 (8.61). The
+    window is the one reg_pid RECORDED at the launch (compact_window), what
+    the launch actually applied, and nothing else: see calib_model, whose
+    lines these were. No file is read: callers may hold _lock. -> 8.153
+    """
+    try:
+        rec = (STATE.get("pids") or {}).get(
+            "%s|%s" % (norm(path), role)) or {}
+        w = sessions.window_value(rec.get("compact_window"))
+    except Exception:
+        w = None
+    return w if w and w < 1000000 else None
+
+
+def key_pct(sess, path, role):
+    """(percent, window): what the session carries against key_window, or
+    (None, None) with no key window, (None, window) with no reading.
+
+    Only what is SAID. A pair at 150 000 of a million is at 68 % of the
+    window it compacts in, and "15%" in its journal read as room it did not
+    have (a project pair's letter, 2026-10-16). Nothing decides from it:
+    context_check, calib_miss and rotate_at keep the status line's. -> 8.153
+    """
+    kw = key_window(path, role)
+    if not kw:
+        return None, None
+    tok = (sess or {}).get("context_tokens")
+    if not tok:
+        return None, kw
+    return round(float(tok) * 100.0 / kw, 1), kw
+
+
 def calib_model(model, path, role):
     """The MODEL half of a calibration key: the model, and the compaction
     window this role's window runs under when that is below a million.
@@ -5882,13 +5952,8 @@ def calib_model(model, path, role):
     file is read: callers may hold _lock.
     """
     m = (model or "?").lower()
-    try:
-        rec = (STATE.get("pids") or {}).get(
-            "%s|%s" % (norm(path), role)) or {}
-        w = sessions.window_value(rec.get("compact_window"))
-    except Exception:
-        w = None
-    return "%s w%d" % (m, w) if w and w < 1000000 else m
+    w = key_window(path, role)
+    return "%s w%d" % (m, w) if w else m
 
 
 def context_check(sess, path):
@@ -7035,7 +7100,6 @@ def assess(path):
     true wins, so a running build is never mistaken for a stall and a stall
     is never mistaken for a question.
     """
-    _t0 = time.time()        # the start of this pass - see the idle nudge
     expire_handover(path)
     try:
         advance_orphaned_swap(path)      # 8.36: ended by facts, own clock
@@ -7386,47 +7450,29 @@ def assess(path):
     if not sit["loop"]:
         return done("the loop off with sessions up")
 
-    if acted_recently(path, "nudge"):
-        return done("an idle executor, already told")
-    # An executor that is compacting looks exactly like an idle one from
-    # here - it is not writing, and it will not write until the summary
-    # lands. This was the third insertion of 2026-09-02, at 01:19:51.
-    if hold_for_compaction(path, "executor", "the idle nudge"):
-        return done("an idle executor whose compaction is still running")
-    # ASKED AGAIN AT THE MOMENT OF ACTION (§5.17). Everything above decided
-    # on `sit`, read at the start of this pass; a task that went out since
-    # is the executor's work, and "nothing is waiting on you" would be the
-    # lie. 2026-09-23 12:48:09: the task and this nudge went in the same
-    # second. -> DECISIONS.md 8.29
-    # THE CLIENT WILL WAKE IT (8.34). The planner said wait, and the
-    # executor's own Monitor is still open: its next event opens a turn by
-    # itself, and a nudge only adds a turn and a report. A background Bash
-    # already stands this branch down (inflight_live holds its record); a
-    # Monitor has none - 33 of 112 nudges of 17-25.09 fired while one was.
-    if ((STATE.get("last_verdict") or {}).get(norm(path))
-            or {}).get("v") == "wait":
-        _mon = monitor_open(path)
-        if _mon:
-            return done("an idle executor waiting on its own Monitor (%s) "
-                        "after a wait" % _mon)
-    if float((STATE.get("last_task") or {}).get(norm(path)) or 0) >= _t0:
-        # ...and the latch acted_recently set above in this same pass goes
-        # with it: the nudge did not go, and a latch standing for one that
-        # did not would silence the next real one for fifteen minutes.
-        with _lock:
-            STATE.pop("acted:nudge:%s" % path, None)
-            save_state()
-        return done("an idle executor that was just handed a task")
-    deliver(path, "executor",
-            state_report(path, "executor", sess,
-                         "you have been idle and nothing is waiting on you",
-                         "if you have work in hand, finish your turn so it "
-                         "can be reviewed. If you are between pieces and "
-                         "waiting for direction, say so in one line - that "
-                         "answer goes to the planner, which will give you "
-                         "the next task."),
-            {"kind": "task"})
-    return done("an idle executor with the loop on", "sent it its state")
+    # NOT WOKEN, since 8.153. Here stood the idle nudge: an executor idle
+    # with the loop on and nothing waiting on it was sent its state as a
+    # task - "you have been idle and nothing is waiting on you" - and asked
+    # to say so in one line. That line was a turn and a report, and the
+    # report woke the planner. Measured on the Mac, 14-15.10: a watched
+    # project's executor, nudged 8-13 min after its planner's own wait had
+    # already called the person, answered "waiting" with no tool call five
+    # times of five; and on 16.10 at 15:33:47 this bridge's executor was
+    # nudged the second the loop came on, a turn of 239 878 tokens that
+    # raced the planner's task by 18 s. A model is woken only by what it
+    # has to act on: a task, a verdict with words, the end of its own
+    # background, a dead turn handed back. A pair parked on a wait has
+    # called its person (`waiting_on_you`), and clinch() no longer reads
+    # it as a deadlock. The guards that only this branch had went with it:
+    # its latch, its compaction hold (the third insertion of 2026-09-02),
+    # the Monitor after a wait (8.34), the task handed over in the same
+    # second (8.29). -> 8.153
+    _parked = parked_on_you(path)
+    if _parked:
+        return done("an idle executor with the loop on, the pair parked on "
+                    "you since %s - not woken (8.153)"
+                    % clock_at(_parked.get("since")))
+    return done("an idle executor with the loop on - not woken (8.153)")
 
 
 def idle_watch():
@@ -9655,7 +9701,10 @@ CONFIG_KEYS = ("notify", "thresholds", "retention", "projects",
                # who hears a call the chat did not carry, and the Mac's
                # notification of it: set by the owner or a planner, so both
                # must be reachable here. -> DECISIONS.md 8.151
-               "home_pair", "mac_notify")
+               "home_pair", "mac_notify",
+               # the pairs' mailbox the bridge carries; absent, nothing is
+               # read. -> pairs_mail_pass, DECISIONS.md 8.153
+               "pairs_mail")
 
 
 def _folded(projects):
@@ -11412,25 +11461,163 @@ def executor_is_working(path):
 # A turn of the executor's that has not ended for this long is news for its
 # planner: no report can come until it does. Above the p99 gap between
 # turns, 1889 s, which stalled() measured. -> DECISIONS.md 8.151
+#
+# NEWS, NOT A WAKE, since 2026-10-16. On that day the line it made woke the
+# planners of three pairs 29 times, and not one of them decided anything.
+# The owner's principle, agreed with a watched project: a model is woken
+# only by what it has to act on - a report, a call for the human, a death
+# the bridge could not repair, a hang - and by status never. So the note is
+# kept in STATE["waited"] and rides on the next of those. -> 8.153
 LONG_TURN_SEC = 2700
-LONG_TURN_AGAIN_SEC = 3600
-LONG_TURN_TOLD = {}          # project key -> (transcript, turn start, at)
+# A HANG: the transcript still this long, nothing running, and the stall
+# nudge (nudge_stalled, at stall_quiet - ten minutes) already sent into that
+# stillness without moving it. -> DECISIONS.md 8.153
+EXECUTOR_HANG_SEC = 1800
+# A turn this long with no report is told, once, to end at its nearest
+# result: the planner sees nothing of a turn until it ends. Into the live
+# turn, which costs no wake. A watched project's own word. -> 8.153
+TURN_NUDGE_SEC = 7200
+# ONCE A TURN, A TURN BEING THE BRIDGE'S OWN NUMBER - its count of the
+# executor's Stops, STATE["stop_n"] - and the status line again no sooner
+# than this by the clock, whatever the planner does meanwhile. 2026-10-16, a
+# watched project: the turn's start, read as max(the newest turn end in the
+# transcript's tail, the last Stop), went 21:41:18 -> 21:41:26 and back as
+# the client's end showed in a 512 KB tail or did not, every change a new
+# turn to the latch, and its planner was woken at 22:41:40, 22:42:00,
+# 22:43:35 and 22:44:21. -> DECISIONS.md 8.153
+LONG_TURN_AGAIN = 3600
+WAITED_MAX = 20
+
+
+def queue_waited(path, tag, entry):
+    """Keep a status for this pair's planner instead of waking it with it.
+
+    One entry a tag - a newer one replaces it - and at most WAITED_MAX. An
+    entry is {"line": text} or, for the long turn, {"tp", "start", "n"},
+    which waited_line reads again at the moment it goes. -> DECISIONS.md 8.153
+    """
+    e = dict(entry, tag=tag)
+    e.setdefault("at", time.time())
+    with _lock:
+        book = STATE.setdefault("waited", {}).setdefault(norm(path), [])
+        book[:] = [x for x in book if x.get("tag") != tag] + [e]
+        del book[:-WAITED_MAX]
+        save_state()
+
+
+def take_waited(path):
+    """What waited for this planner, taken - [] when nothing did."""
+    with _lock:
+        book = (STATE.get("waited") or {}).pop(norm(path), None)
+        if book:
+            save_state()
+    return book or []
+
+
+def put_waited_back(path, book):
+    """The delivery failed: what it carried waits for the next one - and an
+    entry kept meanwhile under the same tag is the newer word and stays."""
+    if not book:
+        return
+    with _lock:
+        cur = STATE.setdefault("waited", {}).setdefault(norm(path), [])
+        tags = set(x.get("tag") for x in cur)
+        cur[:0] = [x for x in book if x.get("tag") not in tags]
+        del cur[:-WAITED_MAX]
+        save_state()
+
+
+def turn_words(path, entry, now_ts=None):
+    """The long turn as it stands when the line goes: how long it ran, the
+    compactions inside it, when its transcript last wrote. It has ended when
+    the bridge has counted a Stop since it was kept (STATE["stop_n"]), and
+    ran to that Stop; a turn end the transcript's tail shows in one read and
+    not the next is no end. -> DECISIONS.md 8.153"""
+    now_ts = time.time() if now_ts is None else now_ts
+    tp, start = entry.get("tp") or "", float(entry.get("start") or 0)
+    with _lock:
+        stop = float((STATE.get("stop_seen") or {})
+                     .get("%s|executor" % norm(path)) or 0)
+        n = int((STATE.get("stop_n") or {})
+                .get("%s|executor" % norm(path)) or 0)
+        hist = list((STATE.get("compactions") or {})
+                    .get("%s|executor" % norm(path)) or [])
+    ended = n > int(entry.get("n", n) or 0)
+    to = max(stop, start) if ended else now_ts
+    m = 0
+    for h in hist:
+        try:
+            if isinstance(h, dict) and start <= float(h.get("t") or 0) <= to:
+                m += 1
+        except (TypeError, ValueError):
+            continue
+    try:
+        wrote = os.path.getmtime(tp)
+    except OSError:
+        wrote = 0
+    return ("the executor's turn ran %d min from %s%s, %d compaction%s, its "
+            "transcript written until %s"
+            % (int(max(0, to - start) // 60), clock_at(start),
+               " to %s" % clock_at(to) if ended else " and has not ended",
+               m, "" if m == 1 else "s",
+               clock_at(wrote) if wrote else "an unknown time"))
+
+
+def waited_line(path, book, now_ts=None):
+    """What waited, as the one line the planner's next wake carries, or ""."""
+    parts = []
+    for e in book or []:
+        try:
+            if e.get("tag") == "long_turn":
+                parts.append(turn_words(path, e, now_ts))
+            elif e.get("line"):
+                parts.append("%s %s" % (clock_at(float(e.get("at") or 0)),
+                                        e["line"]))
+        except Exception:
+            continue
+    if not parts:
+        return ""
+    return ("While you waited - status, which wakes nobody (8.153): %s."
+            % "; ".join(parts))
+
+
+def _turn_watch_keep(k, seen):
+    with _lock:
+        if (STATE.get("turn_watch") or {}).get(k) != seen:
+            STATE.setdefault("turn_watch", {})[k] = seen
+            save_state()
 
 
 def long_turn_note(path, now_ts=None):
-    """Tell the planner that no report comes because the executor's turn has
-    not ended - once a turn, again at most once an hour.
+    """A turn of the executor's that has not ended: what it is, and who
+    hears of it. Returns what it decided.
 
     2026-10-15, a watched project: its executor's window wrote no Stop and no
     turn end from 15:35 to 18:57 - thirteen compactions inside one turn -
     and at 18:56 the planner told its executor the bridge was not carrying
-    reports. Nothing in the bridge said otherwise: stalled() wants a frozen
-    transcript, silence counts reports, the idle spin counts empty turns.
-    News, not needs_you: the executor is working and nobody is needed.
+    reports. From 8.151 this woke the planner to say so, and on 2026-10-16
+    that was 29 wakes across three pairs and not one decision. Past
+    long_turn now:
+    - a WORKING turn is status: kept for the planner (queue_waited) and
+      said in one line with its next wake; past turn_nudge the executor
+      itself is told once a turn to end at its nearest result - into its
+      live turn, so nobody is woken;
+    - a STILL one - its transcript quiet for executor_hang, nothing running,
+      and the stall nudge sent into that quiet without moving it - is a
+      hang, the one thing here that wakes the planner, once a turn.
+    What a turn was told is in STATE["turn_watch"], so a restart does not
+    say it again.
 
-    The turn's start is the newest turn end the transcript of the session
-    on record shows (_turn_markers), or its last Stop (stop_seen), whichever
-    is later - both survive a restart. Returns what it decided.
+    A TURN IS THE BRIDGE'S OWN NUMBER FOR IT, STATE["stop_n"], which only a
+    Stop moves, and what was told is latched on that number: kept once a
+    turn and again no sooner than LONG_TURN_AGAIN by the clock, the two-hour
+    line and the hang once a turn. The turn's age is measured from the
+    newest turn end the transcript of the session on record shows
+    (_turn_markers) or its last Stop (stop_seen), whichever is later, and
+    inside one number it never moves back. 2026-10-16: that end, keyed on,
+    jumped 21:41:18 -> 21:41:26 and back as the client's turn end showed in
+    the transcript's 512 KB tail or did not, and a watched project's planner
+    was woken four times in four minutes. -> DECISIONS.md 8.151, 8.153
     """
     now_ts = time.time() if now_ts is None else now_ts
     k = norm(path)
@@ -11448,43 +11635,88 @@ def long_turn_note(path, now_ts=None):
         return "a report is with the planner"
     tp = transcript_path_for(path, "executor")
     state, last_end = _turn_markers(tp)
-    end = max(last_end, float((STATE.get("stop_seen") or {})
-                              .get("%s|executor" % k) or 0))
+    with _lock:
+        n = int((STATE.get("stop_n") or {}).get("%s|executor" % k) or 0)
+        stop = float((STATE.get("stop_seen") or {})
+                     .get("%s|executor" % k) or 0)
+        seen = dict((STATE.get("turn_watch") or {}).get(k) or {})
+    if seen.get("n") != n:
+        seen = {"n": n}
+    end = max(last_end, stop, float(seen.get("start") or 0))
     if state != "open" or not end:
         return "no open turn with a known start"
-    if now_ts - end < float(CFG.get("thresholds", {})
-                         .get("long_turn", LONG_TURN_SEC)):
+    th = CFG.get("thresholds", {})
+    if now_ts - end < float(th.get("long_turn", LONG_TURN_SEC)):
         return "the turn is younger than long_turn"
-    if not executor_is_working(path):
-        return "not working - a frozen window is stalled()'s"
-    told = LONG_TURN_TOLD.get(k)
-    if told and told[:2] == (tp, end) \
-            and now_ts - told[2] < LONG_TURN_AGAIN_SEC:
-        return "said already"
-    try:
-        wrote = os.path.getmtime(tp)
-    except OSError:
-        wrote = 0
-    rs = (STATE.get("report_sent") or {}).get(k) or {}
-    LONG_TURN_TOLD[k] = (tp, end, now_ts)
+    seen["start"] = end
     name = project_name(path)
+    mins = int((now_ts - end) // 60)
+    if executor_is_working(path):
+        said = "kept for the planner already"
+        if now_ts - float(seen.get("kept") or 0) >= LONG_TURN_AGAIN:
+            queue_waited(path, "long_turn", {"tp": tp, "start": end, "n": n})
+            said = "kept for the planner"
+            seen["kept"] = now_ts
+            store.journal("loop", "The executor's turn has not ended for "
+                          "%d min - kept for its planner's next wake, not a "
+                          "wake of its own (8.153)" % mins, name,
+                          "executor", "log", project_dir=path)
+        if now_ts - end >= float(th.get("turn_nudge", TURN_NUDGE_SEC)) \
+                and not seen.get("nudged"):
+            ok, how = deliver_ex(
+                path, "executor",
+                "This turn has run %d min with no report. End it at the "
+                "nearest result, with a report: the planner sees nothing of "
+                "a turn until it ends. Said once a turn." % mins,
+                {"kind": "info"})
+            store.journal("loop", "The executor's turn has run %d min with "
+                          "no report - told once to end at its nearest "
+                          "result: %s" % (mins, how), name, "executor", "log",
+                          project_dir=path)
+            if ok:
+                seen["nudged"] = now_ts
+                said = "told the executor to end its turn"
+        _turn_watch_keep(k, seen)
+        return said
+    try:
+        if tool_in_flight(path, "executor"):
+            _turn_watch_keep(k, seen)
+            return "quiet, and a tool is running"
+    except Exception:
+        pass
+    frozen, quiet = transcript_frozen(
+        path, "executor", float(th.get("executor_hang", EXECUTOR_HANG_SEC)))
+    if not frozen:
+        _turn_watch_keep(k, seen)
+        return "quiet for less than executor_hang"
+    with _lock:
+        nudged = float((STATE.get("stall_nudged") or {})
+                       .get("%s|executor" % k) or 0)
+    wrote = time.time() - float(quiet or 0)
+    if not nudged or nudged < max(end, wrote):
+        _turn_watch_keep(k, seen)
+        return "still, and the stall nudge has not been tried on it"
+    if seen.get("hang"):
+        return "the hang is told already"
     ok, how = deliver_ex(
         path, "planner",
-        "No report from the executor since %s: its turn has not ended since "
-        "%s (the last turn end in its transcript, or its last Stop), %d min "
-        "ago; its transcript last wrote at %s. A report is carried when a "
-        "turn ends - there is none to carry yet. This is not a carrying "
-        "fault. Said once a turn, and again at most once an hour."
-        % (("report %s at %s" % (rs.get("n"), clock_at(float(rs["at"]))))
-           if rs.get("at") else "this bridge started",
-           clock_at(end), int((now_ts - end) // 60),
-           clock_at(wrote) if wrote else "an unknown time"),
+        "The executor looks hung: its transcript has written nothing for %d "
+        "min (since %s), no tool or process of its is running, and the "
+        "bridge's nudge at %s did not move it. Its turn has been open since "
+        "%s, so no report can come. Look at it, or tell the human - its "
+        "window is theirs to replace. Said once a turn."
+        % (int(float(quiet or 0) // 60), clock_at(wrote), clock_at(nudged),
+           clock_at(end)),
         {"kind": "info"})
-    store.journal("loop", "The executor's turn has not ended for %d min - "
-                  "the planner told that no report is lost: %s"
-                  % (int((now_ts - end) // 60), how), name, "executor", "log",
-                  project_dir=path)
-    return "told"
+    store.journal("loop", "The executor looks hung - %d min with nothing "
+                  "written and nothing running, the nudge at %s did not move "
+                  "it - its planner woken: %s"
+                  % (int(float(quiet or 0) // 60), clock_at(nudged), how),
+                  name, "executor", "warn", project_dir=path)
+    if ok:
+        seen["hang"] = now_ts
+    _turn_watch_keep(k, seen)
+    return "woke the planner: a hang" if ok else "a hang, not delivered: %s" % how
 
 
 def check_stalls():
@@ -14777,18 +15009,16 @@ def resume_after_handover(path, role, seed=None):
         if "planner" not in replaced:
             # The planner was not replaced and holds the whole run in its
             # head. It should hear that the hands changed, or the next
-            # report will read as if the executor forgot the conversation.
-            deliver(path, "planner",
-                    "The executor reached the end of its context runway and "
-                    "has been replaced by a fresh session (%s). You were not "
-                    "replaced - you still hold the thread. The new executor "
-                    "has the written handoff and nothing else, so it knows "
-                    "the state of the work but not what was said. Keep "
-                    "reviewing as before; if something in your recent "
-                    "verdicts is not in the handoff, say it again in your "
-                    "next one."
-                    % (seed.get("reason") or "runway spent"),
-                    {"kind": "info"})
+            # report will read as if the executor forgot the conversation -
+            # so it hears it WITH that report: kept, one line on its next
+            # wake, and not a wake of its own after every handover. -> 8.153
+            queue_waited(path, "handover", {"line": (
+                "the executor reached the end of its context runway and was "
+                "replaced by a fresh session (%s); you were not - you still "
+                "hold the thread. The new executor has the written handoff "
+                "and nothing else: if something in your recent verdicts is "
+                "not in it, say it again in your next one"
+                % (seed.get("reason") or "runway spent"))})
         notify("rotation_name", "%s: handover done, the new pair is working."
                % project_name(path), level="silent", path=path)
     else:
@@ -16385,6 +16615,11 @@ def note_stop_seen(path, role):
     with _lock:
         STATE.setdefault("stop_seen", {})["%s|%s" % (norm(path), role)] = \
             time.time()
+        # ...and its number, which only this line moves: what a long turn
+        # was told is latched on it (long_turn_note). -> DECISIONS.md 8.153
+        _stops = STATE.setdefault("stop_n", {})
+        _stops["%s|%s" % (norm(path), role)] = int(
+            _stops.get("%s|%s" % (norm(path), role)) or 0) + 1
         # ...and ends the episode of a rate limit that came with no
         # sentence, which is said once and then only written down.
         (STATE.get("rate_told") or {}).pop("%s|%s" % (norm(path), role),
@@ -18383,6 +18618,24 @@ def executor_wrote_recently(path, quiet):
     return role_wrote_recently(path, "executor", quiet)
 
 
+def parked_on_you(path):
+    """The pair's call for its person, while the planner's last word is
+    still the `wait` that made it - or None.
+
+    `waiting_on_you` is written when a wait with nothing running calls the
+    person (once), and taken off only when a task goes out; a verdict since
+    is a pair moving again, whatever the record still says. clinch() stands
+    down on it and assess() names it: one definition for both. -> 8.153
+    """
+    k = norm(path)
+    with _lock:
+        rec = (STATE.get("waiting_on_you") or {}).get(k)
+        if not rec or ((STATE.get("last_verdict") or {}).get(k)
+                       or {}).get("v") != "wait":
+            return None
+        return dict(rec)
+
+
 def clinch(path, sit, grace=None):
     """Tier 1: both halves waiting for each other, and nothing in flight.
 
@@ -18414,6 +18667,15 @@ def clinch(path, sit, grace=None):
     if (STATE.get("bg_held") or {}).get(norm(path)):
         return None                      # reports held for a running
         #                                  background, on purpose (8.152)
+    # PARKED ON ITS PERSON IS NOT A DEADLOCK. The planner answered `wait`
+    # with nothing running, and the person was called for it, once: both
+    # halves idle is what was asked for. The idle nudge came 8-13 min after
+    # such a wait and kept this from ever being reached on a parked pair;
+    # with it gone (8.153), a pass at clinch_grace would call the pair a
+    # deadlock and wake a half - and the planner had answered, and the
+    # person had been called. -> 8.153
+    if parked_on_you(path):
+        return None
     if sit.get("reviewing") or sit.get("verdict_in_flight") \
             or sit.get("handover") or sit.get("inflight"):
         return None                      # something legitimately in flight
@@ -18476,6 +18738,43 @@ def clinch(path, sit, grace=None):
     stopped = max(float((STATE.get("stop_seen") or {})
                         .get("%s|%s" % (norm(path), r)) or 0)
                   for r in MANAGED_ROLES)
+    # AN ANSWERED REPORT IS NOT A REPORT THAT NEVER ARRIVED. `stopped` is
+    # either half's last Stop, and the planner's turn that gave the verdict
+    # ends AFTER the report reached it - so below, every pair at rest after
+    # a verdict and no task read as "a turn finished and no report reached
+    # the planner", and the executor was woken: "if you have nothing, say
+    # so in one line", the idle nudge in other words. 2026-10-16, a
+    # project pair: report 176 at 16:20:49, `wait` at 16:21:04 while a
+    # subagent ran that only the client saw, the planner's Stops at
+    # 16:21:21 and 16:21:39, the executor woken at 16:40:54. The nudge
+    # came first and hid it; with the nudge gone (8.153) this was reached
+    # on every such pair. The last answer - the planner's verdict, or the
+    # bridge's own `wait` on a held report (8.152, `held_at`) - newer than
+    # the last report, and no task since: after `wait` or `stop` nothing
+    # is owed by either half; after `done` or `continue` the next step is
+    # the planner's, and it is asked - the executor is not pushed. -> 8.153
+    lv = dict((STATE.get("last_verdict") or {}).get(norm(path)) or {})
+    rs0 = dict((STATE.get("report_sent") or {}).get(norm(path)) or {})
+    v_at, held_at = float(lv.get("at") or 0), float(lv.get("held_at") or 0)
+    answered = max(v_at, held_at)
+    # Measured from the report's BIRTH, not from its delivery's end. The
+    # planner answers as soon as the report is in its channel, and `at` is
+    # written after deliver_ex returns: a delivery of 0.3 s on the PC's
+    # acceptance of 2026-10-16 18:15:49 put the verdict before `at`, and the
+    # answered report read as one never answered. `at` is the fallback for
+    # a record written before `made` was kept. -> 8.153
+    asked = float(rs0.get("made") or rs0.get("at") or 0)
+    if answered and answered >= asked \
+            and sent < answered:
+        word = "wait" if held_at > v_at else str(lv.get("v") or "")
+        if word in ("wait", "stop"):
+            return None
+        return {"why": "report_answered", "wake": "planner", "iteration": n,
+                "since": time.time() - moved,
+                "said": "iteration %s: report %s was answered %s at %s and "
+                        "no task followed" % (n or "?", rs0.get("n") or "?",
+                                              word, clock_at(v_at)),
+                "ask": "give the next piece or stop the loop."}
     # Name the hop that is missing rather than saying "stuck". Which half
     # to wake follows from it: if work went out and no turn came back, the
     # executor never picked it up; otherwise a report never reached the
@@ -18522,12 +18821,16 @@ def call_out_clinch(path, found):
                   project_dir=path)
     woke = False
     try:
+        # The planner asked for its next step is not told to report a
+        # finished piece: a branch that names its own ask is said with it.
+        # -> 8.153
+        tail = (": " + found["ask"]) if found.get("ask") else (
+            ". If you are holding a finished piece, report it now; if you "
+            "have nothing, say so in one line.")
         woke = bool(deliver(path, found.get("wake") or "executor",
                             "The bridge sees no work in flight for this "
-                            "project and both halves idle: %s. If you are "
-                            "holding a finished piece, report it now; if you "
-                            "have nothing, say so in one line." % said,
-                            {"kind": "info"}))
+                            "project and both halves idle: %s%s"
+                            % (said, tail), {"kind": "info"}))
     except Exception:
         woke = False
     if not woke:
@@ -18890,6 +19193,12 @@ def nudge_stalled(path, role, since, owed=""):
                                "carry on and ignore this. If you are not, "
                                "finish the turn and say where you got to."
                                % (mins, what), {"kind": "info"}):
+            # The hang of 8.153 asks whether this nudge went and did not
+            # move the half; the time it went is that witness.
+            with _lock:
+                STATE.setdefault("stall_nudged", {})[
+                    "%s|%s" % (norm(path), role)] = time.time()
+                save_state()
             return "nudged the %s" % role
     except Exception:
         pass
@@ -19090,6 +19399,7 @@ def pair_moved_since(path, role, when):
 #   a report that reached nobody        -> the 240s fallback in run_review
 #   a task that landed mid-turn         -> take_open_task on a done verdict
 #   an idle executor with the loop on   -> "sent it its state" in assess
+#                                          (taken out by 8.153: not woken)
 #   a stale pinned message              -> sync_links, on the telegram
 #                                          reconnect among others
 #   a turn that died and never returned -> check_lost_turn + pair_moved_since
@@ -20515,6 +20825,27 @@ def check_lost_turn(path):
                                     100), LOST_TURN_TRIES, brief(tried, 120),
                   role),
                path=path)
+        # ...AND THE PLANNER, the one wake a dead turn earns it. Its rule is
+        # "no report: the turn has not ended - the bridge wakes you only for
+        # a hang or a fault", so the fault has to arrive: until 8.153 this
+        # went to the chat and the journal only, and a planner on a Mac with
+        # no chat never heard of it. -> DECISIONS.md 8.153
+        if role == "executor":
+            _ok, _how = deliver_ex(
+                path, "planner",
+                "The executor's turn died at %s (%s) and no report followed. "
+                "The bridge picked it back up %d times (%s) and it is still "
+                "stopped, so no report will come until something moves it: "
+                "a task from you, or the human's 'hand over executor' if its "
+                "window does not answer."
+                % (time.strftime("%H:%M:%S", time.localtime(death)),
+                   brief(rec.get("reason") or "no reason given", 100),
+                   LOST_TURN_TRIES, brief(tried, 120)),
+                {"kind": "info"})
+            store.journal("turn_lost", "%s / executor: its planner told of "
+                          "the death the bridge could not repair: %s"
+                          % (name, _how), name, "planner", "log",
+                          project_dir=path)
 
 
 # ---- a model with no allowance left ----------------------------------------
@@ -23180,85 +23511,6 @@ def _ts_epoch(ts):
         return 0.0
 
 
-def _transcript_rows(sid, limit=1500000):
-    """The parsed tail of a session's transcript, oldest first, or []."""
-    try:
-        tp = sessions.transcript_of(sid) if sid else None
-        if not tp or not os.path.isfile(tp):
-            return []
-        with open(tp, "rb") as fh:
-            fh.seek(max(0, os.path.getsize(tp) - limit))
-            lines = fh.read().decode("utf-8", "replace").splitlines()
-        out = []
-        for line in lines:
-            try:
-                out.append(json.loads(line))
-            except Exception:
-                continue
-        return out
-    except Exception:
-        return []
-
-
-def monitor_open(path):
-    """The task id of a Monitor the executor started and that has not
-    ended, or "".
-
-    The bridge tracks Bash jobs only - an open Monitor has no record, so
-    nothing stood the idle nudge down while one ran: measured 17-25.09, 33
-    of 112 nudges fired while the executor's own Monitor was open after a
-    `wait` (8.34). The witness is the executor's transcript, the same rules
-    the measurement used: a Monitor exists once its result carries a
-    `taskId`; it ends at a task-notification naming that task with a
-    <status>, at a TaskStop naming it, or - when it is not persistent - once
-    its timeoutMs has passed. Unreadable answers "": the nudge goes as it
-    always did.
-    """
-    try:
-        sid = last_session_id(path, "executor") or (
-            best_session(path, "executor") or {}).get("session_id")
-        opened, ended = {}, set()
-        for r in _transcript_rows(sid):
-            tr = r.get("toolUseResult")
-            if isinstance(tr, dict) and tr.get("taskId"):
-                opened.setdefault(str(tr["taskId"]), {
-                    "at": _ts_epoch(r.get("timestamp")),
-                    "timeout": tr.get("timeoutMs"),
-                    "persistent": tr.get("persistent")})
-            msg = r.get("message") or {}
-            c = msg.get("content")
-            texts = [c] if isinstance(c, str) else [
-                str(b.get("text") or b.get("content") or "")
-                for b in (c or []) if isinstance(b, dict)]
-            att = r.get("attachment") or {}
-            if att.get("prompt"):
-                texts.append(str(att.get("prompt")))
-            for b in (c or []) if isinstance(c, list) else []:
-                if isinstance(b, dict) and b.get("type") == "tool_use" \
-                        and b.get("name") == "TaskStop":
-                    ended.add(str((b.get("input") or {}).get("task_id")
-                                  or (b.get("input") or {}).get("taskId")
-                                  or ""))
-            for t in texts:
-                if "<status>" not in t:
-                    continue
-                for tid in opened:
-                    if "<task-id>%s</task-id>" % tid in t:
-                        ended.add(tid)
-        now_ = time.time()
-        for tid, o in opened.items():
-            if tid in ended:
-                continue
-            tmo = o.get("timeout")
-            if tmo and not o.get("persistent") \
-                    and now_ - o["at"] > float(tmo) / 1000.0:
-                continue
-            return tid
-    except Exception:
-        return ""
-    return ""
-
-
 def hand_back_verdict(path, n, feedback, extra="", track=True,
                       may_hold=False):
     """Put the planner's own words in front of the executor. Returns
@@ -23465,7 +23717,7 @@ def watch_hook_caller(path, n, waiter, sock, project, role, sid, since):
 # its own timeout (max 1 779 s). A background
 # Agent runs longer (p50 3 072 s, p90 12 025 s): with agents counted, 10.6 %
 # of the holds reach the hour, and once an hour is then the cadence - the
-# same as LONG_TURN_AGAIN_SEC. The ceiling is for the other kind: 26 of the
+# long-turn line's own until 8.153. The ceiling is for the other kind: 26 of the
 # 609 tasks never had an end in their transcript. -> DECISIONS.md 8.152
 BG_HOLD_SEC = 3600
 # The executor's own word that this report is for the planner now - a red,
@@ -23627,6 +23879,10 @@ def hold_bg_report(event, path, lp, msg, project):
         STATE.setdefault("bg_held", {}).setdefault(k, []).append(
             {"n": n, "at": time.time(), "head": brief(msg, 160),
              "running": running[:300]})
+        # ...and the bridge's own `wait` is this report's answer: clinch()
+        # reads it as one; the planner's next verdict replaces it (8.153)
+        STATE.setdefault("last_verdict", {}).setdefault(k, {})[
+            "held_at"] = time.time()
         save_state()
     git_commit_iteration(path, n, "wait")
     touch_session(event, state="waiting on a process")
@@ -23720,6 +23976,187 @@ def bg_held_pass(now_ts=None):
                       % (len(held), "" if len(held) == 1 else "s", age // 60,
                          ", ".join(str(h.get("n")) for h in held)),
                       name, "executor", "log", project_dir=k)
+
+
+# THE PAIRS' MAILBOX, carried by the bridge. Pairs on two machines cannot
+# reach each other by SendMessage; what they share is a folder, a box per
+# pair, a letter a new file in it. A planner kept watch over the boxes and
+# carried each letter on by hand - a model polling a folder, and a second
+# model woken to be handed the result. The owner's word on 2026-10-16: no
+# carrying, the pairs talk by themselves, for as few tokens as can be. So
+# the bridge watches: a letter in a box is ONE line to the planner of the
+# pair the box belongs to - who wrote it, where it lies, its first line -
+# and the planner opens it if it wants. One wake per letter at most, and
+# none at all for a folder nobody wrote to.
+#
+#   "pairs_mail": {"folder": <the mailbox>,
+#                  "boxes": {"to-<pair>": <that pair's project folder>}}
+#
+# Absent, nothing is read. A box whose project this bridge does not watch
+# is not read either: the other machine's bridge carries it. The letters
+# lying in a box when it is first watched were read already - they are
+# taken as carried, and only the ones after them go. A letter is carried
+# when its size has held for one pass, so one being written is not read
+# half-way; a pair's own letter (from-<pair> in its own box) is never
+# carried to it. No channel, a hold, a spent allowance: the letter waits,
+# and is carried later. The share away: the pass waits, quietly.
+# -> DECISIONS.md 8.153
+MAIL_WATCH_SEC = 20
+MAIL_RETRY_SEC = 60
+MAIL_SIZES = {}           # letter path -> its size at the last pass
+MAIL_TRIED = {}           # project key -> when its delivery last failed
+MAIL_TOLD = set()         # letters whose wait is journalled already
+
+
+def mail_boxes():
+    """[(box folder, project key, the pair's own name)] of the pairs_mail
+    key, for the boxes of projects this bridge watches."""
+    conf = CFG.get("pairs_mail")
+    if not isinstance(conf, dict) or not isinstance(conf.get("folder"), str) \
+            or not conf.get("folder") or not isinstance(conf.get("boxes"),
+                                                        dict):
+        return []
+    watched = set(_folded(CFG.get("projects")))
+    out = []
+    for box, project in sorted(conf["boxes"].items()):
+        if not isinstance(project, str) or not project \
+                or norm(project) not in watched:
+            continue
+        out.append((os.path.join(conf["folder"], box), norm(project),
+                    box[3:] if box.startswith("to-") else box))
+    return out
+
+
+def mail_sender(name):
+    """The pair a letter is from: the name after its last `-from-`."""
+    stem = name[:-3] if name.lower().endswith(".md") else name
+    at = stem.rfind("-from-")
+    return stem[at + 6:] if at >= 0 and stem[at + 6:] else "?"
+
+
+def mail_first_line(path):
+    """The letter's first line of text, short; None when it cannot be read."""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(4096)
+    except OSError:
+        return None
+    for line in raw.decode("utf-8-sig", errors="replace").splitlines():
+        line = line.strip().lstrip("#").strip()
+        if line:
+            return brief(line, 200)
+    return ""
+
+
+def pairs_mail_pass(now_ts=None):
+    """Carry the new letters of the pairs' mailbox, a line each, to the
+    planners they are for. Returns the letters carried. Share I/O, so the
+    folder is read outside _lock, and on its own thread. -> 8.153"""
+    now_ts = time.time() if now_ts is None else now_ts
+    ready, seeded = {}, []
+    for box, k, own in mail_boxes():
+        try:
+            names = sorted(n for n in os.listdir(box)
+                           if n.lower().endswith(".md")
+                           and not n.startswith("."))
+        except OSError:
+            continue
+        with _lock:
+            seen = STATE.setdefault("mail_seen", {}).setdefault(k, {})
+            if box not in seen:
+                seen[box] = names
+                save_state()
+                seeded.append((box, k, len(names)))
+                continue
+            known = set(seen[box])
+        for name in names:
+            if name in known:
+                continue
+            letter = os.path.join(box, name)
+            try:
+                size = os.stat(letter).st_size
+                if not os.path.isfile(letter):
+                    continue
+            except OSError:
+                continue
+            if mail_sender(name) == own:
+                with _lock:
+                    STATE.setdefault("mail_seen", {}).setdefault(
+                        k, {}).setdefault(box, []).append(name)
+                    save_state()
+                store.journal("mail", "%s is the pair's own letter, in its "
+                              "own box - not carried to it (8.153)" % letter,
+                              project_name(k), "planner", "log",
+                              project_dir=k)
+                continue
+            was, MAIL_SIZES[letter] = MAIL_SIZES.get(letter), size
+            if not size or was != size:
+                continue
+            first = mail_first_line(letter)
+            if first is not None:
+                ready.setdefault(k, []).append(
+                    (box, name, letter, mail_sender(name), first))
+    for box, k, n in seeded:
+        store.journal("mail", "The mailbox's box %s is watched for this "
+                      "pair's planner now; the %d letter%s already in it "
+                      "%s taken as read (8.153)"
+                      % (box, n, "" if n == 1 else "s",
+                         "is" if n == 1 else "are"),
+                      project_name(k), "planner", "log", project_dir=k)
+    carried = []
+    for k, letters in sorted(ready.items()):
+        if (STATE.get("paused") or {}).get(k) \
+                or now_ts - MAIL_TRIED.get(k, 0) < MAIL_RETRY_SEC:
+            continue
+        lines = ["Letter from %s: %s - %s" % (who, letter, first or "(empty)")
+                 for _, _, letter, who, first in letters]
+        ok, how = deliver_ex(k, "planner", "\n".join(lines),
+                             {"kind": "info"})
+        if not ok:
+            MAIL_TRIED[k] = now_ts
+            for (_, _, letter, _, _), line in zip(letters, lines):
+                if letter not in MAIL_TOLD:
+                    MAIL_TOLD.add(letter)
+                    store.journal("mail", "%s - waits, the planner was not "
+                                  "reached (%s); tried again every %d s "
+                                  "(8.153)" % (line, how, MAIL_RETRY_SEC),
+                                  project_name(k), "planner", "warn",
+                                  project_dir=k)
+            continue
+        MAIL_TRIED.pop(k, None)
+        with _lock:
+            for box, name, _, _, _ in letters:
+                got = STATE.setdefault("mail_seen", {}).setdefault(
+                    k, {}).setdefault(box, [])
+                if name not in got:
+                    got.append(name)
+            save_state()
+        for (_, _, letter, _, _), line in zip(letters, lines):
+            MAIL_TOLD.discard(letter)
+            MAIL_SIZES.pop(letter, None)
+            carried.append(letter)
+            store.journal("mail", "%s - carried to the planner (8.153)"
+                          % line, project_name(k), "planner", "log",
+                          project_dir=k)
+    return carried
+
+
+def pairs_mail_watch():
+    """pairs_mail_pass, every MAIL_WATCH_SEC, on a thread of its own: a
+    listing that hangs on a share must not hold session_watch. A failure
+    is journalled once, not every pass. -> 8.153"""
+    said = ""
+    while True:
+        time.sleep(MAIL_WATCH_SEC)
+        try:
+            pairs_mail_pass()
+            said = ""
+        except Exception as exc:
+            if str(exc) != said:
+                said = str(exc)
+                store.journal("mail", "The mailbox pass failed: %s - it "
+                              "runs again every %d s (8.153)"
+                              % (exc, MAIL_WATCH_SEC), level="warn")
 
 
 def run_review(event, path, lp, msg, project, role):
@@ -23890,10 +24327,13 @@ def run_review(event, path, lp, msg, project, role):
         n, "sent to planner" if sent else "queued"), project, role, "log",
         project_dir=path)
     if sent:
-        # what clinch asks before it says "no report reached the planner"
+        # what clinch asks before it says "no report reached the planner";
+        # "made" is the waiter's birth, before the delivery - the planner
+        # can answer while deliver_ex still runs, and that answer is older
+        # than sent_at (8.153)
         with _lock:
             STATE.setdefault("report_sent", {})[norm(path)] = {
-                "n": n, "at": sent_at}
+                "n": n, "at": sent_at, "made": waiter["made"]}
             save_state()
     store.iteration_file(path, n, "executor", msg)
     store.dialogue(path, "%s  %s / executor - report %d" % (now(), project, n),
@@ -24714,10 +25154,19 @@ def handle_event(event):
                         with _lock:
                             STATE["tight:%s" % path] = True
                             save_state()
-                        store.journal("loop", "Context is tight (%d%%) - "
+                        # the fill against the window it compacts in,
+                        # when there is one: the 1M's percentage is what
+                        # decided, and it is not what is said (8.153)
+                        _kp, _kw = key_pct(sess, path, role)
+                        store.journal("loop", "Context is tight (%s) - "
                                       "letting the session compact; handoff "
-                                      "is current" % pct, project, role,
-                                      "log", project_dir=path)
+                                      "is current" % (
+                                          "%.0f%% of the %dk compaction "
+                                          "window" % (_kp, _kw // 1000)
+                                          if _kp is not None
+                                          else "%d%%" % pct),
+                                      project, role, "log",
+                                      project_dir=path)
                     tight = False
                 if tight:
                     hook_output = {"continue": False,
@@ -27039,6 +27488,10 @@ def pairs_view():
                                "no": window_no_text(_wn) if _wn else None,
                                "tokens": best.get("context_tokens"),
                                "window": best.get("window"),
+                               # the window it compacts in, and the fill
+                               # against it, for the hover (8.153)
+                               "key_window": key_window(path, role),
+                               "key_pct": key_pct(best, path, role)[0],
                                "model": best.get("model") or "",
                                "state": best.get("state") or "",
                                # How far through its life, not how full its
@@ -28123,6 +28576,12 @@ class Handler(BaseHTTPRequestHandler):
                                         v.get("role")),
                             v.get("path") or "")
                         for k, v in snap_live.items()},
+                    # the window each session compacts in when below a
+                    # million, keyed as calib_keys: the gauges say the
+                    # fill against it (8.153)
+                    "key_windows": {
+                        k: key_window(v.get("path") or "", v.get("role"))
+                        for k, v in snap_live.items()},
                     "profiles": store.load_profiles(),
                     # a "show" by each window where it can be (8.93)
                     "show_windows": not sessions.viewer_refused(),
@@ -28516,7 +28975,8 @@ class Handler(BaseHTTPRequestHandler):
                 store.journal("verdict", "Planner: %s - %s" % (v, fb[:160]),
                               project_name(path), "planner", "log",
                               extra={"full": fb[:4000]}, project_dir=path)
-                # what the idle nudge asks before it wakes anybody (8.34)
+                # what clinch() asks of a pair parked on a wait (8.153);
+                # the idle nudge asked it until 8.153 took it out (8.34)
                 with _lock:
                     STATE.setdefault("last_verdict", {})[norm(path)] = {
                         "v": v, "at": time.time()}
@@ -29144,9 +29604,17 @@ def handle_loop(body):
         # refusal is deliberately in the OPEN direction: a message nobody
         # needed costs one wake, a pair that never learns its loop is on
         # costs the run.
+        # STILL A WAKE after 8.153, and now for a reason it has to act on:
+        # the bridge no longer wakes an idle executor, so after a start the
+        # planner did not make, nothing comes unless a turn is already
+        # running or the planner hands over the next piece. The old words
+        # promised a report the idle nudge used to produce.
         if str(body.get("by") or "") != "planner":
-            deliver(path, "planner", "The loop is on. The executor's next "
-                    "finished turn arrives here as a report.",
+            deliver(path, "planner", "The loop is on - switched on, not by "
+                    "you. A turn the executor is in comes here as a report "
+                    "when it ends; an idle executor is not woken by the "
+                    "bridge (8.153), so if it has nothing in hand, give it "
+                    "the next task.",
                     {"kind": "info"})
         # Not a chat message. Switching the loop on is something you did,
         # and telling you that it worked is not news you would get up for -
@@ -30451,6 +30919,9 @@ def main():
         threading.Thread(target=share_watch, name="share-watch",
                          daemon=True).start()
     threading.Thread(target=rent_watch, daemon=True).start()
+    # the pairs' mailbox; nothing is read without its key (8.153)
+    threading.Thread(target=pairs_mail_watch, name="pairs-mail",
+                     daemon=True).start()
     threading.Timer(2.0, lambda: reconcile()).start()
     maybe_auto_probe()   # fill the model registry before anyone launches
     try:

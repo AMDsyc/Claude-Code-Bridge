@@ -19,9 +19,12 @@ Part of [README.md](README.md), moved out whole under rule 36.
 | `telegram` | empty | token and chat id |
 | `home_pair` | empty | the watched project whose planner you talk to: it also hears each needs_you of another pair that the chat did not carry. Empty, no pair is guessed |
 | `mac_notify` | `false` | on a Mac, each needs_you is also a notification, with no sound - one a pair in ten minutes, six an hour |
+| `pairs_mail` | absent | the pairs' mailbox the bridge carries: `{"folder": <the mailbox>, "boxes": {"to-<pair>": <that pair's project folder>}}`. A new letter, a `*.md` file, in the box of a project this bridge watches is one `info` line to its planner, once; the letters in a box when it is first watched are taken as read, and a pair's own (`-from-<pair>`) is not carried to it. Absent, nothing is read |
 | `thresholds.idle_hold` | `1200` | how long an idling pair is held rather than answered, in seconds. `0` disables |
 | `thresholds.review_timeout` | `1200` | how long a report may wait for a verdict |
-| `thresholds.long_turn` | `2700` | an executor turn running this long is told to its planner, once a turn and again at most hourly |
+| `thresholds.long_turn` | `2700` | an executor turn running this long and still working is kept for its planner and said in one line with the planner's next wake - news, not a wake of its own, in seconds |
+| `thresholds.executor_hang` | `1800` | an open executor turn whose transcript has written nothing this long, with nothing of the executor's running and the bridge's nudge into that stillness not having moved it, is a hang: it wakes the planner, once a turn, in seconds |
+| `thresholds.turn_nudge` | `7200` | an executor turn running this long with no report is told, once a turn, to end at its nearest result - into the live turn, so it wakes nobody, in seconds |
 | `thresholds.bg_report_hold` | `3600` | how long reports the bridge answered `wait` itself, while the executor's background ran, may wait before they go to the planner as news, in seconds |
 | `projects.<path>.hold_reports_on_background` | `true` | a report whose Stop lists a running background is answered `wait` by the bridge and goes to the planner with the first report that has nothing running; a line `Planner now: <why>` sends it at once. `false` carries every report as it comes |
 | `archive_parallel` | `2` | archive searches at once across all projects |

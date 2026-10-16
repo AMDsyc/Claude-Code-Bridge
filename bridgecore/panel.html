@@ -570,7 +570,7 @@ function segbar(budget,done,frac,title){
 function meter(pct,ceiling,color,wallPct){
   var f=Math.min(100,Math.max(0,pct||0));
   var h='<div class="meter"><div class="fill" style="width:'+f+'%;color:'+color+'"></div>';
-  if(ceiling)h+='<div class="tick" style="left:'+ceiling+'%"></div>';
+  if(ceiling&&ceiling<=100)h+='<div class="tick" style="left:'+ceiling+'%"></div>';
   if(wallPct)h+='<div class="tickw" style="left:'+Math.min(99,wallPct)+'%"></div>';
   return h+'</div>';
 }
@@ -763,7 +763,8 @@ function renderPairs(){
       var tip=(x.name?x.name+' - ':'')+role+': '+(life==null?'life to the wall not known yet'
         :Math.round(life)+'% of the way to being replaced, '+
          (x.compacted||0)+' of '+(x.budget||5)+' compactions')+
-        (x.pct==null?'':'; window '+Math.round(x.pct)+'% full')+
+        (x.key_pct!=null?'; '+Math.round(x.key_pct)+'% of the '+fmtTok(x.key_window)+' compaction window':
+         x.pct==null?'':'; window '+Math.round(x.pct)+'% full')+
         (x.model?'; '+x.model:'');
       return '<span title="'+esc(tip)+'"'+(life!=null&&life>=80?' class="bad"':'')+'>'+
         role[0]+(x.no?' '+x.no:'')+' '+(life==null?"-":Math.round(life)+"%")+'</span>';
@@ -900,15 +901,21 @@ function renderPanel(){
   var g="";var sessArr=Object.keys(D.state.sessions||{}).map(function(k){return D.state.sessions[k]});
   sessArr.filter(function(s){return s.state!=="ended"&&forCur(s.path)}).forEach(function(s){
     if(!ours(s))return;
-    var cal=calOf(s), pct=s.context_pct, wallPct=cal&&cal.wall_history_tokens&&s.window?cal.wall_history_tokens*100/s.window:null;
+    /* against the window it compacts in when the daemon recorded one below
+       a million (key_windows, 8.153): the calibration's ceiling is a
+       percentage of the status line's window, so it is carried over */
+    var cal=calOf(s), kw=kwOf(s), win=kw||s.window,
+        pct=kw&&s.context_tokens?s.context_tokens*100/kw:s.context_pct,
+        ceil=cal?(kw&&s.window?cal.ceiling_pct*s.window/kw:cal.ceiling_pct):null,
+        wallPct=cal&&cal.wall_history_tokens&&win?cal.wall_history_tokens*100/win:null;
     if(pct==null||pct>100){
       g+='<div class="gline"><span class="name">'+esc(s.role||"session")+' <span class="dim">'+esc(s.model||"")+'</span></span>'+
         '<span class="dim" style="flex:1">'+(s.context_tokens?'carrying '+fmtTok(s.context_tokens)+', window not known yet':'no readings yet')+'</span></div>';
       return;
     }
     g+='<div class="gline"><span class="name">'+esc(s.role||"session")+' <span class="dim">'+esc(s.model||"")+'</span></span>'+
-      meter(pct,cal?cal.ceiling_pct:null,pct==null?"var(--dim)":pct>=(cal?cal.ceiling_pct:90)?"var(--red)":pct>=75?"var(--sodium)":"var(--verdigris)",wallPct)+
-      '<span class="val">'+(pct==null?"-":Math.round(pct)+"% · "+fmtTok(s.context_tokens)+" of "+fmtTok(s.window))+(s.stale?' <span class="dim">as of '+esc(s.stale)+'</span>':'')+'</span></div>';
+      meter(pct,ceil,pct==null?"var(--dim)":pct>=(ceil!=null?ceil:90)?"var(--red)":pct>=75?"var(--sodium)":"var(--verdigris)",wallPct)+
+      '<span class="val">'+(pct==null?"-":Math.round(pct)+"% · "+fmtTok(s.context_tokens)+" of "+fmtTok(win)+(kw?" compaction window":""))+(s.stale?' <span class="dim">as of '+esc(s.stale)+'</span>':'')+'</span></div>';
   });
   var str=((D.state.strangers||{})[(D.canon||{})[CUR]||CUR])||{};
   var nstr=Object.keys(str).length;
@@ -1128,6 +1135,13 @@ function renderPanel(){
           esc(pairsBy[e.path].name||"")+'</span>  ';
     return '<div class="'+(e.kind==="command"?"you":"")+'"><span class="dim">'+esc((e.at||"").slice(11))+'</span>  '+who+esc(e.text||"")+'</div>'}).join("");
   $("#footPaths").textContent="logs: <project>\\bridge-logs\\   ·   crashes: bridge\\source\\data\\crashes\\";
+}
+function kwOf(s){
+  // The compaction window the daemon recorded for this session's half when
+  // it is below a million (key_windows, keyed as calib_keys), or null.
+  var kws=D.key_windows||{},ss=(D.state||{}).sessions||{};
+  for(var k in kws) if(ss[k]===s) return kws[k]||null;
+  return null;
 }
 function calOf(s){
   // The daemon names the key: it carries the role's window when that is
@@ -1412,13 +1426,15 @@ $("#profSel").onchange=function(){
 function renderSessions(){
   var tb=$("#sessTable tbody");tb.innerHTML="";
   Object.keys(D.state.sessions||{}).forEach(function(k){
-    var s=D.state.sessions[k],cal=calOf(s),pct=s.context_pct;
-    var over=cal&&pct!=null&&pct>cal.ceiling_pct;
+    var s=D.state.sessions[k],cal=calOf(s),kw=kwOf(s),
+        pct=kw&&s.context_tokens?s.context_tokens*100/kw:s.context_pct,
+        ceil=cal?(kw&&s.window?cal.ceiling_pct*s.window/kw:cal.ceiling_pct):null;
+    var over=cal&&pct!=null&&pct>ceil;
     var tr=document.createElement("tr");
     tr.innerHTML='<td>'+esc(s.role||k)+'<div class="dim">'+esc((s.session_id||"").slice(0,8))+'</div></td>'+
       '<td class="dim">'+esc(s.project||"")+'</td><td>'+esc(s.model||"-")+'</td>'+
-      '<td style="min-width:220px">'+meter(pct,cal?cal.ceiling_pct:null,pct==null?"var(--dim)":over?"var(--red)":"var(--verdigris)")+
-      '<span class="dim">'+(pct==null?"-":Math.round(pct)+"% live")+(over?' <span class="bad">past the tick - a miss</span>':"")+'</span></td>'+
+      '<td style="min-width:220px">'+meter(pct,ceil,pct==null?"var(--dim)":over?"var(--red)":"var(--verdigris)")+
+      '<span class="dim">'+(pct==null?"-":Math.round(pct)+"% live"+(kw?" of "+fmtTok(kw):""))+(over?' <span class="bad">past the tick - a miss</span>':"")+'</span></td>'+
       '<td class="'+(s.state==="died"?"bad":"")+'">'+esc(s.state||"")+'</td>'+
       '<td>'+(s.state==="died"?'<button class="btn" data-restart="'+esc(s.path||"")+'|'+esc(s.role||"")+'">restart where it stopped</button>':s.state!=="ended"?(D.show_windows?'<button class="btn" data-show="'+esc(s.path||"")+'|'+esc(s.role||"")+'" title="Open a Terminal window on it. Closing that window leaves this one running.">show</button> ':'')+'<button class="btn" data-hand="'+esc(s.path||"")+'|'+esc(s.role||"")+'">hand over</button> <button class="btn warn" data-kill="'+esc(s.path||"")+'|'+esc(s.role||"")+'">stop</button>':'<span class="dim">rotated out</span>')+'</td>';
     tb.appendChild(tr);

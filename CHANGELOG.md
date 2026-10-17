@@ -13,6 +13,32 @@ file before it and listed in `make_public.py`'s `EXTRA`, or it is never
 published.
 
 <!-- /rule 36 -->
+**2026-10-16 — what is new since the afternoon release of 2026-10-16 (34319a1)**
+
+- **The bridge carries the pairs' mailbox.** Pairs on two machines
+  sharing only a folder write letters into it, a box per pair. With
+  `pairs_mail` set, the bridge watches the boxes of the projects it
+  watches: a new letter is one line to that pair's planner - who wrote
+  it, where it lies, its first line - once, and no model polls the
+  folder. Letters in a box before it is watched count as read, a pair's
+  own letter is not carried back, and with no planner's channel a letter
+  waits. Without the key nothing is read.
+- **A long turn is news, not a wake.** The planner is woken only by what
+  it has to act on: a report, a call for the human, an executor's death
+  the bridge could not repair, and a hang - the executor's transcript
+  still for `executor_hang`, nothing of its running, and the bridge's
+  nudge into that stillness not having moved it. A turn past `long_turn`
+  that is still working is kept, and said in one line with the planner's
+  next wake - so are the hands changing. Past `turn_nudge` the executor
+  is told once, into its live turn, to end at its nearest result.
+- **An idle executor is not woken.** Only a task, a verdict with words,
+  the end of its own background or a dead turn handed back wakes it. A
+  pair whose planner said `wait` with nothing running has called its
+  person and stays parked; the deadlock watch leaves it alone and takes
+  no answered report for a lost one.
+- **A window's fill is said against the window it compacts in**: 68 % of
+  222k, not 15 % of the million. What decides is unchanged.
+
 **2026-10-16 — what is new since the night release of 2026-10-16 (677a552)**
 
 - **An executor that ends its turn to wait for its own background run

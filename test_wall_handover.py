@@ -2031,7 +2031,8 @@ check("nothing this run did reached past this machine: the fence was up, "
 print("=" * 68)
 owntemp.finish(TMP, bool(FAILED))
 if TMUX_HOME:
-    owntemp.finish(TMUX_HOME, bool(FAILED))
+    # passed or failed: a dead socket is no evidence (8.154)
+    owntemp.tmux_finish(TMUX_HOME, sessions.tmux_command())
 if FAILED:
     print("FAILED: %d" % len(FAILED))
     for f in FAILED:

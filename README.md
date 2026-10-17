@@ -499,31 +499,26 @@ running has to be available to them. It cannot be closed up and resold.
 
 Newest first. Short on purpose — what changed, not why in detail.
 
-**2026-10-16 — what is new since the afternoon release of 2026-10-16 (34319a1)**
+**2026-10-17 — what is new since the night release of 2026-10-17 (f239596)**
 
-- **The bridge carries the pairs' mailbox.** Pairs on two machines
-  sharing only a folder write letters into it, a box per pair. With
-  `pairs_mail` set, the bridge watches the boxes of the projects it
-  watches: a new letter is one line to that pair's planner - who wrote
-  it, where it lies, its first line - once, and no model polls the
-  folder. Letters in a box before it is watched count as read, a pair's
-  own letter is not carried back, and with no planner's channel a letter
-  waits. Without the key nothing is read.
-- **A long turn is news, not a wake.** The planner is woken only by what
-  it has to act on: a report, a call for the human, an executor's death
-  the bridge could not repair, and a hang - the executor's transcript
-  still for `executor_hang`, nothing of its running, and the bridge's
-  nudge into that stillness not having moved it. A turn past `long_turn`
-  that is still working is kept, and said in one line with the planner's
-  next wake - so are the hands changing. Past `turn_nudge` the executor
-  is told once, into its live turn, to end at its nearest result.
-- **An idle executor is not woken.** Only a task, a verdict with words,
-  the end of its own background or a dead turn handed back wakes it. A
-  pair whose planner said `wait` with nothing running has called its
-  person and stays parked; the deadlock watch leaves it alone and takes
-  no answered report for a lost one.
-- **A window's fill is said against the window it compacts in**: 68 % of
-  222k, not 15 % of the million. What decides is unchanged.
+- **A report is held only for work that ends by itself.** A background
+  command or helper still running holds a finished turn's report, as
+  before; a subscription the client lists that never ends - a live
+  artifact's updates - no longer does, and the report goes at once.
+- **A planner that owes nothing is not nudged.** The stall watch wakes a
+  planner for a report it has not answered or a turn of its own left
+  open - not for a report the bridge holds, and not again and again
+  after its `wait`.
+- **A `wait` parks the pair; the person is called later.** With nothing
+  running, the person is called once the executor has written nothing
+  for `executor_hang` after the wait, its turn ended - not at the wait
+  itself, and not while its work runs elsewhere.
+- **A call nobody answers is said again**: a permission dialog left
+  standing, and a pair held for its unanswered reports - at most once in
+  `call_repeat` (30 min), to the home planner, the Mac's notification
+  and the panel, never with a sound, until it is answered.
+- **The suites remove their tmux folder** passed or failed; it is kept,
+  and said, only while a server still answers in it.
 
 <!-- rule 36: the index's own lines, not the record -->
 Older entries, newest first, back to the first release of 2026-08-18:

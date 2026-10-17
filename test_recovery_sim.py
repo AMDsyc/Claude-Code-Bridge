@@ -1261,7 +1261,8 @@ for _kid in sessions.child_pids(os.getpid(), names=()) or []:
     sessions.terminate_and_wait(_kid)
 owntemp.finish(TMP, bool(_failed_runs or _tmux_bad or _net_bad))
 if TMUX_HOME:
-    owntemp.finish(TMUX_HOME, bool(_failed_runs or _tmux_bad or _net_bad))
+    # passed or failed: a dead socket is no evidence (8.154)
+    owntemp.tmux_finish(TMUX_HOME, sessions.tmux_command())
 say("=" * 70)
 if _failed_runs:
     say("NOT TEN OF TEN: %d run(s) failed - %s"

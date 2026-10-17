@@ -3763,6 +3763,21 @@ def panel_sound_on():
     return store.panel_sound_default() if v is None else bool(v)
 
 
+def panel_alert(text, path, sound):
+    """One needs_you into the panel's copy - the first saying of a call and
+    each later one (repeat_call)."""
+    at = time.time()
+    with _lock:
+        last = PANEL_ALERTS[-1]["id"] if PANEL_ALERTS else 0
+        PANEL_ALERTS.append({
+            "id": max(int(at * 1000), last + 1), "at": at,
+            "kind": "needs_you", "text": text,
+            "path": norm(path) if path else "",
+            "project": project_name(path) if path else "",
+            "sound": bool(sound)})
+        del PANEL_ALERTS[:-PANEL_ALERTS_MAX]
+
+
 def needs_you_elsewhere(text, path, reached, planner=False, about="",
                         call=None):
     """needs_you where a person can see it when the chat did not carry it.
@@ -3788,20 +3803,15 @@ def needs_you_elsewhere(text, path, reached, planner=False, about="",
     itself is held first (open_call). -> DECISIONS.md 8.151
     """
     try:
-        at = time.time()
-        with _lock:
-            last = PANEL_ALERTS[-1]["id"] if PANEL_ALERTS else 0
-            PANEL_ALERTS.append({
-                "id": max(int(at * 1000), last + 1), "at": at,
-                "kind": "needs_you", "text": text,
-                "path": norm(path) if path else "",
-                "project": project_name(path) if path else "",
-                "sound": not reached and panel_sound_on()})
-            del PANEL_ALERTS[:-PANEL_ALERTS_MAX]
+        panel_alert(text, path, not reached and panel_sound_on())
         if path and call and call[0] in CALL_FAMILIES:
             open_call(path, call[0], about, call[1], text, reached, planner)
             return
         spread_call(path, text, reached, planner, about)
+        if path and call and call[0] in CALL_KEPT_FAMILIES:
+            # said now, as it always was, and kept for its repeats
+            open_call(path, call[0], about, call[1], text, reached, planner,
+                      sent=True)
     except Exception:
         pass
 
@@ -3813,6 +3823,19 @@ def needs_you_elsewhere(text, path, reached, planner=False, about="",
 CALL_HOLD_SEC = 45
 # The families that can close, and how each is asked (call_open).
 CALL_FAMILIES = ("permission", "waiting", "report")
+# THE CALLS SAID AGAIN while nobody answers them: a dialog, and the pair held
+# for its reports. 2026-10-16 on the PC, a watched project: its planner stood
+# on a permission dialog from 21:13 to 09:32, the bridge saw it within a
+# second and said it six times - all silent, all before 22:24 - and reports
+# 5009-5033 stood the night without a verdict. "silence" is said at once, as
+# it always was, and kept for its repeats (CALL_KEPT_FAMILIES); "waiting" is
+# once by design (8.153), and "report" is followed by the silence hold.
+# -> DECISIONS.md 8.154
+CALL_REPEAT_FAMILIES = ("permission", "silence")
+CALL_KEPT_FAMILIES = ("silence",)
+# thresholds.call_repeat: at most one repeat of a call in this many seconds;
+# 0 or less, never one
+CALL_REPEAT_SEC = 1800
 # The Mac's own notification: one a pair in ten minutes, six an hour in all.
 MAC_NOTE_PAIR_SEC = 600
 MAC_NOTE_HOUR_MAX = 6
@@ -3963,12 +3986,16 @@ def spread_call(path, text, reached, planner=False, about=""):
     return went
 
 
-def open_call(path, family, about, ref, text, reached, planner):
+def open_call(path, family, about, ref, text, reached, planner, sent=False):
     """Hold a call that can close by itself; calls_pass delivers it.
 
     One record per (project, family, about). The same call again while it is
     open - the same dialog, the same report - delivers nothing new; another
     one of the family replaces it. -> DECISIONS.md 8.151
+
+    `sent`: the call has just been said (a CALL_KEPT_FAMILIES one), and is
+    kept only so that calls_pass can say it again while it stays open.
+    -> DECISIONS.md 8.154
     """
     k, key, now_ts = norm(path), "%s|%s" % (family, about), time.time()
     name = project_name(path)
@@ -3981,9 +4008,16 @@ def open_call(path, family, about, ref, text, reached, planner):
                          "family": family, "about": about, "ref": ref,
                          "opened_at": now_ts, "text": text[:2000],
                          "reached": bool(reached), "planner": bool(planner),
-                         "sent": 0}
+                         "sent": now_ts if sent else 0}
             save_state()
-    if same:
+    if same and sent:
+        pass        # said once more by its caller, and still the one kept
+    elif sent:
+        store.journal("notify", "needs_you about %s (%s) is said, and kept: "
+                      "said again every %d min while it stays open "
+                      "(call_repeat)" % (name, key, call_repeat_sec() // 60),
+                      name, about or "", "log", project_dir=path)
+    elif same:
         store.journal("notify", "needs_you about %s (%s) is the call open "
                       "since %s - nothing more is delivered for it"
                       % (name, key, clock_at(old.get("opened_at") or now_ts)),
@@ -4014,13 +4048,70 @@ def call_open(path, rec):
         if at < float(rec.get("opened_at") or 0):
             return True, ""
         return False, "a verdict reaching the bridge at %s" % clock_at(at)
+    if fam == "silence":
+        lv = (STATE.get("last_verdict") or {}).get(k) or {}
+        at = float(lv.get("at") or 0)
+        if at >= float(rec.get("opened_at") or 0):
+            return False, "a verdict reaching the bridge at %s" % clock_at(at)
+        if ((STATE.get("paused") or {}).get(k) or {}).get("by") != "silence":
+            return False, "the pair no longer held for its silence"
+        return True, ""
     return False, "a family this bridge does not know (%s)" % fam
+
+
+def call_repeat_sec():
+    """thresholds.call_repeat: the least time between two sayings of one
+    open call; 0 or less, it is never said again. -> DECISIONS.md 8.154"""
+    try:
+        return float((CFG.get("thresholds") or {}).get("call_repeat",
+                                                       CALL_REPEAT_SEC))
+    except (TypeError, ValueError):
+        return float(CALL_REPEAT_SEC)
+
+
+def repeat_call(path, rec, age, n):
+    """A call nobody has answered, said again: to the home planner, to the
+    Mac's notification and to the panel - never with a sound, the owner's
+    word, and never into the chat, which carried the first one.
+
+    Not to the planner that is itself the one asking or the one silent - a
+    window on a dialog reads nothing (8.151). calls_pass decides when, at
+    most once in call_repeat, for CALL_REPEAT_FAMILIES. -> DECISIONS.md 8.154
+    """
+    k, name = norm(path), project_name(path)
+    key = "%s|%s" % (rec.get("family"), rec.get("about") or "")
+    text = ("Still not answered after %d min (said again, %d): %s"
+            % (int(age // 60), n, rec.get("text") or ""))
+    panel_alert(text, k, False)
+    went = []
+    home = home_pair()
+    if home and not (home == k and rec.get("about") == "planner"):
+        _ok, how = deliver_ex(
+            home, "planner",
+            "The bridge needs the human for %s, still: %s Tell them in your "
+            "next words." % (name, text), {"kind": "info"})
+        went.append("the home planner, of %s (%s)" % (project_name(home),
+                                                      how))
+    if mac_notify(k, text):
+        went.append("the Mac's notification")
+    store.journal("notify", "needs_you about %s (%s) still open after %d min "
+                  "- said again (%d), to %s; not again for %d min "
+                  "(call_repeat)"
+                  % (name, key, int(age // 60), n,
+                     " and ".join(["the panel"] + went),
+                     int(call_repeat_sec() // 60)),
+                  name, rec.get("about") or "", "log" if went else "warn",
+                  project_dir=k)
 
 
 def calls_pass(now_ts=None):
     """Each held call: closed -> one line and no delivery; open past
     CALL_HOLD_SEC -> delivered once (spread_call). session_watch runs it.
-    -> DECISIONS.md 8.151"""
+    -> DECISIONS.md 8.151
+
+    One of CALL_REPEAT_FAMILIES still open call_repeat after it was last
+    said is said again (repeat_call), for as long as nobody answers it.
+    -> DECISIONS.md 8.154"""
     now_ts = time.time() if now_ts is None else now_ts
     for k, book in list((STATE.get("calls") or {}).items()):
         for key, rec in list((book or {}).items()):
@@ -4054,9 +4145,22 @@ def calls_pass(now_ts=None):
                 continue
             with _lock:
                 if rec.get("sent"):
-                    continue
-                rec["sent"] = now_ts
-                save_state()
+                    every = call_repeat_sec()
+                    last = max(float(rec.get("sent") or 0),
+                               float(rec.get("repeated") or 0))
+                    if rec.get("family") not in CALL_REPEAT_FAMILIES \
+                            or every <= 0 or now_ts - last < every:
+                        continue
+                    rec["repeated"] = now_ts
+                    rec["repeats"] = again = int(rec.get("repeats") or 0) + 1
+                    save_state()
+                else:
+                    rec["sent"] = now_ts
+                    save_state()
+                    again = 0
+            if again:
+                repeat_call(k, rec, age, again)
+                continue
             store.journal("notify", "needs_you about %s (%s) still open after"
                           " %d s - delivered" % (name, key, int(age)), name,
                           rec.get("about") or "", "log", project_dir=k)
@@ -7382,7 +7486,8 @@ def assess(path):
         if acted_recently(path, "stall:%s" % hit[0]):
             return done("a half that has stopped writing, already nudged")
         return done("a half that has stopped writing",
-                    nudge_stalled(path, hit[0], hit[1]))
+                    nudge_stalled(path, hit[0], hit[1],
+                                  hit[2] if len(hit) > 2 else ""))
 
     # ITS REPORTS ARE HELD, so its tail is a report the bridge has already
     # answered: an executor waiting for its own background, which the
@@ -7468,6 +7573,12 @@ def assess(path):
     # the Monitor after a wait (8.34), the task handed over in the same
     # second (8.29). -> 8.153
     _parked = parked_on_you(path)
+    if _parked and not _parked.get("called", 1):
+        return done("an idle executor with the loop on, the pair parked on "
+                    "its planner's wait since %s, the person not called yet "
+                    "- called after %d min of the executor's silence (8.154)"
+                    % (clock_at(_parked.get("since")),
+                       parked_call_secs() // 60))
     if _parked:
         return done("an idle executor with the loop on, the pair parked on "
                     "you since %s - not woken (8.153)"
@@ -11797,6 +11908,11 @@ def session_watch():
             pass
         try:
             bg_held_pass()
+        except Exception:
+            pass
+        # a pair parked on a wait: its person, after the executor's silence
+        try:
+            parked_call_pass()
         except Exception:
             pass
         for _p in list((CFG.get("projects") or {})):
@@ -18306,9 +18422,17 @@ def stop_running_tasks(event):
     8.137): the Bash and the Monitor are listed as "shell", the Agent as
     "subagent", each with status "running" while it runs; each is dropped
     from the list once it has ended, and the Stop after the last of them
-    carries an EMPTY list - the field stays. Every task in the list ends
-    with a notification that wakes the session, so a task in it is a
-    session that is not parked.
+    carries an EMPTY list - the field stays. A Bash's or an Agent's end is
+    a notification that wakes the session.
+
+    NOT EVERY TASK IN THE LIST ENDS, though, and only those that do are a
+    turn's background (SELF_ENDING). On the Mac's journal of 2026-10-14..17
+    a Monitor the executor starts is listed "shell", id "b...", with a life:
+    470 of 470 launches said "expires in". "monitor", id "s...", is the
+    artifact's subscription - "live updates for artifact ..." - which never
+    ends: a watched project's executor kept one, and the bridge held its
+    reports 76, 77 and 79 an hour each and answered them `wait` itself
+    while the executor stood still from 05:16. -> DECISIONS.md 8.154
 
     None when the field is absent - an older client, or one that stopped
     sending it - and that concludes nothing, as in close_at_stop. An entry
@@ -18320,6 +18444,22 @@ def stop_running_tasks(event):
         return None
     return [t for t in tasks if isinstance(t, dict)
             and str(t.get("status") or "running") == "running"]
+
+
+# The types of a Stop's background_tasks that end by themselves: a
+# background Bash (and the Monitor tool, which the client lists as one) and
+# a background Agent. Only these hold a report (8.152) or keep a `wait` from
+# being a pair parked on a person (8.137). A type not named here - the
+# artifact subscription "monitor", or one a later client invents - is not
+# waited on: a report carried too soon costs one wake, a report held for a
+# task that never ends costs the hour. -> DECISIONS.md 8.154
+SELF_ENDING = ("shell", "subagent")
+
+
+def self_ending(tasks):
+    """The tasks of a Stop's list that end by themselves (SELF_ENDING)."""
+    return [t for t in (tasks or []) if isinstance(t, dict)
+            and str(t.get("type") or "") in SELF_ENDING]
 
 
 def tasks_brief(tasks, most=6):
@@ -18622,10 +18762,11 @@ def parked_on_you(path):
     """The pair's call for its person, while the planner's last word is
     still the `wait` that made it - or None.
 
-    `waiting_on_you` is written when a wait with nothing running calls the
-    person (once), and taken off only when a task goes out; a verdict since
-    is a pair moving again, whatever the record still says. clinch() stands
-    down on it and assess() names it: one definition for both. -> 8.153
+    `waiting_on_you` is written when a wait with nothing running parks the
+    pair - its person called from it later, once, by parked_call_pass
+    (8.154) - and taken off only when a task goes out; a verdict since is a
+    pair moving again, whatever the record still says. clinch() stands down
+    on it and assess() names it: one definition for both. -> 8.153
     """
     k = norm(path)
     with _lock:
@@ -19157,7 +19298,18 @@ def stalled(path, sit, quiet=None):
     for ten minutes with no tool running. Below the p99 turn gap of 1889s
     only because (c) removes the reason turns are long.
 
-    Returns (role, seconds) for the first half that qualifies, or None.
+    (a) WAS NOT READ, for either half, until 8.154: a planner that had
+    answered everything and closed its turn was nudged "about the piece you
+    are holding" whenever its transcript lay still. 2026-10-17, a watched
+    project: `wait` on report 201 at 02:36:04, the planner nudged at
+    02:58:32 and 03:13:34 ("I hold nothing"); another's planner four times
+    while the bridge itself held its executor's reports (8.152). For the
+    planner it is planner_owes(). The executor's half reads no (a): its
+    nudge is what the hang of 8.153 asks about, and an executor at rest
+    after a `wait` or a held report is "waiting on a process" (c).
+
+    Returns (role, seconds, owed words) for the first half that qualifies,
+    or None.
     """
     if quiet is None:
         quiet = float(CFG.get("thresholds", {}).get("stall_quiet", 600))
@@ -19170,10 +19322,46 @@ def stalled(path, sit, quiet=None):
             continue
         if tool_in_flight(path, role, sit):
             continue
+        owed = ""
+        if role == "planner":
+            owed = planner_owes(path)
+            if not owed:
+                continue
         frozen, since = transcript_frozen(path, role, quiet)
         if frozen:
-            return role, since
+            return role, since, owed
     return None
+
+
+def planner_owes(path):
+    """What the planner owes, in words for its nudge, or "" for nothing.
+
+    Condition (a) of stalled() for the planner: a report that reached it
+    and has had no answer since - its verdict, or the bridge's own `wait`
+    on a held report (`held_at`, 8.152) - or a turn of its own still open.
+    A planner whose turn has ended and whose reports are answered owes
+    nothing, whatever else the pair's records say: a `wait` it gave
+    (`waiting_on_you`) or reports the bridge holds are not its debt.
+    A transcript it cannot read is no open turn. -> DECISIONS.md 8.154
+    """
+    k = norm(path)
+    with _lock:
+        lv = dict((STATE.get("last_verdict") or {}).get(k) or {})
+        rs = dict((STATE.get("report_sent") or {}).get(k) or {})
+    asked = float(rs.get("made") or rs.get("at") or 0)
+    answered = max(float(lv.get("at") or 0), float(lv.get("held_at") or 0))
+    if asked and asked > answered:
+        return "an answer to report %s, which reached you at %s" % (
+            rs.get("n") or "?", clock_at(float(rs.get("at") or asked)))
+    try:
+        sid = last_session_id(path, "planner") or (
+            best_session(path, "planner") or {}).get("session_id")
+        tp = sessions.transcript_of(sid) if sid else None
+        if tp and transcript_turn_state(tp) == "open":
+            return "the end of the turn you have open"
+    except Exception:
+        pass
+    return ""
 
 
 def nudge_stalled(path, role, since, owed=""):
@@ -23278,7 +23466,7 @@ def note_silence(path, project, n):
            "held - work is NOT being reviewed. Check the planner window; the "
            "unanswered reports are in bridge-logs/.../inbox/. Resume from the "
            "panel, or just answer with a verdict." % (project, run),
-           path=path, about="planner")
+           path=path, about="planner", call=("silence", n))
     return True
 
 
@@ -23773,10 +23961,13 @@ def bg_running_now(path, event):
     """What runs for the executor as its turn ends, in words, or "".
 
     The Stop's own list first - a Monitor and a background Agent are only
-    there (8.137) - and then what the bridge tracks itself, which an older
-    client without the list still has (inflight_live)."""
+    there (8.137) - and of it only what ends by itself (8.154); then what
+    the bridge tracks itself, which an older client without the list still
+    has (inflight_live). The bridge's own records are matched against EVERY
+    id the list carries, so a tracked command listed is not said twice."""
     listed = stop_running_tasks(event) or []
-    out = [tasks_brief(listed)] if listed else []
+    ending = self_ending(listed)
+    out = [tasks_brief(ending)] if ending else []
     ids = set(str(t.get("id") or "") for t in listed)
     own = [m for m in inflight_live(path) if isinstance(m, dict)
            and (m.get("role") or "executor") == "executor"
@@ -23817,7 +24008,9 @@ def carry_now_why(path, msg):
             red.get("cmd"))
     if (STATE.get("note") or {}).get(k):
         return "a note from a person goes with it"
-    if (STATE.get("waiting_on_you") or {}).get(k):
+    # parked AND called: before the call, the person is not waited on yet
+    _wo = (STATE.get("waiting_on_you") or {}).get(k)
+    if _wo and (not isinstance(_wo, dict) or _wo.get("called", 1)):
         return "the pair is parked on a person"
     for r in MANAGED_ROLES:
         if open_permission_ask(path, r):
@@ -23976,6 +24169,80 @@ def bg_held_pass(now_ts=None):
                       % (len(held), "" if len(held) == 1 else "s", age // 60,
                          ", ".join(str(h.get("n")) for h in held)),
                       name, "executor", "log", project_dir=k)
+
+
+def parked_call_secs():
+    """How long the executor writes nothing after a `wait` before its person
+    is called: thresholds.executor_hang, the hang's own threshold (8.153)."""
+    return float((CFG.get("thresholds", {}) or {}).get(
+        "executor_hang", EXECUTOR_HANG_SEC))
+
+
+def parked_call_pass(now_ts=None):
+    """A pair parked on its planner's `wait`, nothing running: its person is
+    called once the executor has written nothing for parked_call_secs()
+    after the wait - not at the wait. session_watch runs it.
+
+    The silence is the executor's transcript (transcript_frozen), counted
+    from the wait or from its last write, whichever is later; and only
+    after its turn has ended - a Stop counted and no turn open - with
+    nothing tracked running. The planner's `wait` still parks the pair on
+    the second it is given; what waits is the call. A task (note_task_sent)
+    ends the record, and a verdict that is not `wait` ends the parking
+    (parked_on_you). A record without "called" was written before this and
+    was called then. A transcript the bridge cannot read never calls: it
+    fails open, as every witness of its does. -> DECISIONS.md 8.154
+    """
+    now_ts = time.time() if now_ts is None else now_ts
+    hang = parked_call_secs()
+    for k, rec in list((STATE.get("waiting_on_you") or {}).items()):
+        if not isinstance(rec, dict) or rec.get("called", 1):
+            continue
+        if not parked_on_you(k):
+            continue
+        if not ((STATE.get("loops") or {}).get(k) or {}).get("active") \
+                or (STATE.get("paused") or {}).get(k):
+            continue
+        if not float((STATE.get("stop_seen") or {}).get(
+                "%s|executor" % k) or 0):
+            continue
+        if inflight_live(k):
+            continue
+        try:
+            sid = last_session_id(k, "executor") or (
+                best_session(k, "executor") or {}).get("session_id")
+            tp = sessions.transcript_of(sid) if sid else None
+            if tp and transcript_turn_state(tp) == "open":
+                continue
+        except Exception:
+            continue
+        frozen, quiet = transcript_frozen(k, "executor", hang)
+        if not frozen:
+            continue
+        wrote = time.time() - float(quiet or 0)
+        silent = now_ts - max(float(rec.get("since") or 0), wrote)
+        if silent < hang:
+            continue
+        with _lock:
+            cur = (STATE.get("waiting_on_you") or {}).get(k)
+            if not isinstance(cur, dict) or cur.get("called", 1):
+                continue
+            cur["called"] = now_ts
+            save_state()
+        name = project_name(k)
+        store.journal("loop", "The pair has been parked on its planner's wait "
+                      "since %s, and the executor has written nothing for %d "
+                      "min with nothing running - the person is called, once "
+                      "(8.154)" % (clock_at(float(rec.get("since") or 0)),
+                                   silent // 60), name, "planner", "warn",
+                      project_dir=k)
+        notify("needs_you",
+               "%s: the planner is waiting on YOU - it answered wait at %s, "
+               "nothing is running and the executor has written nothing for "
+               "%d min, so the pair is stopped until you say something. Its "
+               "words: %s" % (name, clock_at(float(rec.get("since") or 0)),
+                              silent // 60, str(rec.get("why") or "")[:600]),
+               path=k, call=("waiting", None))
 
 
 # THE PAIRS' MAILBOX, carried by the bridge. Pairs on two machines cannot
@@ -24678,7 +24945,17 @@ def run_review(event, path, lp, msg, project, role):
         # running, and the journal had no process row from 14:52 to 17:46.
         # The Stop lists them; an absent list concludes nothing.
         # -> DECISIONS.md 8.137
-        listed = stop_running_tasks(event)
+        # Of it, only what ends by itself: a `wait` on the artifact's
+        # subscription alone is a pair parked like any other. -> 8.154
+        _all137 = stop_running_tasks(event)
+        listed = self_ending(_all137)
+        if not running and _all137 and not listed:
+            store.journal("loop", "The planner answered wait. The executor's "
+                          "Stop listed only task%s that never end by "
+                          "themselves: %s - not counted as running (8.154)"
+                          % ("" if len(_all137) == 1 else "s",
+                             tasks_brief(_all137)),
+                          project, "planner", "log", project_dir=path)
         if not running and listed:
             running = True
             store.journal("loop", "The planner answered wait. Nothing the "
@@ -24707,19 +24984,25 @@ def run_review(event, path, lp, msg, project, role):
             notify("waiting_process", "%s: planner says wait - %s"
                    % (project, feedback[:200]), path=path)
         elif not (STATE.get("waiting_on_you") or {}).get(norm(path)):
+            # NOT CALLED AT THE WAIT ITSELF. 2026-10-17, a watched project:
+            # report 201 at 02:35:56, the planner's `wait` at 02:36:04 -
+            # "the series runs in AE" - and the person called that second,
+            # "nothing is running": the work was a queue on another machine
+            # the bridge cannot see. The planner's word is trusted; the
+            # call waits for the executor's own silence (parked_call_pass).
+            # The record is written now, as before - clinch() and assess()
+            # read the pair as parked on it - with "called" 0. -> 8.154
             with _lock:
                 STATE.setdefault("waiting_on_you", {})[norm(path)] = {
-                    "since": time.time(), "why": feedback[:400]}
+                    "since": time.time(), "why": feedback[:400],
+                    "called": 0}
                 save_state()
             store.journal("loop", "The planner answered wait with nothing "
-                          "running - the pair is parked on you, so you are "
-                          "being called once", project, "planner", "warn",
-                          project_dir=path)
-            notify("needs_you",
-                   "%s: the planner is waiting on YOU - nothing is running,"
-                   " so the pair is stopped until you say something. Its"
-                   " words: %s" % (project, feedback[:600]), path=path,
-                   call=("waiting", None))
+                          "running - the pair is parked; the person is called "
+                          "only if the executor then writes nothing for %d "
+                          "min (executor_hang, 8.154)"
+                          % (parked_call_secs() // 60), project, "planner",
+                          "log", project_dir=path)
         # AND THE WORDS THEMSELVES, which used to go nowhere at all. On
         # 2026-09-03 a watched project's planner wrote the next piece into
         # a `wait` - two concrete edits, named - and the executor never

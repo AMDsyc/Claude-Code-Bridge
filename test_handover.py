@@ -16519,13 +16519,172 @@ finally:
         _NAMES168.clear()
         _NAMES168.update(_was168[1])
 
+print("\n169. a suite's tmux folder goes at its end, passed or failed, and")
+print("     with a run that dies before its last line")
+print("    finish(TMUX_HOME, failed) of owntemp kept the folder of every run")
+print("    that failed - and every sabotage and red-before run fails by")
+print("    design: 452 /tmp/bt-* on a Mac by 2026-10-17, one a sabotage,")
+print("    counted against three tallies; 402 empty, 50 holding a dead")
+print("    socket. A dead socket is no evidence. tmux_finish stops what")
+print("    still answers, then removes the folder whatever the outcome, and")
+print("    keeps it - saying so - only while a server answers there; and")
+print("    tmux_home registers it at exit. Seen from OUTSIDE: children make")
+print("    the folder the way a suite does (as case 113). FAILURE WOULD LOOK")
+print("    LIKE: a folder left after a red run or a crash, or one taken from")
+print("    under a live socket. -> 8.154")
+import shutil as _sh169                                    # noqa: E402
+_tf169 = getattr(owntemp, "tmux_finish", None)
+check("the package has owntemp.tmux_finish", _tf169 is not None, True)
+_d169 = os.path.join(TMP, "tmux169")
+os.makedirs(_d169, exist_ok=True)
+_left169 = []
+_KID169 = (
+    "import os, socket, sys, time\n"
+    "sys.path.insert(0, sys.argv[3])\n"
+    "from bridgecore import owntemp\n"
+    "base, how = sys.argv[1], sys.argv[2]\n"
+    "t = owntemp.tmux_home()\n"
+    "where = os.path.join(t, 'tmux-%d' % os.getuid())\n"
+    "os.makedirs(where)\n"
+    "s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+    "s.bind(os.path.join(where, 'default'))\n"
+    "stop = []\n"
+    "if how == 'live':\n"
+    "    # a server answers every connect, as tmux does: tmux_left asks\n"
+    "    # again while one answers, and a backlog nobody takes from fills\n"
+    "    import threading\n"
+    "    s.listen(8)\n"
+    "    s.settimeout(0.2)\n"
+    "    def serve():\n"
+    "        while not stop:\n"
+    "            try:\n"
+    "                s.accept()[0].close()\n"
+    "            except socket.timeout:\n"
+    "                pass\n"
+    "            except OSError:\n"
+    "                return\n"
+    "    th = threading.Thread(target=serve, daemon=True)\n"
+    "    th.start()\n"
+    "else:\n"
+    "    s.close()\n"
+    "open(os.path.join(base, 'where.txt'), 'w').write(t)\n"
+    "while not os.path.exists(os.path.join(base, 'go.txt')):\n"
+    "    time.sleep(0.1)\n"
+    "if how == 'crash':\n"
+    "    raise RuntimeError('the run dies before its last line')\n"
+    "if how == 'killed':\n"
+    "    os._exit(3)\n"
+    "ok = owntemp.tmux_finish(t, None)\n"
+    "open(os.path.join(base, 'result.txt'), 'w').write(\n"
+    "    '%s %s' % (ok, os.path.isdir(t)))\n"
+    "if how == 'live':\n"
+    "    stop.append(1)\n"
+    "    th.join()\n"
+    "s.close()\n")
+
+
+def _life169(how):
+    """One child's life: (its folder, there while it ran, there after,
+    what its own tmux_finish answered, what it printed, its exit code)."""
+    base = os.path.join(_d169, how)
+    os.makedirs(base, exist_ok=True)
+    kid = subprocess.Popen([sys.executable, "-c", _KID169, base, how,
+                            os.path.dirname(os.path.abspath(__file__))],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           text=True)
+    where = os.path.join(base, "where.txt")
+    for _ in range(200):
+        if os.path.exists(where) or kid.poll() is not None:
+            break
+        time.sleep(0.1)
+    t = open(where).read() if os.path.exists(where) else ""
+    if t:
+        _left169.append(t)
+    during = bool(t) and os.path.isdir(t)
+    open(os.path.join(base, "go.txt"), "w").write("go")
+    out, _ = kid.communicate(timeout=60)
+    res = os.path.join(base, "result.txt")
+    said = open(res).read() if os.path.exists(res) else ""
+    return (t, during, os.path.isdir(t) if t else None, said, out or "",
+            kid.returncode)
+
+
+try:
+    if os.name == "nt":
+        print("   on Windows a window is a console: no folder, and its end")
+        print("   is a no-op")
+        check("no folder made, and tmux_finish of none is True",
+              (owntemp.tmux_home(),
+               _tf169(None, None) if _tf169 else None), (None, True))
+    else:
+        print("   (a) a run whose server is gone, leaving its socket - the")
+        print("   shape every red run left")
+        _t169, _du169, _af169, _sa169, _o169, _rc169 = _life169("dead")
+        check("(a) its folder was there while it ran", _du169, True)
+        check("(a) its tmux_finish removed it", (_sa169, _af169),
+              ("True False", False))
+
+        print("   (b) a server still answering: kept and said; gone at the")
+        print("   exit, once that server has stopped")
+        _t169, _du169, _af169, _sa169, _o169, _rc169 = _life169("live")
+        check("(b) kept while the server answered", _sa169, "False True")
+        check("(b) and the run said so, naming the socket and the folder",
+              ("a server still answers on default" in _o169,
+               bool(_t169) and _t169 in _o169), (True, True))
+        check("(b) gone after the run's exit", (_du169, _af169),
+              (True, False))
+
+        print("   (c) a run that dies before its last line: its exit takes")
+        print("   the folder along")
+        _t169, _du169, _af169, _sa169, _o169, _rc169 = _life169("crash")
+        check("(c) it died", ("the run dies before its last line" in _o169,
+                              _rc169 != 0), (True, True))
+        check("(c) and its folder is gone", (_du169, _af169), (True, False))
+
+        print("   (d) CONTROL: a run killed outright runs no exit handler -")
+        print("   its folder is left, which is what (a)-(c) would show had")
+        print("   nothing removed theirs")
+        _t169, _du169, _af169, _sa169, _o169, _rc169 = _life169("killed")
+        check("(d) left", (_du169, _af169, _rc169), (True, True, 3))
+
+        print("   (e) a folder this process did not make is refused and left")
+        print("   untouched; none is a no-op")
+        _th169 = tempfile.mkdtemp(prefix="bt-", dir=_d169)
+        check("(e) refused, and untouched",
+              (_tf169(_th169, None) if _tf169 else None,
+               os.path.isdir(_th169)), (False, True))
+        check("(e) none is a no-op", _tf169(None, None) if _tf169 else None,
+              True)
+finally:
+    # what a child left - the control's always, any on the code before -
+    # goes by the exact path that child wrote, and only in /tmp/bt-*
+    for _t169 in _left169:
+        if (_t169.startswith("/tmp/bt-") and "/" not in _t169[5:]
+                and os.path.isdir(_t169)):
+            _sh169.rmtree(_t169, ignore_errors=True)
+
+print("   (f) all five suites that make one end it with tmux_finish, none")
+print("   with finish")
+_here169 = os.path.dirname(os.path.abspath(__file__))
+_new169, _old169 = "owntemp.tmux_" + "finish(TMUX_HOME", \
+    "owntemp." + "finish(TMUX_HOME"
+_wired169 = {}
+for _n169 in ("test_handover.py", "test_multipair.py", "test_wake_sim.py",
+              "test_wall_handover.py", "test_recovery_sim.py"):
+    with open(os.path.join(_here169, _n169), encoding="utf-8") as _fh:
+        _src169 = _fh.read()
+    _wired169[_n169] = (_new169 in _src169, _old169 in _src169)
+check("(f) each of the five: tmux_finish, no finish",
+      sorted(set(_wired169.values())), [(True, False)])
+
 check("nothing this run did reached past this machine: the fence was up, "
       "and it refused nothing (netfence.py, 8.142)",
       (netfence.up(), netfence.refused()), (True, []))
 print("\n" + ("-" * 60))
 owntemp.finish(TMP, bool(FAILED))
 if TMUX_HOME:
-    owntemp.finish(TMUX_HOME, bool(FAILED))
+    # passed or failed: a dead socket is no evidence (8.154)
+    owntemp.tmux_finish(TMUX_HOME, daemon.sessions.tmux_command())
 if SKIPPED:
     print("SKIPPED on this machine: %d" % len(SKIPPED))
     for f in SKIPPED:

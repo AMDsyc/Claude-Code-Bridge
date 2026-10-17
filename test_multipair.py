@@ -1217,10 +1217,13 @@ check("no send of the report body is left in the review",
 check("the inbox write is still there, twice - once per fallback",
       rsrc.count("store.inbox_write(path, n, content)"), 2)
 print("   four of them since 2026-08-22: the three that name the inbox or")
-print("   the wait, plus the new one for a pair parked on a PERSON - a")
-print("   `wait` verdict with nothing running (case 31)")
+print("   the wait, in the review, and the one for a pair parked on a PERSON -")
+print("   a `wait` with nothing running (case 31) - made since 8.154 after the")
+print("   executor's silence, not at the wait (case 193)")
 check("the alerts that need a human still go out",
-      rsrc.count('notify("needs_you"'), 4)
+      (rsrc.count('notify("needs_you"'),
+       inspect.getsource(daemon.parked_call_pass).count('notify("needs_you"')
+       if hasattr(daemon, "parked_call_pass") else 0), (3, 1))
 check("and the end of the run is its own kind now, not another needs_you",
       'notify("run_finished"' in rsrc, True)
 tg_reset()
@@ -4225,7 +4228,7 @@ def inventory_walk():
     inventory does not say, whether a prefixed top-level key was seen). The
     walk of case 49, a function since 132b: case 49 stood at 49 of 177 and
     called itself LAST, so a container first filled by a later case was
-    never walked - the suite's last case walks again (191)."""
+    never walked - the suite's last case walks again (195)."""
     unlisted, prefixed = [], False
     for name, v in sorted(daemon.STATE.items()):
         if name in getattr(daemon, "STATE_PATH_RECORDS", ()):
@@ -12514,8 +12517,10 @@ try:
     check("the journal says the id was recovered from the transcript",
           any("recovered the id of a background record" in
               (_r.get("text") or "") for _r in _j74("", _p98)), True)
-    print("   and a `wait` on a pair with nothing running RINGS - asked of")
-    print("   the receiver, the notify call, not of a flag")
+    print("   and a `wait` on a pair with nothing running PARKS it - asked of")
+    print("   the receiver, the notify call, not of a flag: not 'a process")
+    print("   is going', and the person's call left to the executor's")
+    print("   silence (8.154, case 193)")
     with open(os.path.join(_p98, "seen98.txt"), "w", encoding="utf-8") as _f:
         _f.write("read" + chr(10))
     _t98w = threading.Thread(target=stop_hook,
@@ -12529,10 +12534,11 @@ try:
                       "feedback": "Checked: seen98.txt\nWaiting."},
          secret=True)
     _t98w.join(40)
-    check("needs_you reached the receiver, about this pair",
-          until(lambda: any(k == "needs_you" and (p is None or
-                                                  canon(p) == _k98)
-                            for k, _t, p in _notes98), 20), True)
+    check("the pair is parked on the wait, and not read as a process going",
+          (until(lambda: bool((daemon.STATE.get("waiting_on_you") or {})
+                              .get(_k98)), 20),
+           any(k == "waiting_process" and (p is None or canon(p) == _k98)
+               for k, _t, p in _notes98)), (True, False))
 
     print("   (b) THIS client sends tool_use_id with the hook, and then")
     print("   there is nothing to scan for - proven on a transcript that")
@@ -16831,9 +16837,10 @@ try:
     _n113, _saw113 = _tick113()
     check("(b) no idle nudge while its own Monitor is open after a wait",
           _n113, 0)
-    check("(b) and the tick names the pair parked on its person",
-          ("parked on you since" in _saw113, "not woken (8.153)" in _saw113),
-          (True, True))
+    check("(b) and the tick names the pair parked on its planner's wait, "
+          "its person not called yet (8.154)",
+          ("parked on its planner's wait since" in _saw113,
+           "the person not called yet" in _saw113), (True, True))
 
     print("   (c) the Monitor's end notice has come - still no nudge")
     _window113(900, ended=True)
@@ -27336,6 +27343,7 @@ with open(os.path.join(_p187, "seen187.txt"), "w", encoding="utf-8") as _f:
     _f.write("read" + chr(10))
 _NUDGE187 = "you have been idle and nothing is waiting on you"
 _PARK187 = "the pair is parked on you, so you are being called once"
+_LATER187 = "the person is called only if the executor then writes nothing"
 
 
 def _status187(role, sid):
@@ -27420,8 +27428,9 @@ try:
            ((daemon.STATE.get("last_verdict") or {}).get(_k187)
             or {}).get("v")),
           (True, "wait"))
-    check("(a) and the person was called for it, once",
-          len(_journal187(_PARK187)), 1)
+    check("(a) and the person is not called at the wait - only after the "
+          "executor's silence (8.154, case 193)",
+          (len(_journal187(_PARK187)), len(_journal187(_LATER187))), (0, 1))
 
     print("   (b) the executor idle past the quiet: not woken, and the tick")
     print("   names the parking")
@@ -27432,9 +27441,10 @@ try:
           sum(_NUDGE187 in body_of(d.get("content") or "") for d in _gex187),
           0)
     check("(b) nothing reached the planner", len(_gp187), 0)
-    check("(b) the tick names the pair parked on its person",
-          ("parked on you since" in _saw187, "not woken (8.153)" in _saw187),
-          (True, True))
+    check("(b) the tick names the pair parked on its planner's wait, its "
+          "person not called yet (8.154)",
+          ("parked on its planner's wait since" in _saw187,
+           "the person not called yet" in _saw187), (True, True))
 
     print("   (c) past clinch_grace: a parked pair is not a deadlock")
     daemon.CFG["thresholds"]["clinch_grace"] = 1
@@ -27474,8 +27484,9 @@ try:
           (len(_ge187), len(_gp187)), (0, 0))
     check("(c) and wrote no deadlock line",
           _journal187("Both halves are idle with work owed"), [])
-    check("(c) and did not call the person a second time",
-          len(_journal187(_PARK187)), 1)
+    check("(c) and called nobody",
+          (len(_journal187(_PARK187)),
+           len(_journal187("the person is called, once"))), (0, 0))
 
     print("   (d) CONTROL: a verdict since the wait - the record of the call")
     print("   stays until a task, and is no parking any more: the same clinch")
@@ -28155,7 +28166,814 @@ finally:
     with daemon._lock:
         (daemon.STATE.get("loops") or {}).pop(_k190, None)
         (daemon.STATE.get("pids") or {}).pop(_ke190, None)
-print("\n191. the walk of case 49 again, as the suite's LAST case: a")
+print("\n191. a task that never ends by itself holds no report: of the Stop's")
+print("     list, only a background command or an agent is waited on")
+print("    A watched project, 2026-10-16 to 17: the executor's Stop listed")
+print("    `monitor stsb1wc9c (live updates for artifact ...)` - the")
+print("    subscription to an artifact, which never ends - and the bridge")
+print("    held reports 76, 77 and 79 an hour each and answered them `wait`")
+print("    itself, while the executor stood still from 05:16. A Monitor the")
+print("    tool starts is listed `shell` and expires (470 of 470 launches on")
+print("    this Mac, 14-17.10); a `subagent` ends with its agent. FAILURE")
+print("    WOULD LOOK LIKE: the report with only the subscription running")
+print("    held, or the planner's `wait` on it read as work going. -> 8.154")
+_p191 = os.path.join(TMP, "self-ending-191")
+os.makedirs(_p191, exist_ok=True)
+_k191 = canon(_p191)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p191: {}}})
+post_rc("/loop", {"action": "start", "project": _p191})
+_s191, _pl191 = "se191-ex", "se191-pl"
+for _r, _s in (("executor", _s191), ("planner", _pl191)):
+    post_rc("/event", {"hook_event_name": "SessionStart", "role": _r,
+                       "session_id": _s, "project_dir": _p191,
+                       "cwd": _p191})
+    register(_p191, _r, _s)
+with open(os.path.join(_p191, "seen191.txt"), "w", encoding="utf-8") as _f:
+    _f.write("read" + chr(10))
+_NO191 = object()
+# the three types a real Stop lists: the subscription, a background Bash,
+# a background Agent (the shapes of case 183)
+_SUB191 = {"id": "s191subs1", "type": "monitor", "status": "running",
+           "description": "live updates for artifact 191"}
+_SH191 = {"id": "b191soak1", "type": "shell", "status": "running",
+          "description": "soak the import", "command": "bash soak_191.sh"}
+_AG191 = {"id": "a191agent0000001", "type": "subagent",
+          "status": "running", "description": "audit the gate sheet",
+          "agent_type": "general-purpose"}
+_out191 = {}
+
+
+def _g191(name, blank=None):
+    """The mechanism, or one FAIL and a stand-in - red on the code before
+    it, never a traceback that takes the rest of the case (as _g183)."""
+    fn = getattr(daemon, name, None)
+    if fn is not None:
+        return fn
+    check("the package has daemon.%s" % name, False, True)
+    return lambda *a, **k: blank
+
+
+def _stop191(tag, text, tasks, verdict="continue",
+             words="releasing the executor for the next step of this case",
+             p=None, sid=None):
+    """One executor turn of pair `p` (this case's by default) ends with
+    this Stop and this list. Gives back whether its report reached the
+    planner's queue - answered `verdict` there, so the hook lets go.
+    Cases 192 and 193 end their executors' turns with it too."""
+    p = p or _p191
+    k = canon(p)
+    ev = {"hook_event_name": "Stop", "role": "executor",
+          "session_id": sid or _s191, "project_dir": p, "cwd": p,
+          "last_assistant_message": text, "background_tasks": tasks}
+    _t = threading.Thread(
+        target=lambda: _out191.__setitem__(tag, post("/event", ev)),
+        daemon=True)
+    _t.start()
+    until(lambda: k in daemon.PENDING or not _t.is_alive(), 25)
+    carried = k in daemon.PENDING
+    if carried:
+        post("/verdict", {"project": p, "verdict": verdict,
+                          "feedback": "Checked: seen191.txt\n" + words},
+             secret=True)
+    _t.join(40)
+    check("(%s) precondition: the Stop hook has its answer" % tag,
+          _t.is_alive(), False)
+    return carried
+
+
+def _said191(words, p=None):
+    return [r.get("text") or "" for r in daemon.store.recent_events(
+        800, project=p or _p191) if words in (r.get("text") or "")]
+
+
+def _held191(p=None):
+    return list((daemon.STATE.get("bg_held") or {}).get(canon(p or _p191))
+                or [])
+
+
+_ih191 = daemon.CFG.setdefault("thresholds", {}).get("idle_hold", _NO191)
+daemon.CFG["thresholds"]["idle_hold"] = 0
+try:
+    print("   (a) a turn ends with only the subscription running: the report")
+    print("   goes to the planner at once")
+    check("(a) precondition: nothing waits for the planner",
+          _k191 in daemon.PENDING, False)
+    _ca191 = _stop191("a", "The piece is in; the artifact's live view stays "
+                           "open.", [_SUB191], "wait",
+                      "Waiting for the person's answer on the roof.")
+    check("(a) carried, and nothing held", (_ca191, _held191()), (True, []))
+    check("(a) and no line of a hold", len(_said191("held, not carried")), 0)
+
+    print("   (a2) the planner answered it `wait`: the subscription is not")
+    print("   work going, so the pair is parked like any other")
+    _la191 = _said191("never end by themselves")
+    check("(a2) the journal says the listed task was not counted, naming it",
+          (len(_la191), bool(_la191) and "monitor s191subs1" in _la191[0]),
+          (1, True))
+    check("(a2) and no line of a running task (8.137)",
+          len(_said191("Stop listed 1 running task")), 0)
+    check("(a2) the pair is parked on its planner's wait",
+          bool((daemon.STATE.get("waiting_on_you") or {}).get(_k191)), True)
+    with daemon._lock:
+        for _c in ("waiting_on_you", "calls"):
+            (daemon.STATE.get(_c) or {}).pop(_k191, None)
+        daemon.save_state()
+
+    print("   (b) CONTROL: the subscription and a background command - held,")
+    print("   naming the command and not the subscription")
+    _cb191 = _stop191("b", "The soak runs; nothing else is left.",
+                      [_SUB191, _SH191])
+    _hb191 = _held191()
+    _rb191 = (_hb191[0].get("running") or "") if _hb191 else ""
+    check("(b) held", (_cb191, len(_hb191)), (False, 1))
+    check("(b) naming the command, not the subscription",
+          ("shell b191soak1 (soak the import" in _rb191,
+           "s191subs1" in _rb191), (True, False))
+
+    print("   (c) the next turn ends with the subscription alone: carried,")
+    print("   and the held report goes with it")
+    _cc191 = _stop191("c", "The soak is through.", [_SUB191])
+    check("(c) carried, nothing held any more", (_cc191, _held191()),
+          (True, []))
+    check("(c) the held report rode with it",
+          len(_said191("held while the executor's background ran")), 1)
+
+    print("   (d) what ends by itself, asked of the list: the command and the")
+    print("   agent - not the subscription, not a type nobody has seen")
+    _se191 = _g191("self_ending", [])
+    _odd191 = {"id": "x191odd", "type": "teammate", "status": "running"}
+    check("(d) of five entries, the two that end by themselves",
+          _se191([_SUB191, _SH191, _odd191, _AG191, "junk"]),
+          [_SH191, _AG191])
+    check("(d) what runs, in words, with only the subscription listed: "
+          "nothing",
+          daemon.bg_running_now(_p191, {"background_tasks": [_SUB191]}), "")
+    _rd191 = daemon.bg_running_now(_p191, {"background_tasks": [
+        _SUB191, _AG191, _odd191]})
+    check("(d) with the agent beside it: the agent alone",
+          ("subagent a191agent0000001" in _rd191, "s191subs1" in _rd191,
+           "x191odd" in _rd191), (True, False, False))
+finally:
+    if _ih191 is _NO191:
+        daemon.CFG["thresholds"].pop("idle_hold", None)
+    else:
+        daemon.CFG["thresholds"]["idle_hold"] = _ih191
+    getattr(daemon, "BG_HELD_TRIED", {}).pop(_k191, None)
+    with daemon._lock:
+        for _c in ("waiting_on_you", "inflight", "bg_held", "bg_red", "note",
+                   "calls", "handover"):
+            (daemon.STATE.get(_c) or {}).pop(_k191, None)
+        daemon.save_state()
+post_rc("/loop", {"action": "stop", "project": _p191})
+post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n192. a planner that owes nothing is not nudged: not while the bridge")
+print("     holds its executor's reports, not after its own `wait`")
+print("    stalled() named three conditions in its docstring - (a) the half")
+print("    owes something - and never read (a). 2026-10-17: a watched")
+print("    project's planner answered `wait` on report 201 at 02:36:04 and")
+print("    was nudged 'about the piece you are holding' at 02:58:32 and")
+print("    03:13:34 ('I hold nothing'); another's four times while the bridge")
+print("    itself held its executor's reports (8.152). The planner owes when")
+print("    a report reached it and has had no answer since, or when its own")
+print("    turn is open (planner_owes); the executor's half is unchanged.")
+print("    FAILURE WOULD LOOK LIKE: a nudge in the planner's channel with")
+print("    nothing owed, or none with a report unanswered. -> 8.154")
+_p192 = os.path.join(TMP, "owes-192")
+os.makedirs(_p192, exist_ok=True)
+_k192 = canon(_p192)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p192: {
+    "silence_minutes": 0.05}}})
+_ex192, _pl192 = "owes192-ex", "owes192-pl"
+for _r, _sid in (("executor", _ex192), ("planner", _pl192)):
+    post_rc("/event", {"hook_event_name": "SessionStart", "role": _r,
+                       "session_id": _sid, "project_dir": _p192,
+                       "cwd": _p192})
+    register(_p192, _r, _sid)
+with open(os.path.join(_p192, "seen191.txt"), "w", encoding="utf-8") as _f:
+    _f.write("read" + chr(10))
+_gex192 = DELIVERED.setdefault((_k192, "executor"), [])
+_gpl192 = DELIVERED.setdefault((_k192, "planner"), [])
+_thr192 = dict(daemon.CFG.get("thresholds") or {})
+daemon.CFG["thresholds"].update({"review_timeout": 60,
+                                 "channel_silence_warn": 50, "idle_hold": 0,
+                                 "clinch_grace": 900, "stall_quiet": 60})
+_HOLD192 = "the piece you are holding"
+# The planner's transcript, which stalled() reads: a turn that answered and
+# ended, written twenty minutes ago - the record transcript_frozen keeps of
+# its last write says so
+_tpl192 = os.path.join(TMP, "pl192.jsonl")
+_tof192 = daemon.sessions.transcript_of
+daemon.sessions.transcript_of = (lambda sid, cwd=None: _tpl192
+                                 if sid == _pl192 else _tof192(sid, cwd))
+
+
+def _turn192(state):
+    rows = [{"type": "user", "message": {"content": "report"},
+             "timestamp": "2026-10-17T02:35:58.000Z"},
+            {"type": "assistant", "timestamp": "2026-10-17T02:36:03.000Z",
+             "message": {"content": [{"type": "text", "text": "wait"}]}}]
+    if state == "closed":
+        rows.append({"type": "system", "subtype": "turn_duration",
+                     "timestamp": "2026-10-17T02:36:05.000Z"})
+    with open(_tpl192, "w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+    with daemon._lock:
+        daemon.STATE.setdefault("tscript", {})["%s|planner" % _k192] = {
+            "size": os.path.getsize(_tpl192), "at": time.time() - 1200,
+            "sid": _pl192}
+        daemon.save_state()
+
+
+def _status192(role, sid, p=None):
+    p = p or _p192
+    post("/status", {"role": role, "payload": {
+        "session_id": sid,
+        "workspace": {"current_dir": p, "project_dir": p},
+        "model": {"display_name": "Opus 5 (1M context)",
+                  "id": "claude-opus-5"},
+        "context_window": {
+            "context_window_size": 1000000, "used_percentage": 20.0,
+            "current_usage": {"input_tokens": 10,
+                              "cache_creation_input_tokens": 90,
+                              "cache_read_input_tokens": 199900,
+                              "output_tokens": 100}}}})
+
+
+def _tick192(p=None, ex=None, pl=None):
+    """The latches cleared, both halves seen, past the 3 s quiet, the real
+    assess(). Returns what it saw and what reached each half while it ran
+    and in the 3 s after - a negative outlives what it denies (as 187).
+    Case 193 ticks its own pair with it."""
+    p, ex, pl = p or _p192, ex or _ex192, pl or _pl192
+    k = canon(p)
+    gex = DELIVERED.setdefault((k, "executor"), [])
+    gpl = DELIVERED.setdefault((k, "planner"), [])
+    with daemon._lock:
+        for _k in list(daemon.STATE):
+            if _k.startswith("acted:") and k in _k.lower():
+                daemon.STATE.pop(_k, None)
+        daemon.save_state()
+    _status192("executor", ex, p)
+    _status192("planner", pl, p)
+    time.sleep(4.0)
+    be, bp = len(gex), len(gpl)
+    saw = daemon.assess(p).get("saw") or ""
+    until(lambda: len(gex) > be or len(gpl) > bp, 3)
+    return saw, gex[be:], gpl[bp:]
+
+
+def _nudges192(got):
+    return [body_of(d.get("content") or "") for d in got
+            if "Nothing has been written in this window"
+            in body_of(d.get("content") or "")]
+
+
+_owes192 = _g191("planner_owes", "")
+try:
+    post_rc("/loop", {"action": "start", "project": _p192})
+    _turn192("closed")
+    print("   (a) the bridge holds the executor's report while its background")
+    print("   runs, and the planner's turn has ended: the planner owes nothing")
+    _ca192 = _stop191("192a", "The soak runs; nothing else is left.",
+                      [_SH191], p=_p192, sid=_ex192)
+    check("(a) precondition: held, not carried",
+          (_ca192, len(_held191(_p192))), (False, 1))
+    check("(a) the planner owes nothing", _owes192(_p192), "")
+    _saw192, _ge192, _gp192 = _tick192()
+    check("(a) nothing reached the planner", len(_gp192), 0)
+    check("(a) and the tick names the held report, past stalled()",
+          "report the bridge holds" in _saw192, True)
+
+    print("   (b) the held report carried and answered `wait`, nothing")
+    print("   running: the pair parked, the planner's turn ended - two ticks,")
+    print("   fourteen minutes apart in life, neither nudges it")
+    _cb192 = _stop191("192b", "The soak is through; the roof is the "
+                              "person's.", [], "wait",
+                      "Waiting for the person's answer on the roof.",
+                      p=_p192, sid=_ex192)
+    _turn192("closed")
+    check("(b) precondition: carried, and the pair is parked on the wait",
+          (_cb192, bool(daemon.parked_on_you(_p192))), (True, True))
+    check("(b) the planner owes nothing", _owes192(_p192), "")
+    for _i192 in (1, 2):
+        _saw192, _ge192, _gp192 = _tick192()
+        check("(b) tick %d: nothing reached the planner" % _i192,
+              len(_gp192), 0)
+        check("(b) tick %d: the tick names the parking" % _i192,
+              "parked on its planner's wait" in _saw192, True)
+    check("(b) and no stall line in the journal for the planner",
+          len(_said191("work owed - nudging it", _p192)), 0)
+
+    print("   (c) CONTROL: a report that reached it and has no answer since:")
+    print("   nudged, and told which")
+    with daemon._lock:
+        _rs192 = dict((daemon.STATE.get("report_sent") or {}).get(_k192)
+                      or {})
+        daemon.STATE.setdefault("report_sent", {})[_k192] = {
+            "n": 919, "at": time.time(), "made": time.time()}
+    try:
+        _saw192, _ge192, _gp192 = _tick192()
+        _nc192 = _nudges192(_gp192)
+        check("(c) one nudge reached the planner, owing report 919",
+              (len(_nc192), bool(_nc192) and "an answer to report 919"
+               in _nc192[0]), (1, True))
+    finally:
+        with daemon._lock:
+            daemon.STATE.setdefault("report_sent", {})[_k192] = _rs192
+            daemon.save_state()
+
+    print("   (d) CONTROL: its own turn open: nudged, about that turn")
+    _turn192("open")
+    _saw192, _ge192, _gp192 = _tick192()
+    _nd192 = _nudges192(_gp192)
+    check("(d) one nudge reached the planner, about its open turn",
+          (len(_nd192), bool(_nd192) and "the end of the turn you have open"
+           in _nd192[0]), (1, True))
+    check("(d) and no nudge in the whole case spoke of a piece it holds",
+          sum(_HOLD192 in body_of(d.get("content") or "") for d in _gpl192),
+          0)
+finally:
+    daemon.CFG["thresholds"] = _thr192
+    daemon.sessions.transcript_of = _tof192
+    getattr(daemon, "BG_HELD_TRIED", {}).pop(_k192, None)
+    with daemon._lock:
+        for _c in ("waiting_on_you", "inflight", "bg_held", "bg_red", "note",
+                   "calls", "handover"):
+            (daemon.STATE.get(_c) or {}).pop(_k192, None)
+        for _r in ("executor", "planner"):
+            for _c in ("tscript", "stall_nudged"):
+                (daemon.STATE.get(_c) or {}).pop("%s|%s" % (_k192, _r), None)
+        daemon.save_state()
+post_rc("/loop", {"action": "stop", "project": _p192})
+post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n193. the planner's `wait` with nothing running calls the person only")
+print("     after the executor's own silence, never at the wait")
+print("    2026-10-17, a watched project: report 201 at 02:35:56, the")
+print("    planner's `wait` at 02:36:04 - the series renders in a queue on")
+print("    the other machine - and the person called that same second, 'the")
+print("    planner is waiting on YOU - nothing is running'. The bridge sees")
+print("    no such queue. The planner's word is trusted: the pair parks at")
+print("    the wait, and the call waits until the executor - its Stop")
+print("    counted, its turn ended, nothing tracked running - has written")
+print("    nothing for executor_hang (1800 s, configurable), counted from")
+print("    the wait. FAILURE WOULD LOOK LIKE: a call at the wait, before the")
+print("    Stop, in an open turn, inside the silence, or a second call.")
+print("    -> 8.154")
+_p193 = os.path.join(TMP, "parked-193")
+os.makedirs(_p193, exist_ok=True)
+_k193 = canon(_p193)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _p193: {
+    "silence_minutes": 0.05}}})
+_ex193, _pl193 = "park193-ex", "park193-pl"
+for _r, _sid in (("executor", _ex193), ("planner", _pl193)):
+    post_rc("/event", {"hook_event_name": "SessionStart", "role": _r,
+                       "session_id": _sid, "project_dir": _p193,
+                       "cwd": _p193})
+    register(_p193, _r, _sid)
+with open(os.path.join(_p193, "seen191.txt"), "w", encoding="utf-8") as _f:
+    _f.write("read" + chr(10))
+_thr193 = dict(daemon.CFG.get("thresholds") or {})
+daemon.CFG["thresholds"].update({"review_timeout": 60,
+                                 "channel_silence_warn": 50, "idle_hold": 0,
+                                 "clinch_grace": 900, "executor_hang": 60})
+_WORDS193 = "The series renders in the queue there; wait for it."
+_CALLED193 = "the person is called, once (8.154)"
+# the executor's transcript, which the call is decided from
+_tex193 = os.path.join(TMP, "ex193.jsonl")
+_tof193 = daemon.sessions.transcript_of
+daemon.sessions.transcript_of = (lambda sid, cwd=None: _tex193
+                                 if sid == _ex193 else _tof193(sid, cwd))
+
+
+def _turn193(state):
+    rows = [{"type": "user", "message": {"content": "the task"},
+             "timestamp": "2026-10-17T02:30:00.000Z"},
+            {"type": "assistant", "timestamp": "2026-10-17T02:35:50.000Z",
+             "message": {"content": [{"type": "text", "text": "queued"}]}}]
+    if state == "closed":
+        rows.append({"type": "system", "subtype": "turn_duration",
+                     "timestamp": "2026-10-17T02:35:56.000Z"})
+    with open(_tex193, "w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+
+
+def _quiet193(wait_ago, wrote_ago):
+    """The wait made `wait_ago` seconds back, the executor's transcript last
+    written `wrote_ago` back - the record transcript_frozen keeps."""
+    with daemon._lock:
+        rec = (daemon.STATE.get("waiting_on_you") or {}).get(_k193)
+        if isinstance(rec, dict):
+            rec["since"] = time.time() - wait_ago
+        daemon.STATE.setdefault("tscript", {})["%s|executor" % _k193] = {
+            "size": os.path.getsize(_tex193), "at": time.time() - wrote_ago,
+            "sid": _ex193}
+        daemon.save_state()
+
+
+def _rec193():
+    return (daemon.STATE.get("waiting_on_you") or {}).get(_k193)
+
+
+# a person is called at notify: every call passed on unchanged, this pair's
+# needs_you counted with what it said
+_rn193, _rang193 = daemon.notify, []
+
+
+def _note193(kind, text, *a, **kw):
+    _pa = kw.get("path", a[2] if len(a) > 2 else None)
+    if _pa and canon(_pa) == _k193 and kind == "needs_you":
+        _rang193.append(text)
+    return _rn193(kind, text, *a, **kw)
+
+
+_pass193 = _g191("parked_call_pass", None)
+try:
+    daemon.notify = _note193
+    post_rc("/loop", {"action": "start", "project": _p193})
+    _turn193("closed")
+    print("   (a) a report, the planner's `wait`, nothing running: the pair is")
+    print("   parked and nobody is called")
+    _ca193 = _stop191("193a", "The series is queued on the other machine.",
+                      [], "wait", _WORDS193, p=_p193, sid=_ex193)
+    check("(a) precondition: carried and answered wait",
+          (_ca193, ((daemon.STATE.get("last_verdict") or {}).get(_k193)
+                    or {}).get("v")), (True, "wait"))
+    check("(a) nobody was called at the wait", len(_rang193), 0)
+    check("(a) the pair is parked, its record not called yet",
+          (bool(daemon.parked_on_you(_p193)),
+           (_rec193() or {}).get("called", "absent")), (True, 0))
+    check("(a) the journal says when the person would be called",
+          len(_said191("the person is called only if the executor then "
+                       "writes nothing for 1 min", _p193)), 1)
+    check("(a) a report made now still waits for the background: the "
+          "parking is no reason to carry it before the call",
+          daemon.carry_now_why(_p193, "the next report"), "")
+    _saw193 = _tick192(_p193, _ex193, _pl193)[0]
+    check("(a) the tick names the parking, the person not called yet",
+          "the person not called yet" in _saw193, True)
+
+    print("   (b) the guards, each with the wait and the transcript three")
+    print("   minutes still - past executor_hang - and one thing missing")
+    _now193 = time.time()
+    _ss193 = "%s|executor" % _k193
+    with daemon._lock:
+        _sw193 = (daemon.STATE.get("stop_seen") or {}).pop(_ss193, None)
+    _quiet193(200, 200)
+    _pass193()
+    check("(b) PRECONDITION: the Stop was counted", bool(_sw193), True)
+    check("(b) before the executor's Stop: not called", len(_rang193), 0)
+    with daemon._lock:
+        daemon.STATE.setdefault("stop_seen", {})[_ss193] = _sw193
+        daemon.save_state()
+    _turn193("open")
+    _quiet193(200, 200)
+    _pass193()
+    check("(b) the executor's turn open: not called", len(_rang193), 0)
+    _turn193("closed")
+    daemon.PROCTRACK.setdefault(_k193, {})["sig193"] = {
+        "cmd": "render the series", "started": time.time(),
+        "role": "executor"}
+    try:
+        _quiet193(200, 200)
+        _pass193()
+        check("(b) a tracked command running: not called", len(_rang193), 0)
+    finally:
+        daemon.PROCTRACK.pop(_k193, None)
+    _quiet193(200, 30)
+    _pass193()
+    check("(b) the transcript written 30 s ago: not called",
+          len(_rang193), 0)
+    _quiet193(30, 200)
+    _pass193()
+    check("(b) the wait itself 30 s ago - counted from the wait: not called",
+          len(_rang193), 0)
+    check("(b) and the record is still not called",
+          (_rec193() or {}).get("called", "absent"), 0)
+
+    print("   (c) all of it: the person is called, once, with the planner's")
+    print("   words")
+    _quiet193(200, 200)
+    _pass193()
+    check("(c) called once", len(_rang193), 1)
+    check("(c) saying the wait and the silence, with the planner's words",
+          (bool(_rang193) and "the planner is waiting on YOU" in _rang193[0],
+           bool(_rang193) and "has written nothing for 3 min"
+           in _rang193[0], bool(_rang193) and _WORDS193 in _rang193[0]),
+          (True, True, True))
+    check("(c) the record says when", float((_rec193() or {}).get("called")
+                                            or 0) >= _now193, True)
+    check("(c) the journal says so once",
+          len(_said191(_CALLED193, _p193)), 1)
+    check("(c) from now on a report goes to the planner at once",
+          daemon.carry_now_why(_p193, "the next report"),
+          "the pair is parked on a person")
+    _saw193 = _tick192(_p193, _ex193, _pl193)[0]
+    check("(c) and the tick names the pair parked on its person",
+          ("parked on you since" in _saw193, "not woken (8.153)" in _saw193),
+          (True, True))
+
+    print("   (d) the next pass, and the next: no second call")
+    _quiet193(400, 400)
+    _pass193()
+    _pass193()
+    check("(d) still one call", (len(_rang193),
+                                len(_said191(_CALLED193, _p193))), (1, 1))
+
+    print("   (e) a record written before 8.154 has no `called`: it was")
+    print("   called at its wait, and is not called again")
+    with daemon._lock:
+        daemon.STATE["waiting_on_you"][_k193] = {"since": time.time() - 400,
+                                                 "why": "the old form"}
+        daemon.save_state()
+    _pass193()
+    check("(e) not called again", len(_rang193), 1)
+    check("(e) and read as called", daemon.carry_now_why(_p193, "next"),
+          "the pair is parked on a person")
+    check("(e) the pass runs where the bridge watches its sessions",
+          "parked_call_pass()" in inspect.getsource(daemon.session_watch),
+          True)
+finally:
+    daemon.notify = _rn193
+    daemon.CFG["thresholds"] = _thr193
+    daemon.sessions.transcript_of = _tof193
+    daemon.PROCTRACK.pop(_k193, None)
+    with daemon._lock:
+        for _c in ("waiting_on_you", "inflight", "bg_held", "bg_red", "note",
+                   "calls", "handover"):
+            (daemon.STATE.get(_c) or {}).pop(_k193, None)
+        for _r in ("executor", "planner"):
+            for _c in ("tscript", "stall_nudged"):
+                (daemon.STATE.get(_c) or {}).pop("%s|%s" % (_k193, _r), None)
+        daemon.save_state()
+post_rc("/loop", {"action": "stop", "project": _p193})
+post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n194. a call nobody answers is said again - a dialog, and the pair held")
+print("     for its reports - home and to the Mac's notification, at most once")
+print("     in call_repeat, never with a sound")
+print("    2026-10-16 on the PC, a watched project: its planner stood on a")
+print("    permission dialog (to use Artifact) from 21:13 to 09:32. The bridge")
+print("    saw it within a second and said it six times - all silent, all")
+print("    before 22:24 - and reports 5009-5033 stood the night without a")
+print("    verdict. FAILURE WOULD LOOK LIKE: one saying and then nothing for")
+print("    hours, a repeat on every pass, a repeat to the planner that is the")
+print("    one asking, a sound, or a repeat after the answer. -> 8.154")
+_a194 = os.path.join(TMP, "again-a")
+_h194 = os.path.join(TMP, "again-h")
+for _d194 in (_a194, _h194):
+    os.makedirs(_d194, exist_ok=True)
+_ka194, _kh194 = daemon.norm(_a194), daemon.norm(_h194)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _a194: {}, _h194: {}}})
+_pass194 = getattr(daemon, "calls_pass", lambda now_ts=None: None)
+_crs194 = _g191("call_repeat_sec", 0)
+_dx194 = daemon.deliver_ex
+_mac194 = (getattr(daemon, "IS_MAC", None), getattr(daemon, "MAC_NOTIFY", None),
+           daemon.CFG.get("mac_notify"), daemon.CFG.get("home_pair"))
+_tg194 = dict(daemon.CFG.get("telegram") or {})
+_thr194 = dict(daemon.CFG.get("thresholds") or {})
+_un194 = dict(daemon.STATE.get("unanswered") or {})
+_to194, _notes194 = [], []
+
+
+def _deliver194(path, role, content, meta):
+    _to194.append((daemon.norm(path), role, content))
+    return True, "ok"
+
+
+def _told194(tag):
+    """(pair, role) of each delivery naming `tag` - this case's pairs only:
+    a call an earlier case left is delivered by whichever pass comes next."""
+    return sorted((p, r) for p, r, c in _to194
+                  if tag in c and p in (_ka194, _kh194))
+
+
+def _again194(n):
+    return [c for p, r, c in _to194
+            if p in (_ka194, _kh194) and "said again, %d)" % n in c]
+
+
+def _said194(words):
+    return [r.get("text") or "" for r in daemon.store.recent_events(600)
+            if words in (r.get("text") or "")
+            and "again-a" in (r.get("text") or "")]
+
+
+def _reset194():
+    # mac_notify counts by the clock - one a pair in ten minutes - and this
+    # case moves only calls_pass's: its count goes between steps
+    del _to194[:]
+    del _notes194[:]
+    with daemon._lock:
+        del getattr(daemon, "MAC_NOTE_TIMES", [])[:]
+        getattr(daemon, "MAC_NOTE_HELD", {}).clear()
+
+
+def _ask194(role, tool):
+    daemon.note_permission_ask(_a194, role, "Claude needs your permission to "
+                               "use %s" % tool, "permission_prompt", tool=tool)
+    daemon.tell_permission_ask(_a194, role, "report 5010 is waiting behind it")
+
+
+def _book194():
+    return dict((daemon.STATE.get("calls") or {}).get(_ka194) or {})
+
+
+daemon.deliver_ex = _deliver194
+daemon.IS_MAC = True
+daemon.MAC_NOTIFY = lambda argv: _notes194.append(list(argv))
+try:
+    # no chat, memory AND disk (as case 178): the first saying goes past
+    # the chat to the home planner
+    daemon.CFG["telegram"] = {"token": "", "chat_id": "",
+                              "pinned_message_id": 0}
+    with open(store.CONFIG_PATH, encoding="utf-8") as fh:
+        _disk194 = json.load(fh)
+    _disk194["telegram"] = dict(daemon.CFG["telegram"])
+    with open(store.CONFIG_PATH, "w", encoding="utf-8") as fh:
+        json.dump(_disk194, fh)
+    tg_reset()
+    daemon.CFG["mac_notify"] = True
+    daemon.CFG["home_pair"] = _h194
+    daemon.CFG["thresholds"].pop("call_repeat", None)
+    print("   (a) call_repeat is 30 min unless the thresholds say otherwise")
+    check("(a) the default", _crs194(), 1800.0)
+
+    print("   (b) A's planner on a dialog: said once after the hold - to H's")
+    print("   planner and the notification, A's planner being the one asking")
+    _reset194()
+    _ask194("planner", "Artifact")
+    _t194 = time.time()
+    _pass194(_t194 + 60)
+    check("(b) the first saying: H's planner, one notification",
+          (_told194("permission"), len(_notes194)), ([(_kh194, "planner")], 1))
+
+    print("   (c) 29 min after it: nothing")
+    _reset194()
+    _pass194(_t194 + 60 + 1740)
+    check("(c) nothing within call_repeat",
+          (_told194("permission"), len(_notes194)), ([], 0))
+
+    print("   (d) 30 min after it: said again - H's planner, the notification,")
+    print("   the panel without a sound - and not to the planner asking")
+    _pass194(_t194 + 60 + 1800)
+    _ag194 = _again194(1)
+    check("(d) H's planner once, the dialog in it",
+          (_told194("permission"), len(_ag194),
+           bool(_ag194) and "to use Artifact" in _ag194[0]),
+          ([(_kh194, "planner")], 1, True))
+    check("(d) one notification, no sound in it",
+          (len(_notes194), any("sound" in " ".join(_x).lower()
+                               for _x in _notes194)), (1, False))
+    check("(d) the panel has it, without a sound",
+          [_x.get("sound") for _x in daemon.PANEL_ALERTS
+           if _x.get("path") == _ka194
+           and "said again, 1)" in (_x.get("text") or "")], [False])
+    check("(d) the journal says it, once", len(_said194("said again (1)")), 1)
+
+    print("   (e) the next pass and one 15 min on: nothing; 30 min on: the")
+    print("   second")
+    _reset194()
+    _pass194(_t194 + 60 + 1801)
+    _pass194(_t194 + 60 + 2700)
+    check("(e) nothing between", (_told194("permission"), len(_notes194)),
+          ([], 0))
+    _pass194(_t194 + 60 + 3600)
+    check("(e) the second saying", (len(_again194(2)), len(_notes194)), (1, 1))
+
+    print("   (f) the dialog answered: closed, never said again")
+    daemon.end_permission_ask(_a194, "planner", "case 194")
+    _reset194()
+    _pass194(_t194 + 60 + 9000)
+    check("(f) nothing after the answer",
+          (_told194("permission"), len(_notes194)), ([], 0))
+    check("(f) and the call is closed", "permission|planner" in _book194(),
+          False)
+
+    print("   (g) the pair held for K reports without a verdict: said at once,")
+    print("   as before; said again after call_repeat; a verdict closes it")
+    with daemon._lock:
+        daemon.STATE.setdefault("unanswered", {})[_ka194] = \
+            daemon.silence_limit() - 1
+        (daemon.STATE.get("last_verdict") or {}).pop(_ka194, None)
+    _reset194()
+    daemon.note_silence(_a194, "again-a", 5033)
+    _t194 = time.time()
+    check("(g) said at once: H's planner", _told194("answered nothing"),
+          [(_kh194, "planner")])
+    check("(g) and kept", "silence|planner" in _book194(), True)
+    _reset194()
+    _pass194(_t194 + 1700)
+    check("(g) nothing within call_repeat", _again194(1), [])
+    _pass194(_t194 + 1801)
+    _sg194 = _again194(1)
+    check("(g) said again to H's planner, once, naming the silence",
+          (_told194("answered nothing"), len(_sg194)),
+          ([(_kh194, "planner")], 1))
+    with daemon._lock:
+        daemon.STATE.setdefault("last_verdict", {})[_ka194] = {
+            "v": "continue", "at": time.time()}
+    _reset194()
+    _pass194(_t194 + 3602)
+    check("(g) a verdict: nothing more, the call closed",
+          (_again194(2), "silence|planner" in _book194()), ([], False))
+    check("(g) the line names the verdict",
+          len([_l for _l in _said194("(silence|planner) closed after")
+               if "a verdict reaching the bridge" in _l]), 1)
+
+    print("   (h) held again and resumed from the panel: closed, nothing said")
+    with daemon._lock:
+        daemon.STATE.setdefault("unanswered", {})[_ka194] = \
+            daemon.silence_limit()
+        (daemon.STATE.get("last_verdict") or {}).pop(_ka194, None)
+    daemon.note_silence(_a194, "again-a", 5034)
+    _t194 = time.time()
+    check("(h) precondition: kept", "silence|planner" in _book194(), True)
+    daemon.resume_project(_a194)
+    _reset194()
+    _pass194(_t194 + 1801)
+    check("(h) nothing said again, the call closed",
+          (_again194(1), "silence|planner" in _book194()), ([], False))
+
+    print("   (i) home is A itself and A's planner asks: no planner is told")
+    print("   again - the notification and the panel are left, and the line")
+    print("   says so")
+    daemon.CFG["home_pair"] = _a194
+    _ask194("planner", "Read")
+    _t194 = time.time()
+    _pass194(_t194 + 60)
+    _reset194()
+    _pass194(_t194 + 60 + 1800)
+    check("(i) no planner told, one notification",
+          (_told194("said again"), len(_notes194)), ([], 1))
+    check("(i) the line says the panel and the notification",
+          len(_said194("said again (1), to the panel and the Mac's "
+                        "notification;")), 1)
+    daemon.end_permission_ask(_a194, "planner", "case 194")
+    _pass194(_t194 + 60 + 1801)
+    daemon.CFG["home_pair"] = _h194
+
+    print("   (j) CONTROL: a call of a family said once - the report the")
+    print("   planner has not answered - is not said again")
+    _reset194()
+    daemon.notify("needs_you", "again-a: the planner has not answered report "
+                  "12 in 20 min. N194-J", path=_a194, about="planner",
+                  call=("report", 12))
+    _t194 = time.time()
+    _pass194(_t194 + 60)
+    check("(j) precondition: said once, to H's planner", _told194("N194-J"),
+          [(_kh194, "planner")])
+    _reset194()
+    _pass194(_t194 + 60 + 3600)
+    check("(j) not said again", _told194("N194-J"), [])
+    with daemon._lock:
+        (daemon.STATE.get("calls") or {}).pop(_ka194, None)
+
+    print("   (k) call_repeat 0: the executor's dialog is said once, and never")
+    print("   again")
+    daemon.CFG["thresholds"]["call_repeat"] = 0
+    _reset194()
+    _ask194("executor", "Bash")
+    _t194 = time.time()
+    _pass194(_t194 + 60)
+    check("(k) precondition: said once, to A's planner and H's",
+          _told194("permission"),
+          sorted([(_ka194, "planner"), (_kh194, "planner")]))
+    _reset194()
+    _pass194(_t194 + 60 + 7200)
+    check("(k) not said again", (_told194("permission"), len(_notes194)),
+          ([], 0))
+    daemon.end_permission_ask(_a194, "executor", "case 194")
+    _pass194(_t194 + 60 + 7201)
+finally:
+    daemon.deliver_ex = _dx194
+    daemon.IS_MAC, daemon.MAC_NOTIFY = _mac194[0], _mac194[1]
+    for _n194, _v194 in (("mac_notify", _mac194[2]), ("home_pair", _mac194[3])):
+        if _v194 is None:
+            daemon.CFG.pop(_n194, None)
+        else:
+            daemon.CFG[_n194] = _v194
+    daemon.CFG["telegram"] = _tg194
+    daemon.CFG["thresholds"] = _thr194
+    store.save_config(daemon.CFG)
+    _reset194()
+    with daemon._lock:
+        daemon.STATE["unanswered"] = _un194
+        for _c in ("paused", "last_verdict", "calls"):
+            (daemon.STATE.get(_c) or {}).pop(_ka194, None)
+        for _r in ("planner", "executor"):
+            (daemon.STATE.get("asks") or {}).pop("%s|%s" % (_ka194, _r), None)
+        daemon.save_state()
+post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n195. the walk of case 49 again, as the suite's LAST case: a")
 print("   container first filled after case 49 is walked too")
 print("   case 49 called itself LAST and stood at 49 of 177, so a container")
 print("   a later case fills first was never walked - and one missing from")
@@ -28248,7 +29066,8 @@ if TMUX_HOME:
           "are in its own folder, which goes with it (8.103)",
           (owntemp.tmux_left(TMUX_HOME, 5), os.environ.get("TMUX_TMPDIR")),
           ([], TMUX_HOME))
-    owntemp.finish(TMUX_HOME, bool(FAILED))
+    # passed or failed: a dead socket is no evidence (8.154)
+    owntemp.tmux_finish(TMUX_HOME, sessions.tmux_command())
 if FAILED:
     owntemp.finish(TMP, True)
 else:

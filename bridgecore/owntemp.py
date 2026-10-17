@@ -29,6 +29,7 @@ they make their folder, point BRIDGE_DATA into it, and only then import the
 modules that read BRIDGE_DATA.
 """
 
+import atexit
 import os
 import shutil
 import socket
@@ -97,10 +98,14 @@ def tmux_home():
     were there on a Mac by 2026-10-13 (DECISIONS 8.103). Made in /tmp,
     not in mkdtemp's usual place: a socket path binds only up to 104 bytes,
     and a Mac's temp folder is half of that before the label. None on
-    Windows, where a window is a console."""
+    Windows, where a window is a console.
+    Its end is tmux_finish, and that is registered at exit here too, so a
+    run that dies before its last line takes it along (8.154)."""
     if os.name == "nt":
         return None
-    return make("bt-", dir="/tmp")
+    path = make("bt-", dir="/tmp")
+    atexit.register(_tmux_finish_at_exit, path)
+    return path
 
 
 def tmux_left(path, wait=0.0):
@@ -165,6 +170,37 @@ def _tmux_listening(path):
         finally:
             s.close()
     return live
+
+
+def tmux_finish(path, tmux):
+    """A suite's last act for its tmux_home() folder: stop what still
+    answers in it (tmux_stop), then remove it - PASSED OR FAILED. Not
+    finish(): a dead socket is no evidence, and finish(failed=True) kept the
+    folder of every run that failed - every sabotage and red-before run,
+    which fail by design. 452 were in /tmp on a Mac by 2026-10-17, one a
+    sabotage, counted against three tallies (DECISIONS 8.154). Kept, and
+    said, only while a server still answers there: a folder is not taken
+    from under a live socket. True when it is gone, or was never made."""
+    if not path:
+        return True
+    if not owned(path):
+        return not os.path.exists(path)
+    tmux_stop(path, tmux)
+    live = tmux_left(path, 3.0)
+    if live:
+        print("the tmux folder is kept: a server still answers on %s in %s"
+              % (", ".join(live), path))
+        return False
+    ok, why = remove(path)
+    if not ok:
+        print("the tmux folder was not removed: %s" % why)
+    return ok
+
+
+def _tmux_finish_at_exit(path):
+    # quiet when the suite's own last line has removed it already
+    if owned(path):
+        tmux_finish(path, None)
 
 
 def finish(path, failed):

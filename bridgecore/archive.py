@@ -17,8 +17,9 @@
 """The map of the context archive.
 
 Raw transcripts are copied to ``bridge-logs/<date>/raw/<session-id>.jsonl``
-and pre-compaction copies to ``snapshots/``. After a few nights that is a
-folder of filenames that are session ids, and a session id answers nothing:
+and, at each compaction, to ``snapshots/`` - one copy of a session a day,
+the newest (8.155). After a few nights that is a folder of filenames that
+are session ids, and a session id answers nothing:
 which half of the pair wrote it, what it was asked to do, how big it got,
 where it compacted. This walks those folders and writes down what each file
 is - a per-date ``index.json``, a global ``map.json``, and ``MAP.md`` for a
@@ -658,6 +659,8 @@ THE ARCHIVE
 You are in the folder `bridge-logs`. It holds, per day:
   <date>/raw/<session-id>.jsonl        full transcripts, one line per event
   <date>/snapshots/<id>-<time>.jsonl   copies taken just before a compaction
+                                       (from 2026-10-17 on, only the newest
+                                       of each session that day)
   <date>/dialogue.md, dialogue/        readable per-iteration text
   <date>/handoff/                      what each session handed to its
                                        replacement

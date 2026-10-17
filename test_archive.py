@@ -561,6 +561,292 @@ try:
 finally:
     del archive.open
 
+print("\n14. one copy of a session a day at its compactions (DECISIONS.md 8.155)")
+print("    Until 2026-10-17 every compaction copied the whole transcript")
+print("    beside the copies before it, and the client only appends: n")
+print("    copies, each the start of the next - 2903 of 3117 on the PC that")
+print("    day, 113.56 GB. Every copy here is the bridge's own call, at the")
+print("    moment the case names; the opens are counted at store's own door")
+import builtins as _bi14                                  # noqa: E402
+import re                                                 # noqa: E402
+import time                                               # noqa: E402
+from bridgecore import store                              # noqa: E402
+PROJ14 = os.path.join(TMP, "proj14")
+TR14 = os.path.join(TMP, "client14")       # where the client keeps them
+os.makedirs(PROJ14)
+os.makedirs(TR14)
+TODAY14 = time.strftime("%Y-%m-%d")
+SNAP14 = os.path.join(PROJ14, "bridge-logs", TODAY14, "snapshots")
+A14 = "snap14-sess-a"     # not uuid-shaped: check_public reads any uuid as a
+B14 = "snap14-sess-b"     # session id of this machine
+C14 = "snap14-sess-c"
+_opens14, _old14 = [], []
+
+
+def _open14(file, mode="r", *a, **kw):
+    _opens14.append((os.path.basename(str(file)), mode))
+    return _bi14.open(file, mode, *a, **kw)
+
+
+def _doors14():
+    """The copies store opened to read, what it opened to write, a reset."""
+    read = sorted(n for n, md in _opens14 if re.match(r".*-\d{6}\.jsonl$", n)
+                  and not set(md) & set("wax+"))
+    wrote = [n for n, md in _opens14 if set(md) & set("wax+")]
+    del _opens14[:]
+    return read, wrote
+
+
+def _at14(hms):
+    t = time.localtime()
+    return time.mktime((t.tm_year, t.tm_mon, t.tm_mday, int(hms[:2]),
+                        int(hms[2:4]), int(hms[4:]), 0, 0, -1))
+
+
+def _tr14(sid):
+    return os.path.join(TR14, "%s.jsonl" % sid)
+
+
+def _snap14(sid, hms):
+    """The bridge's own call at the compaction, at hms of today."""
+    try:
+        return store.snapshot_transcript(PROJ14, sid, _tr14(sid),
+                                         when=_at14(hms))
+    except TypeError:
+        # the code before 8.155 takes no moment: it is called at the real
+        # one, a second apart, so that each copy has a name of its own
+        _old14.append(hms)
+        time.sleep(1.05)
+        return store.snapshot_transcript(PROJ14, sid, _tr14(sid))
+
+
+def _grow14(sid, rows, mode="a"):
+    with open(_tr14(sid), mode, encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+def _put14(path, data):
+    with open(path, "wb") as fh:
+        fh.write(data)
+
+
+def _bytes14(path):
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def _copies14(sid=None, folder=SNAP14):
+    """Every name in the folder, hidden ones too - or only sid's."""
+    names = sorted(os.listdir(folder)) if os.path.isdir(folder) else []
+    return [n for n in names if sid is None or n.startswith(sid)]
+
+
+def _n14(sid, hms):
+    return "%s-%s.jsonl" % (sid, hms)
+
+
+def _warns14():
+    """The snapshot warn lines of the project's own journal, today."""
+    store.flush_project_writes()
+    p = os.path.join(PROJ14, "bridge-logs", TODAY14, "events.jsonl")
+    rows = [json.loads(x) for x in (_bytes14(p) or b"").decode("utf-8")
+            .splitlines() if x.strip()]
+    return [r for r in rows if r.get("kind") == "snapshot"
+            and r.get("level") == "warn"]
+
+
+store.open = _open14
+try:
+    print("   a session compacting three times leaves ONE copy, the newest,")
+    print("   byte for byte the transcript at the last compaction")
+    _grow14(A14, [user("2026-08-05T10:00:00Z", "first a14"),
+                  assistant("2026-08-05T10:00:01Z")], "w")
+    _t14 = [_bytes14(_tr14(A14))]
+    _snap14(A14, "101010")
+    _doors14()
+    _grow14(A14, [user("2026-08-05T11:00:00Z", "second a14"),
+                  assistant("2026-08-05T11:00:01Z")])
+    _t14.append(_bytes14(_tr14(A14)))
+    _snap14(A14, "111111")
+    _r2, _w2 = _doors14()
+    _grow14(A14, [user("2026-08-05T12:00:00Z", "third a14"),
+                  assistant("2026-08-05T12:00:01Z")])
+    _t14.append(_bytes14(_tr14(A14)))
+    _p14 = _snap14(A14, "121212")
+    _r3, _w3 = _doors14()
+    _a14 = _n14(A14, "121212")
+    check("one copy is left, named for the last compaction", _copies14(A14),
+          [_a14])
+    check("and nothing else is in the folder - no part left behind",
+          _copies14(), [_a14])
+    check("it is the transcript byte for byte",
+          _bytes14(os.path.join(SNAP14, _a14)) == _t14[2], True)
+    check("and the call says where it is", _p14, os.path.join(SNAP14, _a14))
+
+    print("   the copy is filled under a hidden name and only then put in")
+    print("   place: no reader ever meets a copy half written")
+    check("what store opened to write at the 2nd and 3rd compaction",
+          _w2 + _w3, [".%s-111111.part" % A14, ".%s-121212.part" % A14])
+    print("   the copy each compaction superseded was written by this")
+    print("   process: its sum is the one noted then, and it is not read back")
+    check("no earlier copy was opened to read", _r2 + _r3, [])
+
+    print("   the readers see the session as before - the day, its index,")
+    print("   the map search is given - and as the three copies showed it")
+    check("archive.dates lists the day", archive.dates(PROJ14), [TODAY14])
+    check("store._day_names lists the day",
+          store._day_names(os.path.join(PROJ14, "bridge-logs")), [TODAY14])
+    _whole14 = archive.scan_file(_tr14(A14))
+    _ix14 = archive.build_date(PROJ14, TODAY14)
+    check("build_date indexes the one copy: the session, at its last "
+          "compaction, every turn of the transcript",
+          [(f["session_id"], f["taken_at"], f["kind"], f["path"], f["turns"],
+            f["first_at"], f["last_at"]) for f in _ix14["files"]],
+          [(A14, "121212", "snapshot", "%s/snapshots/%s" % (TODAY14, _a14),
+            _whole14["turns"], "2026-08-05T10:00:00Z",
+            "2026-08-05T12:00:01Z")])
+    PROJ14O = os.path.join(TMP, "proj14-before")
+    _o14 = os.path.join(PROJ14O, "bridge-logs", TODAY14, "snapshots")
+    os.makedirs(_o14)
+    for _h14, _d14 in zip(("101010", "111111", "121212"), _t14):
+        _put14(os.path.join(_o14, _n14(A14, _h14)), _d14)
+    archive.build(PROJ14)
+    archive.build(PROJ14O)
+    _m14 = json.load(open(os.path.join(PROJ14, "bridge-logs", "map.json"),
+                          encoding="utf-8"))
+    _m14o = json.load(open(os.path.join(PROJ14O, "bridge-logs", "map.json"),
+                           encoding="utf-8"))
+    _K14 = ("session_id", "role", "project", "first_at", "last_at",
+            "carried_tokens", "excerpt", "excerpt_source", "iterations")
+    check("the session's row in map.json is the one the three copies gave",
+          [{k: s.get(k) for k in _K14} for s in _m14["sessions"]],
+          [{k: s.get(k) for k in _K14} for s in _m14o["sessions"]])
+    check("and so are the map's dates", _m14["dates"], _m14o["dates"])
+    check("map.json gives search the copy's path",
+          [f["path"] for f in _m14["files"]],
+          ["%s/snapshots/%s" % (TODAY14, _a14)])
+    _md14 = _bytes14(os.path.join(PROJ14, "bridge-logs", "MAP.md")) or b""
+    check("and MAP.md, which search reads first, names it",
+          ("`%s`" % _a14).encode() in _md14, True)
+    print("   what changes is what the copies counted more than once: the")
+    print("   row's files and turns are the transcript's own, not a sum")
+    check("files and turns of the session",
+          [(s["files"], s["turns"]) for s in _m14["sessions"]],
+          [(1, _whole14["turns"])])
+
+    print("   a copy this process did not write - an older one in today's")
+    print("   folder - is READ to be proven a prefix; only the newest")
+    print("   earlier copy goes, and older ones and other days stay")
+    _past14 = os.path.join(PROJ14, "bridge-logs", "2026-08-01", "snapshots")
+    os.makedirs(_past14)
+    _grow14(B14, [user("2026-08-05T08:00:00Z", "first b14"),
+                  assistant("2026-08-05T08:00:01Z")], "w")
+    _b14 = _bytes14(_tr14(B14))
+    for _f14, _h14 in ((_past14, "235900"), (SNAP14, "080000"),
+                       (SNAP14, "090000")):
+        _put14(os.path.join(_f14, _n14(B14, _h14)), _b14)
+    _grow14(B14, [assistant("2026-08-05T09:30:00Z")])
+    _doors14()
+    _snap14(B14, "093000")
+    _rb14, _ = _doors14()
+    check("the newest earlier copy was read to prove it", _rb14,
+          [_n14(B14, "090000")])
+    check("and it is gone; the older one stays, and the new one is there",
+          _copies14(B14), [_n14(B14, "080000"), _n14(B14, "093000")])
+    check("the older one as it was",
+          _bytes14(os.path.join(SNAP14, _n14(B14, "080000"))) == _b14, True)
+    check("another day's copy as it was",
+          (_copies14(B14, _past14),
+           _bytes14(os.path.join(_past14, _n14(B14, "235900"))) == _b14),
+          ([_n14(B14, "235900")], True))
+
+    print("   an earlier copy that is NOT a prefix - the transcript was")
+    print("   rewritten - stays beside the new one, and the journal says so")
+    _grow14(C14, [user("2026-08-05T13:00:00Z", "first c14"),
+                  assistant("2026-08-05T13:00:01Z")], "w")
+    _snap14(C14, "130000")
+    _c14 = _bytes14(os.path.join(SNAP14, _n14(C14, "130000")))
+    _put14(_tr14(C14), _bytes14(_tr14(C14)).replace(b"first c14",
+                                                    b"FIRST c14"))
+    _grow14(C14, [assistant("2026-08-05T13:30:01Z")])
+    _w14 = len(_warns14())
+    _snap14(C14, "133000")
+    check("both copies stay", _copies14(C14),
+          [_n14(C14, "130000"), _n14(C14, "133000")])
+    check("the earlier one as it was", _c14 is not None and _bytes14(
+        os.path.join(SNAP14, _n14(C14, "130000"))) == _c14, True)
+    check("one warn line names both",
+          [(w["session"], (w.get("extra") or {}).get("kept"))
+           for w in _warns14()[_w14:]],
+          [(C14, [_n14(C14, "130000"), _n14(C14, "133000")])])
+    _hist14 = store.scan_project_history(PROJ14)
+    check("and the history carried from the project sees it, keyed to it",
+          ([d["day"] for d in _hist14["days"]], sorted(_hist14["paths"])),
+          ([TODAY14], [store.norm(PROJ14)]))
+
+    print("   a transcript cut shorter than the earlier copy: not a prefix")
+    _put14(_tr14(C14), _bytes14(_tr14(C14)).split(b"\n")[0] + b"\n")
+    _w14 = len(_warns14())
+    _snap14(C14, "134000")
+    check("all three stay", _copies14(C14),
+          [_n14(C14, "130000"), _n14(C14, "133000"), _n14(C14, "134000")])
+    check("and a warn line for it",
+          [(w.get("extra") or {}).get("kept") for w in _warns14()[_w14:]],
+          [[_n14(C14, "133000"), _n14(C14, "134000")]])
+
+    print("   two compactions in one second: a prefix is replaced in place,")
+    print("   and anything else takes the next free second")
+    _grow14(C14, [assistant("2026-08-05T13:40:01Z")])
+    _w14 = len(_warns14())
+    _snap14(C14, "134000")
+    check("the same three names", _copies14(C14),
+          [_n14(C14, "130000"), _n14(C14, "133000"), _n14(C14, "134000")])
+    _k14 = _bytes14(os.path.join(SNAP14, _n14(C14, "134000")))
+    check("the copy in place is the transcript now",
+          _k14 == _bytes14(_tr14(C14)), True)
+    check("and nothing was warned", _warns14()[_w14:], [])
+    _put14(_tr14(C14), _bytes14(_tr14(C14)).replace(b"FIRST c14",
+                                                    b"first c14"))
+    _snap14(C14, "134000")
+    check("a copy not a prefix is never written over: the next second",
+          _copies14(C14), [_n14(C14, "130000"), _n14(C14, "133000"),
+                           _n14(C14, "134000"), _n14(C14, "134001")])
+    check("the copy of 134000 as it was", _k14 is not None and _bytes14(
+        os.path.join(SNAP14, _n14(C14, "134000"))) == _k14, True)
+    check("and 134001 is the transcript",
+          _bytes14(os.path.join(SNAP14, _n14(C14, "134001")))
+          == _bytes14(_tr14(C14)), True)
+
+    print("   a copy changed since this process wrote it is read again, not")
+    print("   trusted from memory: the same size, another time")
+    _pa14 = os.path.join(SNAP14, _a14)
+    if _bytes14(_pa14) is None:
+        check("the copy of 121212 is there to be changed", False, True)
+    else:
+        _st14 = os.stat(_pa14)
+        _put14(_pa14, _bytes14(_pa14).replace(b"first a14", b"FIRST a14"))
+        os.utime(_pa14, ns=(_st14.st_atime_ns,
+                            _st14.st_mtime_ns + 2000000000))
+    _grow14(A14, [assistant("2026-08-05T12:59:59Z")])
+    _w14 = len(_warns14())
+    _doors14()
+    _snap14(A14, "125959")
+    _ra14, _ = _doors14()
+    check("the changed copy was read", _ra14, [_a14])
+    check("and, not a prefix now, it stays beside the new one",
+          _copies14(A14), [_a14, _n14(A14, "125959")])
+    check("with a warn line", len(_warns14()) - _w14, 1)
+    check("no part is left anywhere in the folder",
+          [n for n in _copies14() if not n.endswith(".jsonl")], [])
+    check("every copy was taken at the moment it was told (when=)", _old14,
+          [])
+finally:
+    del store.open
+
 check("nothing this run did reached past this machine: the fence was up, "
       "and it refused nothing (netfence.py, 8.142)",
       (netfence.up(), netfence.refused()), (True, []))

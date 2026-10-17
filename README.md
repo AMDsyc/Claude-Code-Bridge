@@ -499,26 +499,19 @@ running has to be available to them. It cannot be closed up and resold.
 
 Newest first. Short on purpose — what changed, not why in detail.
 
-**2026-10-17 — what is new since the night release of 2026-10-17 (f239596)**
+**2026-10-18 — what is new since the midday release of 2026-10-17 (8bd49dc)**
 
-- **A report is held only for work that ends by itself.** A background
-  command or helper still running holds a finished turn's report, as
-  before; a subscription the client lists that never ends - a live
-  artifact's updates - no longer does, and the report goes at once.
-- **A planner that owes nothing is not nudged.** The stall watch wakes a
-  planner for a report it has not answered or a turn of its own left
-  open - not for a report the bridge holds, and not again and again
-  after its `wait`.
-- **A `wait` parks the pair; the person is called later.** With nothing
-  running, the person is called once the executor has written nothing
-  for `executor_hang` after the wait, its turn ended - not at the wait
-  itself, and not while its work runs elsewhere.
-- **A call nobody answers is said again**: a permission dialog left
-  standing, and a pair held for its unanswered reports - at most once in
-  `call_repeat` (30 min), to the home planner, the Mac's notification
-  and the panel, never with a sound, until it is answered.
-- **The suites remove their tmux folder** passed or failed; it is kept,
-  and said, only while a server still answers in it.
+- **One pre-compaction copy of a session a day.** Before a compaction
+  the bridge still copies the session's transcript into the day's
+  `snapshots/`, now in 8 MiB pieces into a hidden `.part` that is
+  fsynced and renamed into place. The copy before it - the newest
+  earlier copy of the same session that day - is removed only when its
+  sha256 proves it a byte prefix of the new one; otherwise both stay
+  and a warn line in the project's journal names both. A failure is a
+  warn line, not silence.
+- **Other days are never touched**, so the archive map, search and
+  carried history still see every session of every day, and `map.json`
+  counts a session's transcript once.
 
 <!-- rule 36: the index's own lines, not the record -->
 Older entries, newest first, back to the first release of 2026-08-18:

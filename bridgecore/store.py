@@ -1774,20 +1774,167 @@ def iteration_file(project_dir, iteration, role, text):
         pass
 
 
-def snapshot_transcript(project_dir, session_id, transcript_path):
-    """Copy the transcript right before a compaction eats it."""
-    if not transcript_path or not os.path.exists(transcript_path):
-        return
-    base = project_log_dir(project_dir) or day_dir()
-    d = os.path.join(base, "snapshots")
-    os.makedirs(d, exist_ok=True)
+# What this process wrote into snapshots/, {norm(path): (bytes, mtime_ns,
+# sha256)}: the next compaction of the session proves that copy a prefix of
+# its own without reading it back - on a share that is the copy's whole size
+# again. A copy not here, or one whose size or time moved since, is read.
+_SNAP_SUMS = {}
+SNAP_CHUNK = 8 * 1024 * 1024
+
+
+def _snap_sum(path, size):
+    """sha256 of the copy at path, or None when it is not `size` bytes."""
+    st = os.stat(path)
+    if st.st_size != size:
+        return None
+    known = _SNAP_SUMS.get(norm(path))
+    if known and known[0] == st.st_size and known[1] == st.st_mtime_ns:
+        return known[2]
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while True:
+            b = fh.read(SNAP_CHUNK)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
+
+
+def _snap_remove(path):
+    """os.remove that survives a reader holding the copy for a moment."""
+    for attempt in range(REPLACE_TRIES):
+        try:
+            os.remove(path)
+            return
+        except OSError as exc:
+            last = attempt == REPLACE_TRIES - 1
+            if getattr(exc, "winerror", None) not in (5, 32) or last:
+                raise
+            time.sleep(REPLACE_WAIT * (attempt + 1))
+
+
+def _snap_warn(project_dir, session_id, text, extra):
     try:
-        dest = os.path.join(d, "%s-%s.jsonl"
-                            % (session_id or "s", time.strftime("%H%M%S")))
-        with open(transcript_path, "rb") as src, open(dest, "wb") as out:
-            out.write(src.read())
+        journal("snapshot", text, os.path.basename(project_dir or ""),
+                session_id or "", "warn", extra=extra, project_dir=project_dir)
     except Exception:
         pass
+
+
+def snapshot_transcript(project_dir, session_id, transcript_path, when=None):
+    """Copy the transcript right before a compaction eats it - and keep ONE
+    copy of the session a day, the newest.
+
+    The client only appends to a transcript, and until 2026-10-17 every
+    compaction copied it whole beside the copies before it: n compactions of
+    a session were n copies, each the start of the next. On the PC's four
+    pairs that day 2903 of 3117 copies were byte prefixes of a larger one,
+    113.56 GB of 125.98, growing 1.89 GB an hour. Now the fresh copy is
+    written under a hidden name and put in place by a rename, and the copy
+    it supersedes - the newest earlier one of this session in today's
+    snapshots/ - is removed only once it is PROVEN a byte prefix of the
+    fresh one: its sha256 against the sha256 of the fresh copy's first as
+    many bytes. Not a prefix - the transcript was rewritten, or cut - and
+    both stay, with a warn line naming both. Older copies and other days
+    are never touched, so every day still holds every session it held and
+    the name is the one archive.scan_file parses: archive.dates, _day_names,
+    build_date, the map and search see the session as before. `when` is the
+    moment the name carries (a test seam); the copy's path is returned, or
+    None. -> DECISIONS.md 8.155
+    """
+    if not transcript_path or not os.path.exists(transcript_path):
+        return None
+    sid = session_id or "s"
+    part = None
+    try:
+        base = project_log_dir(project_dir) or day_dir()
+        d = os.path.join(base, "snapshots")
+        os.makedirs(d, exist_ok=True)
+        mine = re.compile(r"^%s-\d{6}\.jsonl$" % re.escape(sid))
+        earlier = sorted(n for n in os.listdir(d) if mine.match(n))
+        prev, prev_size = None, -1
+        if earlier:
+            prev = os.path.join(d, earlier[-1])
+            try:
+                prev_size = os.path.getsize(prev)
+            except OSError:
+                prev = None
+        moment = time.localtime(when) if when is not None else time.localtime()
+        stamp = time.strftime("%H%M%S", moment)
+        part = os.path.join(d, ".%s-%s.part" % (sid, stamp))
+        h, head, done = hashlib.sha256(), None, 0
+        with open(transcript_path, "rb") as src, open(part, "wb") as out:
+            while True:
+                b = src.read(SNAP_CHUNK)
+                if not b:
+                    break
+                if head is None and done <= prev_size <= done + len(b):
+                    h.update(b[:prev_size - done])
+                    head = h.hexdigest()
+                    h.update(b[prev_size - done:])
+                else:
+                    h.update(b)
+                out.write(b)
+                done += len(b)
+            out.flush()
+            os.fsync(out.fileno())
+        if head is None and prev_size == done:
+            head = h.hexdigest()
+        whole = h.hexdigest()
+        try:
+            prev_sum = _snap_sum(prev, prev_size) if prev else None
+        except OSError:
+            prev, prev_sum = None, None     # gone meanwhile: none to supersede
+        prefix = head is not None and prev_sum == head
+        dest = os.path.join(d, "%s-%s.jsonl" % (sid, stamp))
+        in_place = prefix and norm(dest) == norm(prev)
+        if os.path.exists(dest) and not in_place:
+            # never over a copy that is not proven a prefix of this one
+            secs = (int(stamp[:2]) * 3600 + int(stamp[2:4]) * 60
+                    + int(stamp[4:]))
+            for i in range(1, 86400):
+                s = (secs + i) % 86400
+                dest = os.path.join(d, "%s-%02d%02d%02d.jsonl"
+                                    % (sid, s // 3600, s // 60 % 60, s % 60))
+                if not os.path.exists(dest):
+                    break
+        _replace_with_retry(part, dest)
+        part = None
+        st = os.stat(dest)
+        _SNAP_SUMS[norm(dest)] = (st.st_size, st.st_mtime_ns, whole)
+        if not prev or in_place:
+            return dest
+        names = [os.path.basename(prev), os.path.basename(dest)]
+        if not prefix:
+            _snap_warn(project_dir, session_id,
+                       "Snapshot %s kept beside %s: the earlier copy (%d "
+                       "bytes) is not a byte prefix of the new one (%d "
+                       "bytes) - the transcript was rewritten - so both "
+                       "stay." % (names[1], names[0], prev_size, done),
+                       {"kept": names, "earlier_bytes": prev_size,
+                        "earlier_sha256": prev_sum, "head_sha256": head,
+                        "bytes": done})
+            return dest
+        try:
+            _snap_remove(prev)
+            _SNAP_SUMS.pop(norm(prev), None)
+        except OSError as exc:
+            _snap_warn(project_dir, session_id,
+                       "Snapshot %s is in place, and the copy it supersedes, "
+                       "%s, could not be removed: %s" % (names[1], names[0],
+                                                         exc),
+                       {"kept": names})
+        return dest
+    except Exception as exc:
+        if part:
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+        _snap_warn(project_dir, session_id,
+                   "No snapshot of %s was taken before the compaction: %s"
+                   % (sid, exc), {"transcript": transcript_path})
+        return None
 
 
 def inbox_write(project_dir, iteration, text):

@@ -13,6 +13,27 @@ file before it and listed in `make_public.py`'s `EXTRA`, or it is never
 published.
 
 <!-- /rule 36 -->
+**2026-10-17 — what is new since the night release of 2026-10-17 (f239596)**
+
+- **A report is held only for work that ends by itself.** A background
+  command or helper still running holds a finished turn's report, as
+  before; a subscription the client lists that never ends - a live
+  artifact's updates - no longer does, and the report goes at once.
+- **A planner that owes nothing is not nudged.** The stall watch wakes a
+  planner for a report it has not answered or a turn of its own left
+  open - not for a report the bridge holds, and not again and again
+  after its `wait`.
+- **A `wait` parks the pair; the person is called later.** With nothing
+  running, the person is called once the executor has written nothing
+  for `executor_hang` after the wait, its turn ended - not at the wait
+  itself, and not while its work runs elsewhere.
+- **A call nobody answers is said again**: a permission dialog left
+  standing, and a pair held for its unanswered reports - at most once in
+  `call_repeat` (30 min), to the home planner, the Mac's notification
+  and the panel, never with a sound, until it is answered.
+- **The suites remove their tmux folder** passed or failed; it is kept,
+  and said, only while a server still answers in it.
+
 **2026-10-16 — what is new since the afternoon release of 2026-10-16 (34319a1)**
 
 - **The bridge carries the pairs' mailbox.** Pairs on two machines

@@ -4228,7 +4228,7 @@ def inventory_walk():
     inventory does not say, whether a prefixed top-level key was seen). The
     walk of case 49, a function since 132b: case 49 stood at 49 of 177 and
     called itself LAST, so a container first filled by a later case was
-    never walked - the suite's last case walks again (195)."""
+    never walked - the suite's last case walks again (198)."""
     unlisted, prefixed = [], False
     for name, v in sorted(daemon.STATE.items()):
         if name in getattr(daemon, "STATE_PATH_RECORDS", ()):
@@ -28845,7 +28845,9 @@ try:
     check("(e) nothing between", (_told194("permission"), len(_notes194)),
           ([], 0))
     _pass194(_t194 + 60 + 3600)
-    check("(e) the second saying", (len(_again194(2)), len(_notes194)), (1, 1))
+    check("(e) the second saying: the notification, and not H's planner, "
+          "which heard the first repeat (8.156, case 195)",
+          (len(_again194(2)), len(_notes194)), (0, 1))
 
     print("   (f) the dialog answered: closed, never said again")
     daemon.end_permission_ask(_a194, "planner", "case 194")
@@ -28973,7 +28975,398 @@ finally:
 post("/config", {"projects": {A: {}, B: {}, C: {}}})
 
 
-print("\n195. the walk of case 49 again, as the suite's LAST case: a")
+print("\n195. a call said again reaches the home planner ONCE - the first")
+print("     repeat; the Mac's notification and the panel hear every one")
+print("    2026-10-17, this bridge's own pair: a watched project's dialog,")
+print("    open from 17:33:30, was said again to the home planner every 30")
+print("    min - \"said again (5), to the panel and the home planner\" by")
+print("    20:05:05 - and each one woke a planner that could only pass it on.")
+print("    FAILURE WOULD LOOK LIKE: the home planner told on a second repeat,")
+print("    or the notification or the panel left out of one. -> 8.156")
+_a195 = os.path.join(TMP, "again-a195")
+_h195 = os.path.join(TMP, "again-h195")
+for _d195 in (_a195, _h195):
+    os.makedirs(_d195, exist_ok=True)
+_ka195, _kh195 = daemon.norm(_a195), daemon.norm(_h195)
+post("/config", {"projects": {A: {}, B: {}, C: {}, _a195: {}, _h195: {}}})
+_dx195 = daemon.deliver_ex
+_mac195 = (getattr(daemon, "IS_MAC", None), getattr(daemon, "MAC_NOTIFY", None),
+           daemon.CFG.get("mac_notify"), daemon.CFG.get("home_pair"))
+_tg195 = dict(daemon.CFG.get("telegram") or {})
+_thr195 = dict(daemon.CFG.get("thresholds") or {})
+_to195, _notes195 = [], []
+
+
+def _deliver195(path, role, content, meta):
+    _to195.append((daemon.norm(path), role, content))
+    return True, "ok"
+
+
+def _again195(n):
+    return sorted((p, r) for p, r, c in _to195
+                  if p in (_ka195, _kh195) and "said again, %d)" % n in c)
+
+
+def _panel195(n):
+    return len([_x for _x in daemon.PANEL_ALERTS
+                if _x.get("path") == _ka195
+                and "said again, %d)" % n in (_x.get("text") or "")])
+
+
+def _said195(n):
+    return [r.get("text") or "" for r in daemon.store.recent_events(600)
+            if "said again (%d)" % n in (r.get("text") or "")
+            and "again-a195" in (r.get("text") or "")]
+
+
+def _reset195():
+    # mac_notify counts by the clock, one a pair in ten minutes (as 194)
+    del _to195[:]
+    del _notes195[:]
+    with daemon._lock:
+        del getattr(daemon, "MAC_NOTE_TIMES", [])[:]
+        getattr(daemon, "MAC_NOTE_HELD", {}).clear()
+
+
+daemon.deliver_ex = _deliver195
+daemon.IS_MAC = True
+daemon.MAC_NOTIFY = lambda argv: _notes195.append(list(argv))
+try:
+    # no chat, memory AND disk (as 194)
+    daemon.CFG["telegram"] = {"token": "", "chat_id": "",
+                              "pinned_message_id": 0}
+    with open(store.CONFIG_PATH, encoding="utf-8") as fh:
+        _disk195 = json.load(fh)
+    _disk195["telegram"] = dict(daemon.CFG["telegram"])
+    with open(store.CONFIG_PATH, "w", encoding="utf-8") as fh:
+        json.dump(_disk195, fh)
+    tg_reset()
+    daemon.CFG["mac_notify"] = True
+    daemon.CFG["home_pair"] = _h195
+    daemon.CFG["thresholds"].pop("call_repeat", None)
+    _reset195()
+    daemon.note_permission_ask(_a195, "executor", "Claude needs your "
+                               "permission to use Bash", "permission_prompt",
+                               tool="Bash")
+    daemon.tell_permission_ask(_a195, "executor",
+                               "report 7 is waiting behind it")
+    _t195 = time.time()
+    daemon.calls_pass(_t195 + 60)
+    check("PRECONDITION: said once after the hold, to A's planner and H's",
+          sorted((p, r) for p, r, c in _to195
+                 if p in (_ka195, _kh195) and "permission" in c),
+          sorted([(_ka195, "planner"), (_kh195, "planner")]))
+    _got195 = []
+    for _n195 in (1, 2, 3):
+        _reset195()
+        daemon.calls_pass(_t195 + 60 + 1800 * _n195)
+        _got195.append((_again195(_n195), len(_notes195), _panel195(_n195),
+                        len(_said195(_n195))))
+    print("   (a) the first repeat, 30 min on: H's planner, the notification,")
+    print("   the panel, one line")
+    check("(a) the first repeat", _got195[0],
+          ([(_kh195, "planner")], 1, 1, 1))
+    print("   (b) the second and the third: the notification and the panel,")
+    print("   and no planner")
+    check("(b) the second and the third repeat", _got195[1:],
+          [([], 1, 1, 1), ([], 1, 1, 1)])
+    print("   (c) their lines say the home planner is not told again; the")
+    print("   first one's does not")
+    check("(c) the words, in the line of each repeat",
+          [len([_x for _x in _said195(_n) if "not to the home planner, "
+                "which heard the first repeat" in _x]) for _n in (1, 2, 3)],
+          [0, 1, 1])
+    daemon.end_permission_ask(_a195, "executor", "case 195")
+    _reset195()
+    daemon.calls_pass(_t195 + 60 + 5401)
+    check("(d) answered: closed, nothing said",
+          ([c for p, r, c in _to195
+            if p in (_ka195, _kh195) and "permission" in c], len(_notes195),
+           "permission|executor" in ((daemon.STATE.get("calls") or {})
+                                     .get(_ka195) or {})), ([], 0, False))
+finally:
+    daemon.deliver_ex = _dx195
+    daemon.IS_MAC, daemon.MAC_NOTIFY = _mac195[0], _mac195[1]
+    for _n195, _v195 in (("mac_notify", _mac195[2]), ("home_pair", _mac195[3])):
+        if _v195 is None:
+            daemon.CFG.pop(_n195, None)
+        else:
+            daemon.CFG[_n195] = _v195
+    daemon.CFG["telegram"] = _tg195
+    daemon.CFG["thresholds"] = _thr195
+    store.save_config(daemon.CFG)
+    _reset195()
+    with daemon._lock:
+        for _c in ("paused", "last_verdict", "calls"):
+            (daemon.STATE.get(_c) or {}).pop(_ka195, None)
+        for _r in ("planner", "executor"):
+            (daemon.STATE.get("asks") or {}).pop("%s|%s" % (_ka195, _r), None)
+        daemon.save_state()
+post("/config", {"projects": {A: {}, B: {}, C: {}}})
+
+
+print("\n196. a long turn's age is measured from the turn's own first entry,")
+print("     not from the end of the turn before it")
+print("    2026-10-17, this pair: its loop off from 03:24 to 09:23, the last")
+print("    turn ended 02:46:01, the task of 09:23:12 opened a new one - and")
+print("    23 s into it, 09:23:35, the line said \"has not ended for 397 min\"")
+print("    and the executor was told to end it. FAILURE WOULD LOOK LIKE: a")
+print("    turn minutes old kept or told as hours old. -> 8.156")
+_p196 = os.path.join(TMP, "long-turn196")
+os.makedirs(_p196, exist_ok=True)
+_k196 = daemon.norm(_p196)
+_tp196 = os.path.join(_p196, "transcript.jsonl")
+_began196 = getattr(daemon, "turn_began", lambda tp: 0.0)
+_saved196 = (daemon.deliver_ex, daemon.transcript_path_for,
+             daemon.executor_is_working, daemon.transcript_frozen,
+             daemon.tool_in_flight)
+_to196 = []
+
+
+def _iso196(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t))
+
+
+def _write196(path, rows):
+    with open(path, "w", encoding="utf-8") as fh:
+        for _r196 in rows:
+            fh.write(json.dumps(_r196) + "\n")
+
+
+def _end196(t):
+    return {"type": "system", "subtype": "turn_duration",
+            "timestamp": _iso196(t)}
+
+
+def _user196(t, content, meta=False):
+    r = {"type": "user", "timestamp": _iso196(t),
+         "message": {"content": content}}
+    if meta:
+        r["isMeta"] = True
+    return r
+
+
+def _reply196(t, error=False):
+    r = {"type": "assistant", "timestamp": _iso196(t),
+         "message": {"content": []}}
+    if error:
+        r["isApiErrorMessage"] = True
+    return r
+
+
+def _kept196():
+    with daemon._lock:
+        return [e for e in ((daemon.STATE.get("waited") or {})
+                            .get(_k196) or [])
+                if e.get("tag") == "long_turn"]
+
+
+def _lines196():
+    return [r.get("text") or "" for r in daemon.store.recent_events(600)
+            if r.get("path") == _k196]
+
+
+def _reset196():
+    with daemon._lock:
+        for _b196 in ("waited", "turn_watch"):
+            (daemon.STATE.get(_b196) or {}).pop(_k196, None)
+        for _b196 in ("stall_nudged", "stop_seen", "stop_n"):
+            (daemon.STATE.get(_b196) or {}).pop("%s|executor" % _k196, None)
+    del _to196[:]
+
+
+daemon.deliver_ex = (lambda path, role, content, meta, answer=None:
+                     (_to196.append((daemon.norm(path), role, content)) or
+                      (True, "ok")))
+daemon.transcript_path_for = lambda path, role: _tp196
+daemon.executor_is_working = lambda path: True
+daemon.transcript_frozen = lambda path, role, quiet: (False, 0)
+daemon.tool_in_flight = lambda path, role, sit=None: False
+try:
+    with daemon._lock:
+        daemon.STATE.setdefault("loops", {})[_k196] = {"active": True}
+        daemon.STATE.setdefault("pids", {})["%s|executor" % _k196] = {
+            "pid": os.getpid()}
+    # whole seconds: the transcript's times are, and a check subtracts
+    _now196 = float(int(time.time()))
+    _reset196()
+    # the turn before ended six hours ago and its Stop was counted then;
+    # this one opened 20 min ago with a task the channel brought (a meta
+    # row, as _turn_markers reads it), and the executor has worked since
+    _write196(_tp196, [
+        _end196(_now196 - 21600),
+        _user196(_now196 - 1200, "<channel>the task</channel>", meta=True),
+        _reply196(_now196 - 1190),
+        _user196(_now196 - 900, [{"type": "tool_result", "content": "ok"}]),
+        _reply196(_now196 - 600)])
+    with daemon._lock:
+        daemon.STATE.setdefault("stop_seen", {})["%s|executor" % _k196] = \
+            _now196 - 21600
+    print("   (a) 20 min into the turn: young - nothing kept, nobody told")
+    _r196 = daemon.long_turn_note(_p196, now_ts=_now196)
+    check("(a) the turn is young",
+          (_r196, len(_kept196()), _to196),
+          ("the turn is younger than long_turn", 0, []))
+    print("   (b) 30 min on, 49 min into it: kept, and the line says 49 min,")
+    print("   from its first reply - not 390")
+    _r196 = daemon.long_turn_note(_p196, now_ts=_now196 + 1800)
+    _kp196 = _kept196()
+    check("(b) kept for the planner, nobody told",
+          (_r196, len(_kp196), _to196), ("kept for the planner", 1, []))
+    check("(b) the kept start is the turn's first reply",
+          [round(float(_e.get("start") or 0) - (_now196 - 1190))
+           for _e in _kp196], [0])
+    check("(b) the line says 49 min",
+          len([_l for _l in _lines196()
+               if "has not ended for 49 min" in _l]), 1)
+    print("   (c) two hours into it - not two hours after the turn before -")
+    print("   the executor is told, and the line counts from the same start")
+    _r196 = daemon.long_turn_note(_p196, now_ts=_now196 - 1190 + 7210)
+    check("(c) told at two hours of its own",
+          (_r196, [("has run 120 min" in c) for p, r, c in _to196
+                   if p == _k196 and r == "executor"]),
+          ("told the executor to end its turn", [True]))
+
+    print("   (d) where a turn begins: after the newest end, a turn_duration,")
+    print("   an api error or an interrupt; a meta row is not a turn's entry;")
+    print("   with no end read, the earliest entry")
+    _t196 = _now196 - 5000
+    _shapes196 = []
+    for _rows196 in (
+            [_reply196(_t196), _user196(_t196 + 10, "[Request interrupted "
+                                        "by user]"),
+             _user196(_t196 + 20, "go on"), _reply196(_t196 + 30)],
+            [_reply196(_t196, error=True), _user196(_t196 + 20, "again"),
+             _reply196(_t196 + 30)],
+            [_end196(_t196), _user196(_t196 + 5, "a hook said", meta=True),
+             _reply196(_t196 + 10)],
+            [_user196(_t196, "the first"), _reply196(_t196 + 10)]):
+        _write196(_tp196, _rows196)
+        _shapes196.append(round(_began196(_tp196) - _t196))
+    check("(d) interrupt, api error, a meta row after the end, no end",
+          _shapes196, [20, 20, 10, 0])
+finally:
+    (daemon.deliver_ex, daemon.transcript_path_for,
+     daemon.executor_is_working, daemon.transcript_frozen,
+     daemon.tool_in_flight) = _saved196
+    _reset196()
+    with daemon._lock:
+        (daemon.STATE.get("loops") or {}).pop(_k196, None)
+        (daemon.STATE.get("pids") or {}).pop("%s|executor" % _k196, None)
+        daemon.save_state()
+
+
+print("\n197. a launch saves the mode of a window only when a person picked it,")
+print("     the panel shows the bridge-wide mode where the project names none,")
+print("     and an executor started in anything but bypassPermissions is a")
+print("     warn, once")
+print("    2026-10-17, report 219 of this pair: a watched project's executor")
+print("    asked for permission again and again - its modes.executor was")
+print("    auto, written by the panel at a launch as the first entry of the")
+print("    drop-down, which nobody had picked, and it won over the bridge-wide")
+print("    bypassPermissions. Nothing said so. FAILURE WOULD LOOK LIKE: the")
+print("    panel writing both modes at every launch, or the mode_for of an")
+print("    asking executor said nowhere. -> 8.156")
+with open(os.path.join(os.path.dirname(daemon.__file__), "panel.html"),
+          encoding="utf-8") as _f197:
+    _html197 = _f197.read()
+print("   (a) the panel - read from the page the daemon serves")
+check("(a) saveChains no longer writes both modes as they stand on screen",
+      "MODE.executor,planner:MODE.planner" in _html197, False)
+check("(a) a launch saves and sends the modes somebody chose, and nothing "
+      "for a role nobody chose one for",
+      ("function chosenModes()" in _html197,
+       "var md=chosenModes();if(Object.keys(md).length)pr[CUR].modes=md;"
+       "else delete pr[CUR].modes;" in _html197,
+       "mode:md[role]||null" in _html197,
+       "modes:chosenModes()," in _html197), (True, True, True, True))
+check("(a) a person's choice in either drop-down, or a profile's, is what "
+      "marks a mode chosen",
+      ("MODE.executor=this.value;(window._modePicked=window._modePicked||{})"
+       ".executor=true;" in _html197,
+       "MODE.planner=this.value;(window._modePicked=window._modePicked||{})"
+       ".planner=true;" in _html197,
+       '$("#modeExec").value=p.executor_mode;mp.executor=true}' in _html197),
+      (True, True, True))
+check("(a) on screen: the project's own mode, else the bridge-wide one - "
+      "and a pick not saved yet is kept against the re-render",
+      ("MODE[r]=own[r]||dm[r]||MODE[r]" in _html197,
+       "if(mp[r]&&own[r]!==MODE[r])return;delete mp[r];" in _html197),
+      (True, True))
+
+print("   (b) /state sends the bridge-wide mode of each role - the one in")
+print("   config.json, else the client's default sessions.py starts in")
+_rm197 = daemon.CFG.get("role_modes")
+_pr197 = dict(daemon.CFG.get("projects") or {})
+_ps197 = {}
+for _n197 in ("modes-a197", "modes-b197", "modes-c197", "modes-d197"):
+    _ps197[_n197] = os.path.join(TMP, _n197)
+    os.makedirs(_ps197[_n197], exist_ok=True)
+
+
+def _warns197(name):
+    return [(r.get("level"), r.get("text") or "")
+            for r in daemon.store.recent_events(600)
+            if r.get("kind") == "session" and "The executor of %s starts in"
+            % name in (r.get("text") or "")]
+
+
+try:
+    daemon.CFG["role_modes"] = {"executor": "bypassPermissions"}
+    check("(b) role_modes in the config /state sends",
+          (get("/state").get("config") or {}).get("role_modes"),
+          {"executor": "bypassPermissions",
+           "planner": sessions.ROLE_DEFAULTS["planner"]["permission_mode"]})
+
+    print("   (c) the warn: the project's own mode, the bridge-wide one, or")
+    print("   nothing set - each named; once; none for bypassPermissions, none")
+    print("   for the planner")
+    daemon.CFG["role_modes"] = {"executor": "acceptEdits"}
+    with daemon._lock:
+        daemon.CFG.setdefault("projects", {})
+        daemon.CFG["projects"][daemon.norm(_ps197["modes-a197"])] = {
+            "modes": {"executor": "auto", "planner": "auto"}}
+        daemon.CFG["projects"][daemon.norm(_ps197["modes-d197"])] = {
+            "modes": {"executor": "bypassPermissions", "planner": "auto"}}
+    _got197 = [daemon.mode_for(_ps197["modes-a197"], "executor"),
+               daemon.mode_for(_ps197["modes-a197"], "executor"),
+               daemon.mode_for(_ps197["modes-b197"], "executor"),
+               daemon.mode_for(_ps197["modes-d197"], "executor"),
+               daemon.mode_for(_ps197["modes-d197"], "planner")]
+    daemon.CFG.pop("role_modes", None)
+    _got197.append(daemon.mode_for(_ps197["modes-c197"], "executor"))
+    check("(c) mode_for answers as it did",
+          _got197, ["auto", "auto", "acceptEdits", "bypassPermissions",
+                    "auto", None])
+    _w197 = dict((_n, _warns197(_n)) for _n in _ps197)
+    check("(c) one warn for each executor that will ask, none for the rest",
+          dict((_n, len(_v)) for _n, _v in _w197.items()),
+          {"modes-a197": 1, "modes-b197": 1, "modes-c197": 1,
+           "modes-d197": 0})
+    check("(c) each a warn, naming the mode and where it came from",
+          [(_l, "starts in %s, not bypassPermissions - from %s" % (_m, _f)
+            in _t) for _n, _m, _f in (
+               ("modes-a197", "auto", "the project's own modes.executor"),
+               ("modes-b197", "acceptEdits",
+                "role_modes.executor in config.json"),
+               ("modes-c197", sessions.ROLE_DEFAULTS["executor"]
+                ["permission_mode"], "nothing set, so the client's default "
+                "of sessions.py")) for _l, _t in _w197[_n]],
+          [("warn", True)] * 3)
+    check("(c) and the way back in it",
+          all("bypassPermissions in the panel's launch window" in _t
+              for _v in _w197.values() for _l, _t in _v)
+          and bool(_w197["modes-a197"]), True)
+finally:
+    if _rm197 is None:
+        daemon.CFG.pop("role_modes", None)
+    else:
+        daemon.CFG["role_modes"] = _rm197
+    with daemon._lock:
+        daemon.CFG["projects"] = _pr197
+
+
+print("\n198. the walk of case 49 again, as the suite's LAST case: a")
 print("   container first filled after case 49 is walked too")
 print("   case 49 called itself LAST and stood at 49 of 177, so a container")
 print("   a later case fills first was never walked - and one missing from")

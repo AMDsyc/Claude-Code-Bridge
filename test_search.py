@@ -516,6 +516,144 @@ finally:
         getattr(daemon, "_share_of", {}).pop(_pp, None)
     srv10.shutdown()
 
+print("\n11. a copy the map names is gone from disk: the search hands the agent")
+print("    the map without it - the copy of the same session that day that")
+print("    stayed in its place - says so in one line, and leaves MAP.md as the")
+print("    last pass wrote it. 2026-10-17: the copies of past days were")
+print("    cleared, a compaction replaces the day's copy of its session")
+print("    (8.155), and a Mac runs no pass (8.133) - MAP.md of the three pairs")
+print("    on the share named 960 files that were gone. FAILURE WOULD LOOK")
+print("    LIKE: a prompt naming a file that is not there, a copy that stayed")
+print("    left out, or a map rewritten where no pass runs. -> 8.156")
+PROJ11 = os.path.join(TMP, "proj11")
+_gone11 = getattr(archive, "gone_copies", lambda project_dir, m: [])
+
+
+def _copy11(date, folder, name):
+    d = os.path.join(PROJ11, "bridge-logs", date, folder)
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, name), "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "user",
+                             "timestamp": "%sT09:00:00Z" % date,
+                             "message": {"role": "user",
+                                         "content": "the day's work"}})
+                 + "\n")
+
+
+def _drop11(date, folder, name):
+    os.remove(os.path.join(PROJ11, "bridge-logs", date, folder, name))
+
+
+def _bytes11(name):
+    with open(os.path.join(PROJ11, "bridge-logs", name), "rb") as fh:
+        return fh.read()
+
+
+# ten copies of six sessions over two days, mapped by a pass
+for _n11 in ("s11-a-080000", "s11-a-090000", "s11-a-100000", "s11-b-090000",
+             "s11-e-090000", "s11-f-090000"):
+    _copy11("2026-08-05", "snapshots", _n11 + ".jsonl")
+for _n11 in ("s11-c", "s11-d", "s11-f"):
+    _copy11("2026-08-05", "raw", _n11 + ".jsonl")
+_copy11("2026-08-06", "raw", "s11-e.jsonl")
+_m11 = archive.build_now(PROJ11)
+_md11, _json11 = _bytes11("MAP.md"), _bytes11("map.json")
+check("PRECONDITION: the pass mapped ten copies of six sessions",
+      ((_m11.get("totals") or {}).get("files"),
+       (_m11.get("totals") or {}).get("sessions")), (10, 6))
+# then five go: a's 09:00 (its 08:00 and 10:00 stay), b's 09:00 (two new
+# ones the map never saw), c's only copy, e's copy of 08-05 (its other
+# copy is of 08-06), f's snapshot (its raw copy stays)
+for _d11, _f11, _n11 in (("2026-08-05", "snapshots", "s11-a-090000.jsonl"),
+                         ("2026-08-05", "snapshots", "s11-b-090000.jsonl"),
+                         ("2026-08-05", "raw", "s11-c.jsonl"),
+                         ("2026-08-05", "snapshots", "s11-e-090000.jsonl"),
+                         ("2026-08-05", "snapshots", "s11-f-090000.jsonl")):
+    _drop11(_d11, _f11, _n11)
+_copy11("2026-08-05", "snapshots", "s11-b-085000.jsonl")
+_copy11("2026-08-05", "snapshots", "s11-b-110000.jsonl")
+
+print("   (a) the gone copies, each with the newest copy of its session that")
+print("   day still there - its own folder first, then the other")
+check("(a) five gone, three of them with a copy that stayed",
+      sorted(_gone11(PROJ11, archive.last_map(PROJ11))),
+      [("2026-08-05/raw/s11-c.jsonl", ""),
+       ("2026-08-05/snapshots/s11-a-090000.jsonl",
+        "2026-08-05/snapshots/s11-a-100000.jsonl"),
+       ("2026-08-05/snapshots/s11-b-090000.jsonl",
+        "2026-08-05/snapshots/s11-b-110000.jsonl"),
+       ("2026-08-05/snapshots/s11-e-090000.jsonl", ""),
+       ("2026-08-05/snapshots/s11-f-090000.jsonl",
+        "2026-08-05/raw/s11-f.jsonl")])
+
+print("   (b) a search where no pass runs: the map it hands over names what")
+print("   is there, the line says what was taken out, MAP.md is untouched")
+_real_build11 = archive.build
+_built11 = []
+
+
+def _build11(project_dir, *a, **kw):
+    _built11.append(project_dir)
+    return _real_build11(project_dir, *a, **kw)
+
+
+_notes11 = []
+archive.build = _build11
+try:
+    _rec11 = archive.search(
+        PROJ11, "what did s11 do?", claude=good_stub(), timeout=60,
+        map_off="the project is on a network share (case 11)",
+        journal=lambda k, t, lvl="log": _notes11.append((k, t, lvl)))
+finally:
+    archive.build = _real_build11
+_p11 = launches()[-1]["argv"][1]
+check("(b) it answered", _rec11.get("state"), "done")
+check("(b) the prompt names none of the five gone copies",
+      [_n for _n in ("s11-a-090000.jsonl", "s11-b-090000.jsonl",
+                     "s11-c.jsonl", "s11-e-090000.jsonl",
+                     "s11-f-090000.jsonl") if _n in _p11], [])
+check("(b) and every copy that is there and mapped, b's newest in place "
+      "of its gone one",
+      [_n for _n in ("s11-a-080000.jsonl", "s11-a-100000.jsonl",
+                     "s11-b-110000.jsonl", "s11-d.jsonl", "s11-f.jsonl",
+                     "s11-e.jsonl") if _n not in _p11], [])
+check("(b) not the copy of b no pass mapped and that is not its newest",
+      "s11-b-085000.jsonl" in _p11, False)
+check("(b) the totals are the map's without them: six files, five sessions",
+      "6 files \u00b7 5 sessions \u00b7" in _p11, True)
+_g11 = _rec11.get("gone_note") or ""
+check("(b) the line: how many, how many named by the copy that stayed, how "
+      "many left out",
+      ("5 of the 10 copies the map names are no longer on disk" in _g11,
+       "3 are named by the copy of the same session that day" in _g11,
+       "2 had no copy left that day" in _g11,
+       "MAP.md itself still names them" in _g11), (True, True, True, True))
+check("(b) it is in the map_note the panel shows, after why no pass ran, "
+      "and in the prompt",
+      (bool(_g11) and (_rec11.get("map_note") or "").endswith(_g11),
+       "network share (case 11)" in (_rec11.get("map_note") or ""),
+       bool(_g11) and _g11 in _p11), (True, True, True))
+check("(b) the journal says it, once",
+      len([_t for _k, _t, _l in _notes11 if "(8.156)" in _t]), 1)
+check("(b) no pass ran, and MAP.md and map.json are the pass's bytes",
+      (_built11, _bytes11("MAP.md") == _md11,
+       _bytes11("map.json") == _json11), ([], True, True))
+
+print("   (c) CONTROL: a pass since - nothing is gone, nothing is said, and")
+print("   the copy the pass saw is in the map")
+archive.build_now(PROJ11)
+del _notes11[:]
+_rec11 = archive.search(
+    PROJ11, "and now?", claude=good_stub(), timeout=60,
+    map_off="the project is on a network share (case 11)",
+    journal=lambda k, t, lvl="log": _notes11.append((k, t, lvl)))
+_p11 = launches()[-1]["argv"][1]
+check("(c) no line, and b's other copy is mapped now",
+      (_rec11.get("gone_note") or "",
+       len([_t for _k, _t, _l in _notes11 if "(8.156)" in _t]),
+       "s11-b-085000.jsonl" in _p11, "7 files \u00b7 5 sessions \u00b7" in _p11),
+      ("", 0, True, True))
+
 check("nothing this run did reached past this machine: the fence was up, "
       "and it refused nothing (netfence.py, 8.142)",
       (netfence.up(), netfence.refused()), (True, []))

@@ -3836,6 +3836,13 @@ CALL_KEPT_FAMILIES = ("silence",)
 # thresholds.call_repeat: at most one repeat of a call in this many seconds;
 # 0 or less, never one
 CALL_REPEAT_SEC = 1800
+# THE HOME PLANNER HEARS A CALL'S REPEAT ONCE; the Mac's notification and the
+# panel hear every one. 2026-10-17, this bridge's own pair: a watched
+# project's dialog, open from 17:33:30, was said again to the home planner
+# every 30 min - "said again (5), to the panel and the home planner" by
+# 20:05:05 - and each one woke that planner, who could do nothing with it
+# but pass it on, in a chat that makes no sound. -> DECISIONS.md 8.156
+CALL_HOME_REPEATS = 1
 # The Mac's own notification: one a pair in ten minutes, six an hour in all.
 MAC_NOTE_PAIR_SEC = 600
 MAC_NOTE_HOUR_MAX = 6
@@ -4070,9 +4077,10 @@ def call_repeat_sec():
 
 
 def repeat_call(path, rec, age, n):
-    """A call nobody has answered, said again: to the home planner, to the
-    Mac's notification and to the panel - never with a sound, the owner's
-    word, and never into the chat, which carried the first one.
+    """A call nobody has answered, said again: to the home planner the first
+    time only (CALL_HOME_REPEATS, 8.156), to the Mac's notification and to
+    the panel every time - never with a sound, the owner's word, and never
+    into the chat, which carried the first one.
 
     Not to the planner that is itself the one asking or the one silent - a
     window on a dialog reads nothing (8.151). calls_pass decides when, at
@@ -4085,7 +4093,8 @@ def repeat_call(path, rec, age, n):
     panel_alert(text, k, False)
     went = []
     home = home_pair()
-    if home and not (home == k and rec.get("about") == "planner"):
+    asking = home == k and rec.get("about") == "planner"
+    if home and not asking and n <= CALL_HOME_REPEATS:
         _ok, how = deliver_ex(
             home, "planner",
             "The bridge needs the human for %s, still: %s Tell them in your "
@@ -4095,10 +4104,13 @@ def repeat_call(path, rec, age, n):
     if mac_notify(k, text):
         went.append("the Mac's notification")
     store.journal("notify", "needs_you about %s (%s) still open after %d min "
-                  "- said again (%d), to %s; not again for %d min "
+                  "- said again (%d), to %s;%s not again for %d min "
                   "(call_repeat)"
                   % (name, key, int(age // 60), n,
                      " and ".join(["the panel"] + went),
+                     " not to the home planner, which heard the first "
+                     "repeat (8.156);" if home and not asking
+                     and n > CALL_HOME_REPEATS else "",
                      int(call_repeat_sec() // 60)),
                   name, rec.get("about") or "", "log" if went else "warn",
                   project_dir=k)
@@ -10011,9 +10023,38 @@ def mode_for(path, role):
     """
     pc = (CFG.get("projects") or {}).get(norm(path)) or {}
     own = (pc.get("modes") or {}).get(role)
-    if own:
-        return own
-    return (CFG.get("role_modes") or {}).get(role)
+    mode = own or (CFG.get("role_modes") or {}).get(role)
+    if role == "executor":
+        _mode_warn(path, mode or sessions.ROLE_DEFAULTS["executor"]
+                   ["permission_mode"],
+                   "the project's own modes.executor" if own else
+                   "role_modes.executor in config.json" if mode else
+                   "nothing set, so the client's default of sessions.py")
+    return mode
+
+
+# THE EXECUTOR IN ANY MODE BUT bypassPermissions ASKS, and a dialog in its
+# window holds the pair until somebody answers it (8.59, 8.112). 2026-10-17,
+# report 219 of this pair: a watched project's executor asked again and
+# again - its modes.executor was auto, written by the panel at a launch as
+# the drop-down's first entry, which nobody had picked. One warn a run for
+# each project, mode and where it came from. -> DECISIONS.md 8.156
+_MODE_TOLD = set()
+
+
+def _mode_warn(path, mode, where):
+    told = (norm(path), mode, where)
+    if mode == "bypassPermissions" or told in _MODE_TOLD:
+        return
+    _MODE_TOLD.add(told)
+    name = project_name(path)
+    store.journal("session", "The executor of %s starts in %s, not "
+                  "bypassPermissions - from %s. It will ask for what "
+                  "bypassPermissions allows, and a dialog in its window "
+                  "holds the pair until somebody answers it. The way back: "
+                  "bypassPermissions in the panel's launch window for this "
+                  "project (8.156)" % (name, mode, where),
+                  name, "executor", "warn", project_dir=path)
 
 
 def remember_telemetry(path, role, sess):
@@ -11724,7 +11765,8 @@ def long_turn_note(path, now_ts=None):
     turn and again no sooner than LONG_TURN_AGAIN by the clock, the two-hour
     line and the hang once a turn. The turn's age is measured from the
     newest turn end the transcript of the session on record shows
-    (_turn_markers) or its last Stop (stop_seen), whichever is later, and
+    (_turn_markers), its last Stop (stop_seen) or - read once a turn - the
+    turn's own first entry (turn_began, 8.156), whichever is latest, and
     inside one number it never moves back. 2026-10-16: that end, keyed on,
     jumped 21:41:18 -> 21:41:26 and back as the client's turn end showed in
     the transcript's 512 KB tail or did not, and a watched project's planner
@@ -11759,6 +11801,18 @@ def long_turn_note(path, now_ts=None):
     th = CFG.get("thresholds", {})
     if now_ts - end < float(th.get("long_turn", LONG_TURN_SEC)):
         return "the turn is younger than long_turn"
+    if not seen.get("start"):
+        # FROM THE TURN'S OWN FIRST ENTRY, read once a turn: the end before
+        # it and the last Stop say when the window went idle, not when it
+        # took this turn up. 2026-10-17, this pair: its loop off from 03:24
+        # to 09:23, the last turn ended 02:46:01, the task of 09:23:12
+        # opened a new one - and 23 s into it, 09:23:35, the line said "has
+        # not ended for 397 min". -> DECISIONS.md 8.156
+        end = max(end, turn_began(tp))
+        seen["start"] = end
+        if now_ts - end < float(th.get("long_turn", LONG_TURN_SEC)):
+            _turn_watch_keep(k, seen)
+            return "the turn is younger than long_turn"
     seen["start"] = end
     name = project_name(path)
     mins = int((now_ts - end) // 60)
@@ -13399,6 +13453,58 @@ def _turn_markers(tp):
         if found is not None or size <= kb * 1024:
             return (found or "none"), last_end
     return "unknown", 0.0
+
+
+def turn_began(tp):
+    """Epoch of the first entry of the turn open in a transcript - the
+    earliest prompt, tool result or reply after its newest turn end (an api
+    error and an interrupt are ends, as in _turn_markers) - or 0 when none
+    is read. With no end in the part read, the earliest entry read: a turn
+    at least that old.
+
+    2026-10-17 09:23:35, this pair: the line said the executor's turn "has
+    not ended for 397 min", measured from the end of the turn before, at
+    02:46:01; the turn it was about had opened at 09:23:12, with a task.
+    -> DECISIONS.md 8.156"""
+    if not tp or not os.path.isfile(tp):
+        return 0.0
+    try:
+        size = os.path.getsize(tp)
+    except OSError:
+        return 0.0
+    first = 0.0
+    for kb in (512, 8192):
+        first = 0.0
+        for line in reversed(_tail_lines(tp, kb)):
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            kind = row.get("type")
+            if kind == "system" and row.get("subtype") in TURN_END_SUBTYPES:
+                return first
+            if kind == "assistant":
+                if row.get("isApiErrorMessage"):
+                    return first
+            elif kind == "user" and not row.get("isMeta"):
+                _c = (row.get("message") or {}).get("content")
+                _t = _c if isinstance(_c, str) else ""
+                if isinstance(_c, list):
+                    _t = " ".join(str(x.get("text") or "") for x in _c
+                                  if isinstance(x, dict))
+                if _t.lstrip().startswith("[Request interrupted"):
+                    return first
+            else:
+                continue
+            at = _entry_epoch(row)
+            if at:
+                first = min(first, at) if first else at
+        if size <= kb * 1024:
+            break
+    return first
 
 
 def transcript_turn_state(tp):
@@ -28880,6 +28986,14 @@ class Handler(BaseHTTPRequestHandler):
                         "panel_sound": panel_sound_on(),
                         "thresholds": CFG.get("thresholds", {}),
                         "retention": CFG.get("retention", {}),
+                        # the mode each role starts in when its project names
+                        # none: the panel shows it, and saves a mode only
+                        # when somebody picks one (8.156)
+                        "role_modes": {
+                            r: (CFG.get("role_modes") or {}).get(r)
+                            or sessions.ROLE_DEFAULTS.get(r, {}).get(
+                                "permission_mode")
+                            for r in MANAGED_ROLES},
                         # The defaults a project falls back to, sent rather
                         # than copied into the panel. panel.html carried its
                         # own `||80` and went on showing 80 after the real

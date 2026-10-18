@@ -13,6 +13,20 @@ file before it and listed in `make_public.py`'s `EXTRA`, or it is never
 published.
 
 <!-- /rule 36 -->
+**2026-10-18 — what is new since the midday release of 2026-10-17 (8bd49dc)**
+
+- **One pre-compaction copy of a session a day.** Before a compaction
+  the bridge still copies the session's transcript into the day's
+  `snapshots/`, now in 8 MiB pieces into a hidden `.part` that is
+  fsynced and renamed into place. The copy before it - the newest
+  earlier copy of the same session that day - is removed only when its
+  sha256 proves it a byte prefix of the new one; otherwise both stay
+  and a warn line in the project's journal names both. A failure is a
+  warn line, not silence.
+- **Other days are never touched**, so the archive map, search and
+  carried history still see every session of every day, and `map.json`
+  counts a session's transcript once.
+
 **2026-10-17 — what is new since the night release of 2026-10-17 (f239596)**
 
 - **A report is held only for work that ends by itself.** A background

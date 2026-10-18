@@ -499,19 +499,23 @@ running has to be available to them. It cannot be closed up and resold.
 
 Newest first. Short on purpose — what changed, not why in detail.
 
-**2026-10-18 — what is new since the midday release of 2026-10-17 (8bd49dc)**
+**2026-10-18 — what is new since the night release of 2026-10-18 (8e6c793)**
 
-- **One pre-compaction copy of a session a day.** Before a compaction
-  the bridge still copies the session's transcript into the day's
-  `snapshots/`, now in 8 MiB pieces into a hidden `.part` that is
-  fsynced and renamed into place. The copy before it - the newest
-  earlier copy of the same session that day - is removed only when its
-  sha256 proves it a byte prefix of the new one; otherwise both stay
-  and a warn line in the project's journal names both. A failure is a
-  warn line, not silence.
-- **Other days are never touched**, so the archive map, search and
-  carried history still see every session of every day, and `map.json`
-  counts a session's transcript once.
+- **A search no longer points at a copy that is gone.** When a file the
+  archive map names is no longer on disk, the search hands its agent the
+  map without it - the newest copy of the same session that day that
+  stayed takes its place - and one line says how many were taken out.
+  `MAP.md` is not rewritten where no map pass runs.
+- **A call nobody answers is said again to the home pair's planner
+  once.** Every later repeat goes to the Mac's notification and the
+  panel only.
+- **A long turn is timed from its own first entry**, not from the end
+  of the turn before it: a turn opened after hours of stop is not
+  reported hours old.
+- **The panel saves a window's permission mode only when someone picked
+  it**, and shows the bridge-wide mode where the project names none. An
+  executor started in anything but `bypassPermissions` is one warn line
+  in the journal.
 
 <!-- rule 36: the index's own lines, not the record -->
 Older entries, newest first, back to the first release of 2026-08-18:

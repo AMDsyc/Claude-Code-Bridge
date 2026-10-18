@@ -579,6 +579,121 @@ def stale_map_note(project_dir, why):
         "directly")
 
 
+def _sid_of(name):
+    """The session id in an archived copy's name - `<id>.jsonl`, or
+    `<id>-HHMMSS.jsonl` for a snapshot - read as scan_file reads it."""
+    base = os.path.splitext(name)[0]
+    m = re.match(r"^(.*)-(\d{6})$", base)
+    return m.group(1) if m else base
+
+
+def gone_copies(project_dir, m):
+    """The copies the map `m` names that are not on disk now, as (path,
+    kept): kept is the newest copy of the same session that day still
+    there - in the same folder first, then the other - or "" when there is
+    none. One listing of each folder of each day the map names, never a
+    stat of each file: on a share each one is a round trip. A folder that
+    cannot be listed for any reason but its absence is taken as it stands.
+
+    2026-10-17: the copies of past days were cleared (2142 on the PC, the
+    day's largest of each session kept), a compaction now replaces the
+    day's copy of its session (8.155), and a Mac runs no pass to take them
+    out of the map (8.133) - MAP.md of the three pairs on the share went on
+    naming 960 files that were gone. -> DECISIONS.md 8.156"""
+    root = logs_root(project_dir)
+    here = {}
+
+    def names(date, folder):
+        if (date, folder) not in here:
+            try:
+                here[(date, folder)] = sorted(
+                    n for n in os.listdir(os.path.join(root, date, folder))
+                    if n.endswith(".jsonl"))
+            except FileNotFoundError:
+                here[(date, folder)] = []
+            except OSError:
+                here[(date, folder)] = None
+        return here[(date, folder)]
+
+    out = []
+    for f in (m or {}).get("files") or []:
+        parts = (f.get("path") or "").split("/")
+        if len(parts) != 3:
+            continue
+        date, folder, name = parts
+        have = names(date, folder)
+        if have is None or name in have:
+            continue
+        sid, kept = _sid_of(name), ""
+        for fd in [folder] + [k for k, _ in KINDS if k != folder]:
+            same = [n for n in names(date, fd) or [] if _sid_of(n) == sid]
+            if same:
+                kept = "%s/%s/%s" % (date, fd, same[-1])
+                break
+        out.append((f["path"], kept))
+    return out
+
+
+def map_without(m, gone):
+    """The map with the copies gone from disk taken out (gone_copies): the
+    row of one whose session left another copy that day names that copy,
+    unless the map has a row for it already, and one with none left goes.
+    A row that names the copy that stayed keeps the gone copy's numbers -
+    the one that stayed holds at least as much. The totals and each
+    session's counts are the rows that remain. For the prompt only: nothing
+    writes it, and MAP.md stays the last pass's. -> DECISIONS.md 8.156"""
+    instead = dict(gone)
+    paths = set(f.get("path") for f in m.get("files") or [])
+    files = []
+    for f in m.get("files") or []:
+        p = f.get("path")
+        if p not in instead:
+            files.append(f)
+            continue
+        k = instead[p]
+        if not k or k in paths:
+            continue
+        paths.add(k)
+        files.append(dict(f, path=k, file=k.split("/")[-1],
+                          kind=dict(KINDS).get(k.split("/")[1],
+                                               f.get("kind"))))
+    per = {}
+    for f in files:
+        c = per.setdefault(f.get("session_id"), [0, 0, 0])
+        c[0] += 1
+        c[1] += f.get("turns") or 0
+        c[2] += len(f.get("compactions") or [])
+    sessions = [dict(s, files=per[s.get("session_id")][0],
+                     turns=per[s.get("session_id")][1],
+                     compactions=per[s.get("session_id")][2])
+                for s in m.get("sessions") or [] if s.get("session_id") in per]
+    t = dict(m.get("totals") or {})
+    t.update(files=len(files), sessions=len(sessions),
+             turns=sum(f.get("turns") or 0 for f in files),
+             compactions=sum(len(f.get("compactions") or []) for f in files),
+             bytes=sum(f.get("bytes") or 0 for f in files),
+             unknown_files=len([f for f in files
+                                if f.get("role") == "unknown"]))
+    return dict(m, files=files, sessions=sessions, totals=t,
+                dates=[d for d in m.get("dates") or []
+                       if any(f["path"].startswith(d + "/") for f in files)])
+
+
+def gone_note(m, gone):
+    """The one line a search says about the copies gone from disk."""
+    kept = len([1 for _, k in gone if k])
+    parts = ["%d of the %d copies the map names are no longer on disk, and "
+             "the map below is the map without them - MAP.md itself still "
+             "names them" % (len(gone), len((m or {}).get("files") or []))]
+    if kept:
+        parts.append("%d are named by the copy of the same session that day "
+                     "that stayed" % kept)
+    if kept < len(gone):
+        parts.append("%d had no copy left that day and are left out"
+                     % (len(gone) - kept))
+    return "; ".join(parts)
+
+
 def build_now(project_dir, known=None):
     """Build, remember the result, and repeat if asked again mid-build."""
     while True:
@@ -858,6 +973,11 @@ def search(project_dir, question, model=None, timeout=None, claude="claude",
     `map_off` is the caller's reason a map pass must not run here (a
     Mac's share, 8.133); the search then reads the last map and says
     so in rec["map_note"]. -> DECISIONS.md 8.136
+
+    A copy the map names that is gone from disk is not handed to the
+    agent: the map it gets names the copy of that session that day that
+    stayed, and rec["gone_note"] - in rec["map_note"] too, which the panel
+    shows - says so in one line. -> DECISIONS.md 8.156
     """
     def note(kind, text, level="log"):
         if journal:
@@ -870,7 +990,8 @@ def search(project_dir, question, model=None, timeout=None, claude="claude",
            "question": question, "project": project_dir,
            "model": model or DEFAULT_MODEL, "state": "running",
            "started": time.time(), "seconds": 0, "answer": "",
-           "cited": [], "extract": "", "error": "", "map_note": ""}
+           "cited": [], "extract": "", "error": "", "map_note": "",
+           "gone_note": ""}
     _remember(rec)
 
     root = logs_root(project_dir)
@@ -895,11 +1016,31 @@ def search(project_dir, question, model=None, timeout=None, claude="claude",
             build_now(project_dir, (rec.get("known") or None))
         except Exception:
             pass
+    # A COPY THE MAP NAMES MAY BE GONE: the copies of past days were cleared
+    # on 2026-10-17, a compaction replaces the day's copy of its session
+    # (8.155), and a Mac runs no pass to take them out of the map (8.133).
+    # The agent is handed the map without them, in one line; MAP.md is the
+    # pass's and is not rewritten here. -> DECISIONS.md 8.156
+    themap = None
     try:
-        with open(os.path.join(root, "MAP.md"), encoding="utf-8") as fh:
-            themap = fh.read()
+        m = last_map(project_dir)
+        gone = gone_copies(project_dir, m) if m else []
+        if gone:
+            themap = render_md(map_without(m, gone))
+            rec["gone_note"] = gone_note(m, gone)
     except Exception:
-        themap = "(the map could not be read - use the folders directly)"
+        themap = None
+    if rec["gone_note"]:
+        note("archive", "Archive search: %s (8.156)" % rec["gone_note"])
+        rec["map_note"] = ("%s. %s" % (rec["map_note"], rec["gone_note"])
+                           if rec["map_note"] else rec["gone_note"])
+    if themap is None:
+        try:
+            with open(os.path.join(root, "MAP.md"), encoding="utf-8") as fh:
+                themap = fh.read()
+        except Exception:
+            themap = ("(the map could not be read - use the folders "
+                      "directly)")
     if rec["map_note"]:
         themap = "(NOTE: %s.)\n\n%s" % (rec["map_note"], themap)
 

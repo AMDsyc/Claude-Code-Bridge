@@ -1239,13 +1239,21 @@ function renderLaunch(){
      was needed for. */
   /* _picked is per project for the same reason as the latch: a choice left
      in the drop-down for one project must not refuse the start of another. */
+  if(CUR!==window._launchProj)window._modePicked={};
   if(CUR!==window._launchProj){window._launchProj=CUR;window._launchTouched=false;window._picked={}}
   var pc=projConf(); if(pc.chains&&!window._launchTouched)CHAINS=JSON.parse(JSON.stringify(pc.chains));
   $("#autoRestart").checked=!!pc.auto_restart_dead_sessions;
-  if(pc.modes){
-    if(pc.modes.executor){MODE.executor=pc.modes.executor;$("#modeExec").value=pc.modes.executor}
-    if(pc.modes.planner){MODE.planner=pc.modes.planner;$("#modePlan").value=pc.modes.planner}
-  }
+  /* A MODE IS SAVED ONLY WHEN SOMEBODY PICKED IT (8.156). The drop-down
+     opened on its first entry, auto, and every launch wrote both modes into
+     the project - so a project nobody chose a mode for carried
+     modes.executor = auto, which wins over the bridge-wide
+     bypassPermissions, and its executor asked (report 219, 2026-10-17).
+     On screen: the project's own mode, else the bridge-wide one /state
+     sends; a pick is kept against the re-render until it is saved. */
+  var own=pc.modes||{},dm=(D.config||{}).role_modes||{},mp=window._modePicked||{};
+  [["executor","#modeExec"],["planner","#modePlan"]].forEach(function(x){
+    var r=x[0];if(mp[r]&&own[r]!==MODE[r])return;delete mp[r];
+    MODE[r]=own[r]||dm[r]||MODE[r];$(x[1]).value=MODE[r]});
   $("#adminExec").checked=!!MODE.admin; $("#adminPlan").checked=!!MODE.adminPlan;
   MODE.roPlan = pc.readonly_planner!==false;
   $("#roPlan").checked=MODE.roPlan;
@@ -1327,9 +1335,9 @@ $$("[data-first]").forEach(function(b){b.onclick=function(){
   window._launchTouched=true;
   var rest=(CHAINS[role]||[]).filter(function(m){return m!==sel.value});
   rest.unshift(sel.value);CHAINS[role]=rest;renderLaunch()}});
-$("#modeExec").onchange=function(){MODE.executor=this.value;preview()};
+$("#modeExec").onchange=function(){MODE.executor=this.value;(window._modePicked=window._modePicked||{}).executor=true;preview()};
 $("#adminExec").onchange=function(){MODE.admin=this.checked;preview()};
-$("#modePlan").onchange=function(){MODE.planner=this.value;preview()};
+$("#modePlan").onchange=function(){MODE.planner=this.value;(window._modePicked=window._modePicked||{}).planner=true;preview()};
 $("#roPlan").onchange=function(){
   MODE.roPlan=this.checked;preview();
   if(!CUR)return;
@@ -1361,8 +1369,12 @@ function preview(){
   var pl="claude --permission-mode "+mp+" --remote-control --dangerously-load-development-channels server:bridge"+((CHAINS.planner||[])[0]?" --model "+CHAINS.planner[0]:"")+(MODE.roPlan?" --disallowedTools Edit,Write,NotebookEdit,Bash,PowerShell,ExitPlanMode":"");
   $("#cmdPreview").textContent="executor  ("+(adm?"Start-Process -Verb RunAs, minimised window":"minimised window")+")\n  "+ex+"\n\nplanner   ("+(admp?"Start-Process -Verb RunAs, minimised window":"minimised window")+", shows up in the Claude app)\n  "+pl;
 }
+/* The modes a launch saves and sends: the ones somebody picked, and the
+   project's own; nothing for a role nobody chose a mode for (8.156). */
+function chosenModes(){var own=projConf().modes||{},mp=window._modePicked||{},out={};
+  ["executor","planner"].forEach(function(r){if(mp[r])out[r]=MODE[r];else if(own[r])out[r]=own[r]});return out}
 function saveChains(){var pr=((D.config||{}).projects||{});pr[CUR]=pr[CUR]||{};pr[CUR].chains=CHAINS;
-  pr[CUR].modes={executor:MODE.executor,planner:MODE.planner};
+  var md=chosenModes();if(Object.keys(md).length)pr[CUR].modes=md;else delete pr[CUR].modes;
   pr[CUR].readonly_planner=MODE.roPlan!==false;
   /* saved: the config now says what the screen says, so the panel may go
      back to following it. Leaving the latch set would freeze this window
@@ -1376,8 +1388,8 @@ function askAgain(r,again){
   $("#askAgain").onclick=again}
 function launchRole(role,confirm){
   if(!CUR){$("#launchMsg").innerHTML='<div class="msgerr">Pick a project first (projects window).</div>';return}
-  var picked=(window._picked||{})[role]||null;
-  saveChains().then(function(){return post("/session",{action:"launch",project:CUR,role:role,model:(CHAINS[role]||[])[0]||null,mode:role==="executor"?MODE.executor:MODE.planner,picked:picked,confirm:!!confirm})})
+  var picked=(window._picked||{})[role]||null;var md=chosenModes();
+  saveChains().then(function(){return post("/session",{action:"launch",project:CUR,role:role,model:(CHAINS[role]||[])[0]||null,mode:md[role]||null,picked:picked,confirm:!!confirm})})
   .then(function(r){if(r.ask)return askAgain(r,function(){launchRole(role,true)});
     if(r.ok&&window._picked)delete window._picked[role];
     $("#launchMsg").innerHTML=r.ok?'<div class="msgok">'+role+' window is up (pid '+r.pid+'), minimised on your taskbar.</div>':'<div class="msgerr">'+esc(r.error)+'</div>'});
@@ -1395,7 +1407,7 @@ function launchBoth(confirm){
   if(!CUR){$("#launchMsg").innerHTML='<div class="msgerr">Pick a project first (projects window).</div>';return}
   var pk=window._picked||{};
   post("/session",{action:"launch_both",project:CUR,chains:JSON.parse(JSON.stringify(CHAINS)),
-    modes:{executor:MODE.executor,planner:MODE.planner},readonly_planner:MODE.roPlan!==false,
+    modes:chosenModes(),readonly_planner:MODE.roPlan!==false,
     picked:{executor:pk.executor||null,planner:pk.planner||null},confirm:!!confirm})
   .then(function(r){if(r.ask)return askAgain(r,function(){launchBoth(true)});
     if(r.ok){window._launchTouched=false;window._picked={}}
@@ -1417,8 +1429,9 @@ $("#saveProf").onclick=function(){
 $("#profSel").onchange=function(){
   var p=(D.profiles||{})[this.value];if(!p)return;
   if(p.chains)CHAINS=JSON.parse(JSON.stringify(p.chains));
-  if(p.executor_mode){MODE.executor=p.executor_mode;$("#modeExec").value=p.executor_mode}
-  if(p.planner_mode){MODE.planner=p.planner_mode;$("#modePlan").value=p.planner_mode}
+  var mp=window._modePicked=window._modePicked||{};
+  if(p.executor_mode){MODE.executor=p.executor_mode;$("#modeExec").value=p.executor_mode;mp.executor=true}
+  if(p.planner_mode){MODE.planner=p.planner_mode;$("#modePlan").value=p.planner_mode;mp.planner=true}
   renderLaunch();
 };
 

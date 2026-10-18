@@ -9879,7 +9879,8 @@ def config_change_lines(was, after):
         b = new[p] if isinstance(new[p], dict) else {}
         for k in sorted(set(a) | set(b)):
             va, vb = a.get(k, _UNSET), b.get(k, _UNSET)
-            if va != vb:
+            # billing says itself, in billing_switch's words (8.157)
+            if va != vb and k != "billing":
                 out.append((p, "%s: %s was %s, now %s (/config)"
                             % (name, k, show(va), show(vb))))
     return out
@@ -10055,6 +10056,124 @@ def _mode_warn(path, mode, where):
                   "bypassPermissions in the panel's launch window for this "
                   "project (8.156)" % (name, mode, where),
                   name, "executor", "warn", project_dir=path)
+
+
+# A WINDOW'S BILLING IS SWITCHED BY A PERSON (8.157). One writer -
+# billing_switch, from /config's "billing" - and two ways in: the panel's
+# button, after a dialog that says the key is paid, sends billing_confirmed;
+# the executor, asked by its planner in a task, sends billing_word, the
+# owner's own words, which the journal quotes. Neither is a way of a
+# planner's own, and nothing else in /config changes it: the panel posts
+# its whole copy of the projects dict on every toggle, and a stale copy must
+# not switch a window back - or onto the key.
+BILLING_WORD_MAX = 400
+
+
+def billing_switch(body):
+    """Write the billing /config's body names, under _lock. ("", lines) when
+    it is written, (why, []) when it is refused - wholly, before anything
+    else in the body is. A line is (path, role, text, level)."""
+    b = body.get("billing")
+    if not isinstance(b, dict):
+        return "billing is {project, role, mode}", []
+    path, role, mode = b.get("project"), b.get("role"), b.get("mode")
+    if role not in MANAGED_ROLES:
+        return "billing.role is one of %s" % ", ".join(MANAGED_ROLES), []
+    if mode not in sessions.BILLING_MODES:
+        return ("billing.mode is one of %s"
+                % ", ".join(sessions.BILLING_MODES)), []
+    projects = CFG.get("projects") or {}
+    at = [k for k in projects if isinstance(path, str) and path
+          and norm(k) == norm(path)]
+    if not at:
+        return "%s is not a watched project" % brief(str(path), 200), []
+    word = body.get("billing_word")
+    if isinstance(word, str) and word.strip():
+        said = sessions.hide_key(" ".join(word.split()))
+        if len(said) > BILLING_WORD_MAX:
+            said = said[:BILLING_WORD_MAX] + "..."
+        how = 'by the owner\'s word, which the executor quotes: "%s"' % said
+    elif body.get("billing_confirmed") is True:
+        how = "in the panel, confirmed in its dialog"
+    else:
+        return ("a switch of billing needs billing_confirmed - the panel's "
+                "dialog - or billing_word, the owner's own words, which the "
+                "journal quotes; a pair does not switch it on its own "
+                "(8.157)"), []
+    pc = projects[at[0]]
+    if not isinstance(pc, dict):
+        pc = projects[at[0]] = {}
+    bill = pc.get("billing") if isinstance(pc.get("billing"), dict) else {}
+    was = sessions.billing_for(at[0], role, CFG)
+    name = project_name(at[0])
+    if was == mode:
+        return "", [(at[0], role, "Billing of the %s of %s stays %s - asked "
+                     "%s; nothing changed (8.157)" % (role, name, mode, how),
+                     "log")]
+    bill[role] = mode
+    pc["billing"] = bill
+    text = ("Billing of the %s of %s: %s -> %s, %s. The %s window takes it "
+            "at its next start; one running now keeps what it started on"
+            % (role, name, was, mode, how, role))
+    level = "log"
+    if mode == "api_key":
+        text += ". %s" % sessions.NO_REMOTE_ON_KEY
+        there, trouble = sessions.key_state()
+        if there:
+            text += ". The key file %s is there" % sessions.KEY_FILE
+        else:
+            level = "warn"
+            text += (". The key file %s %s: until it holds a key, the window "
+                     "starts on the subscription, with a warn"
+                     % (sessions.KEY_FILE, trouble or "is not there"))
+    return "", [(at[0], role, text + " (8.157)", level)]
+
+
+def billing_carry(kept, projects):
+    """Put each project's billing back as it was before a /config write of
+    the whole projects dict (8.157), and warn where the write named another:
+    lines as billing_switch's. A copy that leaves billing out has it carried
+    across in silence, as moved_from is."""
+    out = []
+    for k, v in (projects or {}).items():
+        if not isinstance(v, dict):
+            continue
+        had = kept.get(norm(k))
+        sent = v.get("billing", _UNSET)
+        if sent is _UNSET:
+            if had:
+                v["billing"] = json.loads(json.dumps(had))
+            continue
+        if sent == had or (not sent and not had):
+            continue
+        if had:
+            v["billing"] = json.loads(json.dumps(had))
+        else:
+            v.pop("billing", None)
+        out.append((k, "", "%s: a /config write of the projects dict named "
+                    "billing %s, and it stays %s - billing is switched only "
+                    "by /config's billing, from the panel's button or with "
+                    "the owner's word (8.157)" % (
+                        project_name(k),
+                        brief(json.dumps(sent, sort_keys=True), 120),
+                        brief(json.dumps(had or {}, sort_keys=True), 120)),
+                    "warn"))
+    return out
+
+
+def billing_view(path, role):
+    """What one window is billed on, for /state: the config's word, and
+    what this daemon started it on, when it did (8.157)."""
+    started = sessions.BILLED.get((norm(path), role)) or {}
+    return {"mode": sessions.billing_for(path, role, CFG),
+            "started": started.get("mode")}
+
+
+def billing_key_view():
+    """The key file, for /state: where it is and whether it holds a key -
+    never the key (8.157)."""
+    there, trouble = sessions.key_state()
+    return {"file": sessions.KEY_FILE, "there": there, "trouble": trouble}
 
 
 def remember_telemetry(path, role, sess):
@@ -28971,6 +29090,11 @@ class Handler(BaseHTTPRequestHandler):
                     "key_windows": {
                         k: key_window(v.get("path") or "", v.get("role"))
                         for k, v in snap_live.items()},
+                    # what each window is billed on: the config's word, and
+                    # what it started on when this daemon started it (8.157)
+                    "billing": {
+                        k: billing_view(v.get("path") or "", v.get("role"))
+                        for k, v in snap_live.items()},
                     "profiles": store.load_profiles(),
                     # a "show" by each window where it can be (8.93)
                     "show_windows": not sessions.viewer_refused(),
@@ -28994,6 +29118,9 @@ class Handler(BaseHTTPRequestHandler):
                             or sessions.ROLE_DEFAULTS.get(r, {}).get(
                                 "permission_mode")
                             for r in MANAGED_ROLES},
+                        # where the key file is and whether it holds a key,
+                        # for the panel's billing dialog - never the key
+                        "billing_key": billing_key_view(),
                         # The defaults a project falls back to, sent rather
                         # than copied into the panel. panel.html carried its
                         # own `||80` and went on showing 80 after the real
@@ -29800,6 +29927,25 @@ class Handler(BaseHTTPRequestHandler):
                 store.save_models(m)
                 return self._send(200, {"ok": True, "opts": m["opts"]})
             if p.startswith("/config"):
+                # A WINDOW'S BILLING, and only here (8.157): the panel's
+                # button after its dialog, or the owner's word that the
+                # executor quotes. A refusal refuses the whole body, before
+                # anything in it is written.
+                if "billing" in body:
+                    with _lock:
+                        bill_err, bill_lines = billing_switch(body)
+                        if not bill_err:
+                            store.save_config(CFG)
+                    if bill_err:
+                        store.journal("bridge", "A switch of billing was "
+                                      "refused: %s" % bill_err, level="warn")
+                        return self._send(400, {"ok": False,
+                                                "error": bill_err})
+                    for at, role, line, level in bill_lines:
+                        store.journal("project", line, project_name(at),
+                                      role, level, project_dir=at)
+                    if not any(k in body for k in CONFIG_KEYS):
+                        return self._send(200, {"ok": True})
                 # Before the file is written from memory, say whether
                 # somebody had edited it by hand - that edit never
                 # reached the running daemon and is about to be lost.
@@ -29823,6 +29969,14 @@ class Handler(BaseHTTPRequestHandler):
                         norm(k): list((v or {}).get("moved_from") or [])
                         for k, v in (CFG.get("projects") or {}).items()
                         if isinstance(v, dict) and v.get("moved_from")}
+                    # and a window's billing, which only billing_switch
+                    # writes: a stale copy of the projects dict must not
+                    # switch it back, or on (8.157)
+                    kept_bill = {
+                        norm(k): json.loads(json.dumps(v["billing"]))
+                        for k, v in (CFG.get("projects") or {}).items()
+                        if isinstance(v, dict) and v.get("billing")}
+                    carry_lines = []
                     for key in CONFIG_KEYS:
                         if key in body:
                             CFG[key] = body[key]
@@ -29855,11 +30009,15 @@ class Handler(BaseHTTPRequestHandler):
                             else:
                                 folded[nk] = v
                         CFG["projects"] = folded
+                        carry_lines = billing_carry(kept_bill, folded)
                         _warn_unmarked_projects(folded)
                     store.save_config(CFG)
                     now_cfg = json.loads(json.dumps(
                         {k: CFG.get(k) for k in was_cfg}))
                 # OUTSIDE the lock: journal lines are file work (8.147)
+                for at, role, line, level in carry_lines:
+                    store.journal("project", line, project_name(at), role,
+                                  level, project_dir=at)
                 for at, line in config_change_lines(was_cfg, now_cfg):
                     if at:
                         store.journal("project", line, project_name(at), "",

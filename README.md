@@ -499,23 +499,30 @@ running has to be available to them. It cannot be closed up and resold.
 
 Newest first. Short on purpose — what changed, not why in detail.
 
-**2026-10-18 — what is new since the night release of 2026-10-18 (8e6c793)**
+**2026-10-18 — what is new since the morning release of 2026-10-18 (985e60c)**
 
-- **A search no longer points at a copy that is gone.** When a file the
-  archive map names is no longer on disk, the search hands its agent the
-  map without it - the newest copy of the same session that day that
-  stayed takes its place - and one line says how many were taken out.
-  `MAP.md` is not rewritten where no map pass runs.
-- **A call nobody answers is said again to the home pair's planner
-  once.** Every later repeat goes to the Mac's notification and the
-  panel only.
-- **A long turn is timed from its own first entry**, not from the end
-  of the turn before it: a turn opened after hours of stop is not
-  reported hours old.
-- **The panel saves a window's permission mode only when someone picked
-  it**, and shows the bridge-wide mode where the project names none. An
-  executor started in anything but `bypassPermissions` is one warn line
-  in the journal.
+- **Each window chooses what it is billed on.** A project's executor and
+  its planner each run on the subscription - the default - or on an API
+  key, set in the bridge's config beside the permission modes and read
+  when the window starts: a switch needs no restart of the daemon. The
+  panel shows each window's billing on a button; a switch to the key asks
+  first, and every switch is one line in the journal.
+- **The key is read from one file outside every project**,
+  `~/.bridge-api-key` (mode 600 where files have modes), and handed to the
+  client by an `apiKeyHelper` in the window's own `--settings`: no
+  "Detected a custom API key" question, and nothing written to
+  `~/.claude.json`. The bridge never asks for the key, prints it or puts
+  it in the journal - only whether the file is there. No usable file: the
+  window starts on the subscription, with a warn.
+- **Every window starts without `ANTHROPIC_API_KEY` and
+  `ANTHROPIC_AUTH_TOKEN`**, even where the daemon has them, and so does
+  the bridge's own `claude -p`; the sign-in path is untouched. A window
+  on the key also gets `ENABLE_PROMPT_CACHING_1H=1`, and has no Remote
+  Control - the client keeps that for the subscription's sign-in - so it
+  is not in the Claude app while it runs on the key; the journal and the
+  panel's dialog say so.
+- **`check_public.py` refuses an Anthropic key in a published file**, and
+  its report names the place, never the key.
 
 <!-- rule 36: the index's own lines, not the record -->
 Older entries, newest first, back to the first release of 2026-08-18:

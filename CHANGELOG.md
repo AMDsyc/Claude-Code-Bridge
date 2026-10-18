@@ -13,6 +13,24 @@ file before it and listed in `make_public.py`'s `EXTRA`, or it is never
 published.
 
 <!-- /rule 36 -->
+**2026-10-18 — what is new since the night release of 2026-10-18 (8e6c793)**
+
+- **A search no longer points at a copy that is gone.** When a file the
+  archive map names is no longer on disk, the search hands its agent the
+  map without it - the newest copy of the same session that day that
+  stayed takes its place - and one line says how many were taken out.
+  `MAP.md` is not rewritten where no map pass runs.
+- **A call nobody answers is said again to the home pair's planner
+  once.** Every later repeat goes to the Mac's notification and the
+  panel only.
+- **A long turn is timed from its own first entry**, not from the end
+  of the turn before it: a turn opened after hours of stop is not
+  reported hours old.
+- **The panel saves a window's permission mode only when someone picked
+  it**, and shows the bridge-wide mode where the project names none. An
+  executor started in anything but `bypassPermissions` is one warn line
+  in the journal.
+
 **2026-10-18 — what is new since the midday release of 2026-10-17 (8bd49dc)**
 
 - **One pre-compaction copy of a session a day.** Before a compaction

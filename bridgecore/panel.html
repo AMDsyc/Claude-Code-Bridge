@@ -248,6 +248,8 @@ details .inner{padding:4px 14px 14px;color:var(--label);line-height:1.6}
         <option value="default">default - asks about everything</option>
         <option value="bypassPermissions">bypassPermissions - asks nothing at all (dangerous)</option>
       </select>
+      <div class="lab" style="margin-top:12px">billing - the subscription, or the API key from the key file; a switch asks first and reaches the window at its next start</div>
+      <div class="row" id="billExec"></div>
       <label class="row" style="margin-top:10px"><input type="checkbox" id="adminExec"> <span>run as administrator (UAC will ask once)</span></label>
       <label class="row" style="margin-top:6px"><input type="checkbox" id="autoRestart"> <span>restart a dead session automatically (two tries in 10 min, then it waits for you)</span></label>
       <div class="danger" id="dangerStrip"></div>
@@ -266,6 +268,8 @@ details .inner{padding:4px 14px 14px;color:var(--label);line-height:1.6}
         <option value="default">default - asks about everything</option>
         <option value="bypassPermissions">bypassPermissions - asks nothing at all (dangerous)</option>
       </select>
+      <div class="lab" style="margin-top:12px">billing - the subscription, or the API key from the key file; a switch asks first and reaches the window at its next start</div>
+      <div class="row" id="billPlan"></div>
       <label class="row" style="margin-top:10px"><input type="checkbox" id="adminPlan"> <span>run as administrator (UAC will ask once)</span></label>
       <label class="row" style="margin-top:6px"><input type="checkbox" id="roPlan"> <span>never let the reviewer touch the project - denies its edit tools, its shell and the way out of plan mode, so work can only happen through the executor</span></label>
       <div class="danger" id="dangerPlan"></div>
@@ -1226,6 +1230,29 @@ $("#addBtn").onclick=function(){post("/add-project",{path:$("#addPath").value}).
    same default as store.PROJECT_DEFAULTS, which the launch actually reads */
 var CHAINS={executor:["opus","sonnet"],planner:["opus","fable"]},MODE={executor:"auto",planner:"auto",admin:false,adminPlan:false};
 function projConf(){var pc=((D.config||{}).projects||{})[CUR]||{};return pc}
+/* WHAT A WINDOW IS BILLED ON (8.157): the subscription, or the API key
+   from the key file. A switch is a person's: this dialog first, then
+   /config's billing with billing_confirmed, and the journal says it. It
+   reaches the window at its next start; one running keeps what it started
+   on, and its button says so. */
+function billName(m){return m==="api_key"?"API key":"subscription"}
+function billButton(path,role,mode,started){
+  mode=mode==="api_key"?"api_key":"subscription";
+  var to=mode==="api_key"?"subscription":"api_key";
+  return '<button class="btn" data-bill="'+esc(path)+'|'+esc(role)+'|'+to+'" title="What this window is billed on. A click offers the '+billName(to)+' and asks first.">billing: '+billName(mode)+
+    (started&&started!==mode?' <span class="bad">(runs on the '+billName(started)+' until its next start)</span>':'')+'</button>';
+}
+function wireBilling(root){
+  $$(root+" [data-bill]").forEach(function(b){b.onclick=function(){
+    var a=b.dataset.bill.split("|"),k=(D.config||{}).billing_key||{},name=a[0].split(/[\\\/]/).pop();
+    var msg=a[2]==="api_key"
+      ?"Switch the "+a[1]+" of "+name+" to the API key?\n\nIt is PAID per token, from the key in "+(k.file||"the key file")+", with the 1-hour prompt cache.\n\nRemote Control needs the subscription's sign-in: on the key the window is not in the Claude app or at claude.ai/code."+
+        (k.there?"":"\n\nThe key file "+(k.trouble?k.trouble:"is not there")+": until it holds a key, the window starts on the subscription anyway.")
+      :"Switch the "+a[1]+" of "+name+" back to the subscription?\n\nThe window runs on the plan's own sign-in, with no API key.";
+    msg+="\n\nThe window running now keeps what it started on; this reaches it at its next start.";
+    if(!confirm(msg))return;
+    post("/config",{billing:{project:a[0],role:a[1],mode:a[2]},billing_confirmed:true}).then(function(r){if(r&&r.ok===false&&r.error)alert(r.error);tick()})}});
+}
 function renderLaunch(){
   /* The chain on screen is re-read from the saved config on every render,
      and every edit called renderLaunch() straight after making it - so add
@@ -1257,6 +1284,9 @@ function renderLaunch(){
   $("#adminExec").checked=!!MODE.admin; $("#adminPlan").checked=!!MODE.adminPlan;
   MODE.roPlan = pc.readonly_planner!==false;
   $("#roPlan").checked=MODE.roPlan;
+  $("#billExec").innerHTML=CUR?billButton(CUR,"executor",(pc.billing||{}).executor):"";
+  $("#billPlan").innerHTML=CUR?billButton(CUR,"planner",(pc.billing||{}).planner):"";
+  wireBilling("#billExec");wireBilling("#billPlan");
   ["executor","planner"].forEach(function(role){
     var host=$(role==="executor"?"#chainExec":"#chainPlan");host.innerHTML="";
     (CHAINS[role]||[]).forEach(function(m,i){
@@ -1445,13 +1475,15 @@ function renderSessions(){
     var over=cal&&pct!=null&&pct>ceil;
     var tr=document.createElement("tr");
     tr.innerHTML='<td>'+esc(s.role||k)+'<div class="dim">'+esc((s.session_id||"").slice(0,8))+'</div></td>'+
-      '<td class="dim">'+esc(s.project||"")+'</td><td>'+esc(s.model||"-")+'</td>'+
+      '<td class="dim">'+esc(s.project||"")+'</td><td>'+esc(s.model||"-")+
+      '<div style="margin-top:4px">'+billButton(s.path||"",s.role||"",((D.billing||{})[k]||{}).mode,((D.billing||{})[k]||{}).started)+'</div></td>'+
       '<td style="min-width:220px">'+meter(pct,ceil,pct==null?"var(--dim)":over?"var(--red)":"var(--verdigris)")+
       '<span class="dim">'+(pct==null?"-":Math.round(pct)+"% live"+(kw?" of "+fmtTok(kw):""))+(over?' <span class="bad">past the tick - a miss</span>':"")+'</span></td>'+
       '<td class="'+(s.state==="died"?"bad":"")+'">'+esc(s.state||"")+'</td>'+
       '<td>'+(s.state==="died"?'<button class="btn" data-restart="'+esc(s.path||"")+'|'+esc(s.role||"")+'">restart where it stopped</button>':s.state!=="ended"?(D.show_windows?'<button class="btn" data-show="'+esc(s.path||"")+'|'+esc(s.role||"")+'" title="Open a Terminal window on it. Closing that window leaves this one running.">show</button> ':'')+'<button class="btn" data-hand="'+esc(s.path||"")+'|'+esc(s.role||"")+'">hand over</button> <button class="btn warn" data-kill="'+esc(s.path||"")+'|'+esc(s.role||"")+'">stop</button>':'<span class="dim">rotated out</span>')+'</td>';
     tb.appendChild(tr);
   });
+  wireBilling("#sessTable");
   $$("#sessTable [data-kill]").forEach(function(b){b.onclick=function(){
     var a=b.dataset.kill.split("|");post("/session",{action:"stop",project:a[0],role:a[1]}).then(tick)}});
   $$("#sessTable [data-show]").forEach(function(b){b.onclick=function(){

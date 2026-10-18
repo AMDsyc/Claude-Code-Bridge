@@ -38,7 +38,7 @@ import threading
 import time
 import uuid
 
-from . import projlock, store
+from . import keyhelper, projlock, store
 
 CREATE_NEW_CONSOLE = 0x00000010
 SW_SHOWMINNOACTIVE = 7
@@ -171,8 +171,9 @@ def build_command(project, role, resume_id=None, permission_mode=None,
     # this window's and no other session's, and --resume takes it too
     if effort:
         cmd += ["--effort", effort]
-    # this window's own client settings, when the bridge names any - today
-    # only the planner's {"idleCompaction": false} (8.61). The client reads
+    # this window's own client settings, when the bridge names any - the
+    # planner's {"idleCompaction": false} (8.61), and the apiKeyHelper of a
+    # window on the API key (8.157). The client reads
     # the flag source above the project's files, and only the keys given
     if settings:
         cmd += ["--settings", json.dumps(settings, separators=(",", ":"))]
@@ -485,6 +486,153 @@ def read_token(path=None):
     return t, ""
 
 
+# ---------------------------------------------------------------------------
+# WHAT A WINDOW IS BILLED ON. 2026-10-18, by the owner's word, at a watched
+# project's request through the pairs' mailbox: each window runs on the
+# subscription - the client's own sign-in, the default - or on an API key,
+# per project and role (projects[<path>]["billing"][<role>] in the config),
+# read at the window's start, so a switch needs no restart of the daemon.
+#
+# The key never enters a window's environment. ANTHROPIC_API_KEY there
+# makes the interactive client ask "Detected a custom API key" with No as
+# the default, and keep the answer in ~/.claude.json for every project: a
+# window nobody watches holds on the dialog, and the answer is the
+# machine's, not the window's. A window on the key is handed an
+# apiKeyHelper in its own --settings instead; the client runs that line and
+# sends what it prints, and the key stays in its file (keyhelper.py).
+# The client's order (code.claude.com/docs/en/authentication):
+# ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, apiKeyHelper,
+# CLAUDE_CODE_OAUTH_TOKEN, the sign-in. So both variables above the helper
+# leave EVERY window: inherited by the daemon - a PC keeps the key among
+# the user's variables - they would beat the helper in a window on the key,
+# and the sign-in in one on the subscription. Paid use is never switched on
+# quietly: no key file, or one that cannot be used, is a window on the
+# subscription and a warn. -> DECISIONS.md 8.157
+
+KEY_FILE = os.path.join(os.path.expanduser("~"), ".bridge-api-key")
+BILLING_MODES = ("subscription", "api_key")
+CREDENTIAL_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
+CACHE_1H_VAR = "ENABLE_PROMPT_CACHING_1H"
+# the client gives Remote Control to the subscription's sign-in alone -
+# 2.1.302: "Remote Control requires claude.ai subscription auth.
+# apiKeyHelper is configured, so this session is using API-key auth" - so
+# a window on the key, started with --remote-control as every window is,
+# is not in the Claude app; the journal and the switch say so
+NO_REMOTE_ON_KEY = ("Remote Control needs the subscription's sign-in, so on "
+                    "the key the window is not in the Claude app or at "
+                    "claude.ai/code")
+BILLED = {}             # (norm(project), role) -> what its window started on
+_KEY_SEEN = {}          # the key file's stat -> (there, trouble), never a key
+_HEADLESS_TOLD = []
+_KEYLIKE = re.compile(r"sk-ant-[A-Za-z0-9_-]{4,}")
+
+
+def billing_for(project, role, cfg=None):
+    """What the config bills this role of this project on: "api_key" only
+    where it says so, else "subscription". Read from the file at each
+    start unless `cfg` is given, so a switch reaches the next window."""
+    try:
+        cfg = store.load_config() if cfg is None else cfg
+        pc = (cfg.get("projects") or {}).get(store.norm(project)) or {}
+        want = (pc.get("billing") or {}).get(role)
+    except Exception:
+        want = None
+    return want if want in BILLING_MODES else "subscription"
+
+
+def key_state(path=None):
+    """(there, trouble) of the key file - never the key. (True, "") when it
+    holds a usable key, (False, "") when there is no file, (False, why) when
+    there is one with no usable key in it. Remembered by the file's stat,
+    so the panel's poll does not read the key every two seconds."""
+    path = path or KEY_FILE
+    try:
+        st = os.stat(path)
+        seen = (path, st.st_mtime_ns, st.st_size, st.st_mode)
+    except OSError:
+        seen = (path, None)
+    if seen not in _KEY_SEEN:
+        key, trouble = keyhelper.read_key(path)
+        _KEY_SEEN.clear()
+        _KEY_SEEN[seen] = (bool(key), trouble)
+    return _KEY_SEEN[seen]
+
+
+def hide_key(text, path=None):
+    """`text` with the key file's key, and anything shaped like an Anthropic
+    key, taken out - for words that go into the journal."""
+    key, _trouble = keyhelper.read_key(path or KEY_FILE)
+    if key and len(key) >= 16:
+        text = text.replace(key, "(the key, hidden)")
+    return _KEYLIKE.sub("sk-ant-(hidden)", text)
+
+
+def helper_line(key_file=None, os_name=None):
+    """The apiKeyHelper line of a window on the key: this interpreter, run
+    isolated (-I), on keyhelper.py, with the key file. The client runs the
+    line with /bin/sh, or with cmd on Windows - where a part is quoted only
+    when it has to be, since cmd /c strips a line's outer quotes by rules of
+    its own. "" when a path cannot stand on that line at all."""
+    nt = (os_name or os.name) == "nt"
+    parts = [sys.executable or "", "-I",
+             os.path.join(_bridge_root(), "bridgecore", "keyhelper.py"),
+             key_file or KEY_FILE]
+    if not parts[0] or any(c in p for p in parts
+                           for c in ('"%\r\n\0' if nt else "\r\n\0")):
+        return ""
+    if not nt:
+        return " ".join(shlex.quote(p) for p in parts)
+    return " ".join('"%s"' % p if re.search(r"[\s&|<>^(),;=!']", p) else p
+                    for p in parts)
+
+
+def window_billing(project, role, env, settings, cfg=None):
+    """Bill this window as the config says (8.157): into `env`, its
+    environment, and `settings`, its --settings. One journal line says what
+    it starts on whenever that is anything but the plain default. Returns
+    what the window starts on, "subscription" or "api_key"."""
+    want = billing_for(project, role, cfg)
+    dropped = [v for v in CREDENTIAL_VARS if env.pop(v, None) is not None]
+    base = os.path.basename(project.rstrip("\\/")) or project
+    kept = (" %s of the daemon's environment %s kept out of it."
+            % (" and ".join(dropped), "is" if len(dropped) == 1 else "are")
+            if dropped else "")
+    used, level, line = "subscription", "log", ""
+    if want == "api_key":
+        there, trouble = key_state()
+        helper = helper_line() if there else ""
+        if helper:
+            settings["apiKeyHelper"] = helper
+            env[CACHE_1H_VAR] = "1"
+            used = "api_key"
+            line = ("The %s window of %s starts on the API key: the key file "
+                    "%s is there, and the window reads it through its own "
+                    "apiKeyHelper, with %s=1. %s.%s (8.157)"
+                    % (role, base, KEY_FILE, CACHE_1H_VAR, NO_REMOTE_ON_KEY,
+                       kept))
+        else:
+            level = "warn"
+            why = (trouble or "is not there") if not there else (
+                "has a path no helper line can carry (a quote, a percent "
+                "sign or a line break)")
+            line = ("The %s window of %s is set to the API key, but the key "
+                    "file %s %s - so it starts on the subscription. Paid use "
+                    "begins only with a key file the owner puts there.%s "
+                    "(8.157)" % (role, base, KEY_FILE, why, kept))
+    elif dropped:
+        line = ("The %s window of %s starts on the subscription:%s (8.157)"
+                % (role, base, kept))
+    BILLED[(store.norm(project), role)] = {
+        "mode": used, "set": want, "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    if line:
+        try:
+            store.journal("session", line, base, role, level,
+                          project_dir=project)
+        except Exception:
+            pass
+    return used
+
+
 # where the client's native installer puts it, and where a daemon started
 # by launchd or over ssh - with a PATH that never read the login profile -
 # does not look on its own (8.89)
@@ -525,6 +673,24 @@ def headless_client(cmd, env=None):
     token, trouble = read_token() if token_file_on() else ("", "")
     if token:
         env[TOKEN_VAR] = token
+    # on the subscription, always: a `claude -p` uses ANTHROPIC_API_KEY
+    # whenever it is there (code.claude.com, authentication), so where the
+    # key sits among the user's variables the bridge's own searches were
+    # billed to it without anybody choosing that (8.157)
+    dropped = [v for v in CREDENTIAL_VARS if env.pop(v, None) is not None]
+    if dropped and not _HEADLESS_TOLD:
+        _HEADLESS_TOLD.append(True)
+        try:
+            store.journal("session", "%s of the daemon's environment %s kept "
+                          "out of the bridge's own `claude -p` - the "
+                          "archive's search and the model probe - which run "
+                          "on the subscription; a `claude -p` uses such a "
+                          "key whenever it is there (8.157)" % (
+                              " and ".join(dropped),
+                              "is" if len(dropped) == 1 else "are"),
+                          level="log")
+        except Exception:
+            pass
     return cmd, env, trouble
 
 
@@ -1231,11 +1397,16 @@ def launch(project, role, resume_id=None, permission_mode=None, model=None,
     if token:
         env[TOKEN_VAR] = token
 
+    # what this window is billed on, from the config at this start (8.157):
+    # both credential variables leave its environment, and a window on the
+    # key gets the helper line in its own settings - never the key
+    settings = {"idleCompaction": False} if idle_compaction is False else {}
+    window_billing(project, role, env, settings)
+
     name = WINDOW_NAME(project, role, resume_id) if WINDOW_NAME else None
     cmd = build_command(project, role, resume_id, permission_mode, model,
                         disallow, prompt, effort=effort, name=name,
-                        settings={"idleCompaction": False}
-                        if idle_compaction is False else None)
+                        settings=settings or None)
     why = real_client_refused(cmd)
     if why:
         raise RuntimeError(why)

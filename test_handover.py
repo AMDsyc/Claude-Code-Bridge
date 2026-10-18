@@ -9196,7 +9196,8 @@ time.sleep(60)
                   "ensure_marks")}
     _jsaved130 = store.journal
     _env130 = {n: os.environ.get(n) for n in
-               ("TMUX_TMPDIR", "TMUX", "CLAUDE_CODE_OAUTH_TOKEN")}
+               ("TMUX_TMPDIR", "TMUX", "CLAUDE_CODE_OAUTH_TOKEN",
+                "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
     _lines130, _pids130 = [], []
     try:
         sessions.TMUX = [sys.executable, _fake130]
@@ -9206,6 +9207,11 @@ time.sleep(60)
         os.environ["TMUX_TMPDIR"] = _sock130
         os.environ["TMUX"] = "/tmp/somebody-elses,1,0"
         os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = "inherited-130"
+        # neither credential variable: a PC keeps ANTHROPIC_API_KEY among
+        # its user variables, and a start from there says in the journal
+        # that the key was kept out (8.157) - a line this case does not count
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
         store.journal = lambda *a, **k: _lines130.append(a)
         with open(_tf130, "w") as fh:
             fh.write("export CLAUDE_CODE_OAUTH_TOKEN=%s\n" % _SECRET130)
@@ -16676,6 +16682,562 @@ for _n169 in ("test_handover.py", "test_multipair.py", "test_wake_sim.py",
     _wired169[_n169] = (_new169 in _src169, _old169 in _src169)
 check("(f) each of the five: tmux_finish, no finish",
       sorted(set(_wired169.values())), [(True, False)])
+
+print("\n170. what a window is billed on (8.157): the subscription, or an API")
+print("     key, per project and role, read from the config at each start.")
+print("     ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN of the daemon's own")
+print("     environment leave EVERY window; one on the key gets an")
+print("     apiKeyHelper in its own --settings and ENABLE_PROMPT_CACHING_1H=1,")
+print("     never the key; no usable key file is the subscription and a warn.")
+print("     A switch is a person's - the panel's dialog, or the owner's word")
+print("     that the executor quotes - and the journal says it. The key")
+print("     reaches no journal, no handoff, no /state and no public tree.")
+print("     FAILURE WOULD LOOK LIKE: an inherited key in a window on the")
+print("     subscription, a window on the key without its helper or the cache")
+print("     flag, paid use from a missing file, a switch nobody asked for or")
+print("     nobody hears of, or the key in a line anybody reads")
+import json as _js170                                       # noqa: E402
+import shlex as _sh170                                      # noqa: E402
+import threading as _th170                                  # noqa: E402
+import urllib.error as _ue170                               # noqa: E402
+import urllib.request as _ur170                             # noqa: E402
+from http.server import ThreadingHTTPServer as _THS170      # noqa: E402
+from bridgecore import projlock as _pl170                   # noqa: E402
+from bridgecore import sessions                             # noqa: E402,F811
+try:
+    from bridgecore import keyhelper as _kh170              # noqa: E402
+except ImportError:                 # a tree without it: FAIL, not a crash
+    _kh170 = None
+_d170 = os.path.join(TMP, "case170")
+_p170 = os.path.join(_d170, "proj170")
+os.makedirs(_p170, exist_ok=True)
+_n170 = store.norm(_p170)
+_kf170 = os.path.join(_d170, "bridge-api-key")
+# the stand-in key is put together at run time, so that no line of this
+# file is shaped like a key to check_public's rule; the marker is a part
+# of it that nothing else in the run says
+_MARK170 = "Case170fake"
+_FAKE170 = "sk-" + "ant-" + "api03-" + _MARK170 + "Z" * 40
+_CRED170 = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+_ENVS170 = _CRED170 + ("CLAUDE_CODE_OAUTH_TOKEN", "ENABLE_PROMPT_CACHING_1H")
+_envsaved170 = {n: os.environ.get(n) for n in _ENVS170}
+_saved170 = {n: getattr(sessions, n, None) for n in
+             ("build_command", "tmux_command", "ensure_marks", "subprocess",
+              "KEY_FILE", "TOKEN_FILE_ON")}
+_cfgsaved170 = _js170.loads(_js170.dumps(daemon.CFG.get("projects") or {}))
+
+
+def _key170(raw, mode=0o600):
+    """The key file as the owner leaves it: `raw` bytes, or None for no
+    file at all. What the bridge remembers of the last one is dropped, so
+    each part reads the file it wrote and not the one before."""
+    if raw is None:
+        if os.path.exists(_kf170):
+            os.remove(_kf170)
+    else:
+        with open(_kf170, "wb") as fh:
+            fh.write(raw)
+        os.chmod(_kf170, mode)
+    getattr(sessions, "_KEY_SEEN", {}).clear()
+
+
+def _bill170(**roles):
+    """The case project's billing written into the config as a hand-edit
+    of the file would put it - the switch itself is part (d)'s."""
+    pc = daemon.CFG.setdefault("projects", {}).setdefault(_n170, {})
+    if roles:
+        pc["billing"] = dict(roles)
+    else:
+        pc.pop("billing", None)
+    store.save_config(daemon.CFG)
+
+
+def _disk170(role):
+    pc = (store.load_config().get("projects") or {}).get(_n170) or {}
+    return (pc.get("billing") or {}).get(role)
+
+
+def _ev170():
+    return store._read_events(os.path.join(store.day_dir(), "events.jsonl"))
+
+
+def _said170(since, *words):
+    """(level, text) of each journal line written since `since` that names
+    every one of `words`."""
+    return [(r.get("level"), r.get("text") or "") for r in _ev170()[since:]
+            if all(w in (r.get("text") or "") for w in words)]
+
+
+class _Proc170(object):
+    pid = 0
+    returncode = 0
+
+    def poll(self):
+        return 0
+
+    def wait(self, timeout=None):
+        return 0
+
+
+class _Sub170(object):
+    """subprocess as launch() sees it: Popen keeps what the window would be
+    started with - its command and its whole environment - and starts
+    nothing. Everything else is the real module's."""
+
+    def __init__(self):
+        self.seen = []
+
+    def __getattr__(self, name):
+        return getattr(subprocess, name)
+
+    def Popen(self, cmd, **kw):
+        self.seen.append({"cmd": list(cmd), "env": dict(kw.get("env") or {})})
+        return _Proc170()
+
+
+def _launch170(role):
+    """One start of the case project's window through launch() itself, the
+    daemon's environment carrying both credential variables and a sign-in
+    token. {err, env, settings, cmd}: cmd is the client's real command line,
+    as build_command made it from what launch() handed it."""
+    sub, built = _Sub170(), []
+    real_build = _saved170["build_command"]
+
+    def build(project, role_, *a, **k):
+        built.append({"settings": dict(k.get("settings") or {}),
+                      "cmd": real_build(project, role_, *a, **k)})
+        return [sys.executable, "-c", "pass"]
+    sessions.build_command = build
+    sessions.tmux_command = lambda: None
+    sessions.ensure_marks = lambda project, role="": []
+    sessions.subprocess = sub
+    sessions.TOKEN_FILE_ON = False
+    os.environ["ANTHROPIC_API_KEY"] = "daemon-env-key-170"
+    os.environ["ANTHROPIC_AUTH_TOKEN"] = "daemon-env-auth-170"
+    os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = "daemon-env-oauth-170"
+    os.environ.pop("ENABLE_PROMPT_CACHING_1H", None)
+    err = ""
+    try:
+        sessions.launch(_p170, role)
+    except Exception as exc:                # speak, do not crash the suite
+        err = "%s: %s" % (type(exc).__name__, exc)
+    finally:
+        for n in ("build_command", "tmux_command", "ensure_marks",
+                  "subprocess", "TOKEN_FILE_ON"):
+            setattr(sessions, n, _saved170[n])
+        for n, v in _envsaved170.items():
+            if v is None:
+                os.environ.pop(n, None)
+            else:
+                os.environ[n] = v
+        sessions.PROCS.pop((_n170, role), None)
+        _pl170.release(_p170)
+    b = built[-1] if built else {}
+    return {"err": err, "env": sub.seen[-1]["env"] if sub.seen else {},
+            "settings": b.get("settings") or {}, "cmd": b.get("cmd") or []}
+
+
+def _creds170(env):
+    return sorted(n for n in _CRED170 if n in env)
+
+
+def _srv_up170():
+    srv = _THS170(("127.0.0.1", 0), daemon.Handler)
+    srv.daemon_threads = True
+    _th170.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def _call170(route, body=None):
+    """(status, answer) from this case's own server - never the live one."""
+    head = {"Content-Type": "application/json"}
+    data = None
+    if body is not None:
+        head["X-Bridge-Secret"] = daemon.SECRET
+        data = _js170.dumps(body).encode("utf-8")
+    rq = _ur170.Request("http://127.0.0.1:%d%s" % (
+        _srv170.server_address[1], route), data=data, headers=head)
+    try:
+        with _ur170.urlopen(rq, timeout=30) as r:
+            return r.status, _js170.loads(r.read().decode("utf-8"))
+    except _ue170.HTTPError as exc:
+        try:
+            return exc.code, _js170.loads(exc.read().decode("utf-8"))
+        except ValueError:
+            return exc.code, None
+    except Exception as exc:                # no answer is an answer too
+        return None, "%s: %s" % (type(exc).__name__, exc)
+
+
+_srv170 = None
+try:
+    sessions.KEY_FILE = _kf170
+    _key170((_FAKE170 + "\n").encode("ascii"))
+
+    print("   (a) the subscription, the default: a key file is there, and the")
+    print("   window neither reads it nor gets the daemon's key")
+    _bill170()
+    _s170 = len(_ev170())
+    _a170 = _launch170("executor")
+    check("(a) launched", _a170["err"], "")
+    check("(a) neither credential variable of the daemon's environment "
+          "reaches the window, its sign-in token does, and there is no "
+          "helper and no cache flag",
+          (_creds170(_a170["env"]),
+           _a170["env"].get("CLAUDE_CODE_OAUTH_TOKEN"),
+           "apiKeyHelper" in _a170["settings"],
+           "ENABLE_PROMPT_CACHING_1H" in _a170["env"]),
+          ([], "daemon-env-oauth-170", False, False))
+    check("(a) one journal line: it starts on the subscription, and what of "
+          "the daemon's environment was kept out",
+          [(lv, "starts on the subscription" in t, "ANTHROPIC_API_KEY" in t)
+           for lv, t in _said170(_s170, "proj170", "(8.157)")],
+          [("log", True, True)])
+
+    print("   (b) the executor on the key: the helper and the cache flag, the")
+    print("   key itself nowhere on the way")
+    _bill170(executor="api_key")
+    _s170 = len(_ev170())
+    _b170 = _launch170("executor")
+    _hl170 = _b170["settings"].get("apiKeyHelper") or ""
+    check("(b) the helper in the window's own settings, the 1-hour cache "
+          "flag, and neither credential variable",
+          (bool(_hl170), _b170["env"].get("ENABLE_PROMPT_CACHING_1H"),
+           _creds170(_b170["env"])), (True, "1", []))
+    _cmd170 = _b170["cmd"]
+    _sv170 = (_cmd170[_cmd170.index("--settings") + 1]
+              if "--settings" in _cmd170[:-1] else "{}")
+    check("(b) the client's command line carries that helper in --settings",
+          (bool(_hl170), _js170.loads(_sv170).get("apiKeyHelper") == _hl170),
+          (True, True))
+    _run170 = (subprocess.run(_hl170, shell=True, capture_output=True,
+                              timeout=60) if _hl170 else None)
+    check("(b) the helper line, run by a shell as the client runs it, prints "
+          "the key and nothing else",
+          (_run170.returncode, _run170.stdout == _FAKE170.encode("ascii"))
+          if _run170 else "no helper line", (0, True))
+    check("(b) the key is in neither the window's environment nor its "
+          "command line",
+          (any(_MARK170 in v for v in _b170["env"].values()),
+           any(_MARK170 in c for c in _cmd170)), (False, False))
+    check("(b) one journal line: it starts on the API key, naming the file "
+          "and never the key, and that the window is not in the Claude app",
+          [(lv, "starts on the API key" in t, _kf170 in t, _MARK170 in t,
+            "Remote Control needs the subscription" in t)
+           for lv, t in _said170(_s170, "proj170", "(8.157)")],
+          [("log", True, True, False, True)])
+    _bv170 = getattr(daemon, "billing_view", None)
+    check("(b) what /state gives the window: the config's word and what it "
+          "started on",
+          _bv170(_p170, "executor") if _bv170 else "no billing_view",
+          {"mode": "api_key", "started": "api_key"})
+    _bp170 = _launch170("planner")
+    check("(b) the planner of the same project stays on the subscription",
+          ("apiKeyHelper" in _bp170["settings"],
+           "ENABLE_PROMPT_CACHING_1H" in _bp170["env"],
+           _creds170(_bp170["env"])), (False, False, []))
+    if os.name != "nt":
+        _key170((_FAKE170 + "\n").encode("ascii"), 0o644)
+        _s170 = len(_ev170())
+        _m170 = _launch170("executor")
+        check("(b) a key file others may read is not used: the subscription, "
+              "and a warn naming chmod 600 and never the key",
+              ("apiKeyHelper" in _m170["settings"],
+               [(lv, "chmod 600" in t, "starts on the subscription" in t,
+                 _MARK170 in t)
+                for lv, t in _said170(_s170, "proj170", "(8.157)")]),
+              (False, [("warn", True, True, False)]))
+        _key170((_FAKE170 + "\n").encode("ascii"))
+    else:
+        print("   (b) a file's modes: not here - Windows gives a file none")
+
+    print("   (c) no key file, then an empty one: the subscription and a warn")
+    print("   - paid use is never switched on quietly")
+    _key170(None)
+    _s170 = len(_ev170())
+    _c170 = _launch170("executor")
+    check("(c) no file: no helper, no cache flag, no credential variable, "
+          "and a warn that it is not there",
+          ("apiKeyHelper" in _c170["settings"],
+           "ENABLE_PROMPT_CACHING_1H" in _c170["env"],
+           _creds170(_c170["env"]),
+           [(lv, "is not there" in t, "starts on the subscription" in t)
+            for lv, t in _said170(_s170, "proj170", "(8.157)")]),
+          (False, False, [], [("warn", True, True)]))
+    _key170(b"")
+    _s170 = len(_ev170())
+    _c170 = _launch170("executor")
+    check("(c) an empty file: the same, and the warn says it is empty",
+          ("apiKeyHelper" in _c170["settings"],
+           [(lv, "is empty" in t, "starts on the subscription" in t)
+            for lv, t in _said170(_s170, "proj170", "(8.157)")]),
+          (False, [("warn", True, True)]))
+    _key170((_FAKE170 + "\n").encode("ascii"))
+
+    print("   (d) the switch, through /config of a server of this case's own")
+    _bill170()
+    _srv170 = _srv_up170()
+    _s170 = len(_ev170())
+    _d170a = _call170("/config", {"billing": {
+        "project": _p170, "role": "executor", "mode": "api_key"},
+        "billing_confirmed": True})
+    check("(d) the panel's switch, confirmed in its dialog: answered, and "
+          "the executor is on the key in the file",
+          (_d170a[0], _disk170("executor"), _disk170("planner")),
+          (200, "api_key", None))
+    check("(d) and the journal says it: who switched it, from what to what, "
+          "that the key file is there, and that on the key the window is "
+          "not in the Claude app",
+          [(lv, "subscription -> api_key" in t,
+            "confirmed in its dialog" in t, "is there" in t,
+            "Remote Control needs the subscription" in t)
+           for lv, t in _said170(_s170, "Billing of the executor")],
+          [("log", True, True, True, True)])
+    _s170 = len(_ev170())
+    _d170b = _call170("/config", {"billing": {
+        "project": _p170, "role": "executor", "mode": "subscription"},
+        "billing_word": "back on the plan, the owner wrote - and pasted "
+                        + _FAKE170})
+    check("(d) the owner's word: answered, the subscription in the file, and "
+          "the journal quotes the word with the key taken out",
+          (_d170b[0], _disk170("executor"),
+           [(lv, "api_key -> subscription" in t,
+             'which the executor quotes: "back on the plan' in t,
+             "hidden)" in t, _MARK170 in t)
+            for lv, t in _said170(_s170, "Billing of the executor")]),
+          (200, "subscription", [("log", True, True, True, False)]))
+    _s170 = len(_ev170())
+    _d170c = _call170("/config", {"billing": {
+        "project": _p170, "role": "executor", "mode": "api_key"}})
+    check("(d) neither the dialog nor the word - a pair on its own: refused, "
+          "nothing written, and the refusal is a warn",
+          (_d170c[0], _disk170("executor"),
+           [lv for lv, t in _said170(_s170, "A switch of billing was "
+                                     "refused", "billing_word")]),
+          (400, "subscription", ["warn"]))
+    check("(d) a role, a mode or a project the bridge has not got, or no "
+          "{project, role, mode}: refused each",
+          [_call170("/config", {"billing": b, "billing_confirmed": True})[0]
+           for b in ({"project": _p170, "role": "reviewer",
+                      "mode": "api_key"},
+                     {"project": _p170, "role": "executor", "mode": "free"},
+                     {"project": os.path.join(_d170, "not-watched"),
+                      "role": "executor", "mode": "api_key"},
+                     "api_key")],
+          [400, 400, 400, 400])
+    _pj170 = _js170.loads(_js170.dumps(daemon.CFG.get("projects") or {}))
+    _pj170.setdefault(_n170, {})["billing"] = {"executor": "api_key"}
+    _s170 = len(_ev170())
+    _d170d = _call170("/config", {"projects": _pj170})
+    check("(d) a write of the whole projects dict naming another billing - "
+          "a stale copy, or a way round the dialog: answered, billing "
+          "stays, and a warn says so",
+          (_d170d[0], _disk170("executor"),
+           [lv for lv, t in _said170(_s170, "projects dict named billing")]),
+          (200, "subscription", ["warn"]))
+    _call170("/config", {"billing": {
+        "project": _p170, "role": "executor", "mode": "api_key"},
+        "billing_confirmed": True})
+    _pj170 = _js170.loads(_js170.dumps(daemon.CFG.get("projects") or {}))
+    _pj170.setdefault(_n170, {}).pop("billing", None)
+    _pj170[_n170]["commit_each_iteration"] = False
+    _s170 = len(_ev170())
+    _d170e = _call170("/config", {"projects": _pj170})
+    check("(d) one that leaves billing out - every toggle of the panel - "
+          "carries it across in silence",
+          (_d170e[0], _disk170("executor"),
+           _said170(_s170, "projects dict named billing")),
+          (200, "api_key", []))
+
+    print("   (e) the key reaches nothing anybody reads")
+    _b170 = _launch170("executor")
+    _st170 = _call170("/state")
+    _hand170 = daemon.mechanical_handoff(_p170, {"iteration": 170})
+    store.flush_project_writes(10.0)
+    _bk170 = (_st170[1].get("config") or {}).get("billing_key") \
+        if isinstance(_st170[1], dict) else _st170[1]
+    check("(e) /state says where the key file is and that it holds a key - "
+          "and no more", _bk170, {"file": _kf170, "there": True,
+                                  "trouble": ""})
+    check("(e) the switch of (d) reaches the window's next start, with no "
+          "restart of the daemon: the helper and the cache flag",
+          ("apiKeyHelper" in _b170["settings"],
+           _b170["env"].get("ENABLE_PROMPT_CACHING_1H"), _b170["err"]),
+          (True, "1", ""))
+    with open(os.path.join(store.day_dir(), "events.jsonl"), "rb") as _fh:
+        _cj170 = _fh.read().decode("utf-8", "replace")
+    _pf170 = {}
+    for _dp, _dn, _fn in os.walk(os.path.join(_p170, "bridge-logs")):
+        for _f in _fn:
+            with open(os.path.join(_dp, _f), "rb") as _fh:
+                _pf170[os.path.relpath(os.path.join(_dp, _f), _p170)] = \
+                    _fh.read().decode("utf-8", "replace")
+    check("(e) the key is in no journal - the bridge's or the project's - "
+          "and not in the handoff the bridge wrote, nor in /state; while "
+          "the lines about the key are there",
+          (_MARK170 in _cj170,
+           sorted(k for k, v in _pf170.items() if _MARK170 in v),
+           any(k.endswith("current.md") for k in _pf170),
+           _MARK170 in (_hand170 or ""),
+           _MARK170 in _js170.dumps(_st170[1]),
+           "starts on the API key" in _cj170,
+           "which the executor quotes" in _cj170),
+          (False, [], True, False, False, True, True))
+    _cp170 = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(daemon.__file__))), "check_public.py")
+
+    def _scan170(name, text):
+        d = os.path.join(_d170, name)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "notes.txt"), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        r = subprocess.run([sys.executable, _cp170, d], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace")
+        return r.returncode, (r.stdout or "") + (r.stderr or "")
+    if os.path.isfile(_cp170):
+        _cw170 = _scan170("pub-with-key", "the window's key: %s\n" % _FAKE170)
+        _co170 = _scan170("pub-without-key", "the window's key is in "
+                          "~/.bridge-api-key, never here\n")
+        check("(e) check_public refuses a tree that holds the key, naming "
+              "its rule and never the key; the tree without it is not "
+              "refused for one",
+              (_cw170[0] != 0, "anthropic api key - 1" in _cw170[1],
+               "notes.txt:1" in _cw170[1], _MARK170 in _cw170[1],
+               "anthropic api key - " in _co170[1]),
+              (True, True, True, False, False))
+    else:
+        print("   (e) check_public: not counted - no check_public.py beside")
+        print("   the package, as in an unpacked package")
+
+    print("   (f) the bridge's own claude -p runs on the subscription")
+    _hc170 = sessions.headless_client(
+        ["claude", "-p", "x"], {"ANTHROPIC_API_KEY": "daemon-env-key-170",
+                                "ANTHROPIC_AUTH_TOKEN": "daemon-env-auth-170",
+                                "PATH": os.environ.get("PATH", "")})
+    check("(f) the archive's search and the model probe get neither "
+          "credential variable", _creds170(_hc170[1]), [])
+
+    print("   (g) the key file read as a person writes it")
+    _uk170 = os.path.join(_d170, "unit-key")
+
+    def _rk170(raw):
+        with open(_uk170, "wb") as fh:
+            fh.write(raw)
+        os.chmod(_uk170, 0o600)
+        return _kh170.read_key(_uk170) if _kh170 else "no keyhelper"
+    _K170 = _FAKE170
+    # whether each read gives the key, not the key: a suite's output is
+    # kept in a run's folder, and a key-shaped line has no business there
+    check("(g) bare; after export, set or $env:; in quotes; with a BOM; as "
+          "PowerShell 5 writes it, UTF-16",
+          [(r[0] == _K170, r[1]) if isinstance(r, tuple) else r
+           for r in (_rk170(raw) for raw in (
+              (_K170 + "\n").encode("ascii"),
+              ("export ANTHROPIC_API_KEY=%s\n" % _K170).encode("ascii"),
+              ("set ANTHROPIC_API_KEY=%s\r\n" % _K170).encode("ascii"),
+              ('$env:ANTHROPIC_API_KEY = "%s"\n' % _K170).encode("ascii"),
+              ("ANTHROPIC_API_KEY='%s'" % _K170).encode("ascii"),
+              b"\xef\xbb\xbf" + _K170.encode("ascii"),
+              ("%s\r\n" % _K170).encode("utf-16")))],
+          [(True, "")] * 7)
+    _bad170 = [("is empty", b""), ("is empty", b"  \n"),
+               ("holds 2 lines", ("%s\n%s\n" % (_K170, _K170)).encode()),
+               ("is broken: a space",
+                (_K170[:30] + " " + _K170[30:]).encode()),
+               ("is broken: a non-ASCII character",
+                (_K170[:30] + "\u00e9" + _K170[30:]).encode("utf-8")),
+               ("is not UTF-8 text", b"\xff\xff\xff not text")]
+    _rb170 = [(w, _rk170(r)) for w, r in _bad170]
+    check("(g) a file with no usable key says why, and never quotes it",
+          [(r[0], r[1].startswith(w), _MARK170 in r[1])
+           if isinstance(r, tuple) else r for w, r in _rb170],
+          [("", True, False)] * len(_bad170))
+    _khp170 = os.path.join(os.path.dirname(os.path.abspath(
+        daemon.__file__)), "keyhelper.py")
+    _r170 = subprocess.run([sys.executable, "-I", _khp170,
+                            os.path.join(_d170, "no-such-key")],
+                           capture_output=True, timeout=60)
+    check("(g) the helper with no file: exit 1, nothing on its output, and "
+          "it says the file is not there",
+          (_r170.returncode, _r170.stdout, b"is not there" in _r170.stderr),
+          (1, b"", True))
+
+    print("   (h) the helper line on each machine")
+    _hlf170 = getattr(sessions, "helper_line", None)
+    _sp170 = os.path.join(_d170, "a key file")
+    check("(h) on Windows a part is quoted only when it has to be, cmd "
+          "stripping a line's outer quotes by rules of its own; a path no "
+          "line can carry gives no line; elsewhere each part is sh-quoted",
+          (_hlf170(_sp170, "nt").endswith(' "%s"' % _sp170),
+           _hlf170(_kf170, "nt").endswith(" " + _kf170)
+           or any(c in _kf170 for c in " \t&|<>^(),;=!'"),
+           _hlf170(_d170 + "\\100%", "nt"),
+           _hlf170(_d170 + "\nx", "posix"),
+           _hlf170(_sp170, "posix").endswith(" " + _sh170.quote(_sp170)))
+          if _hlf170 else "no helper_line", (True, True, "", "", True))
+
+    print("   (i) the panel: a button on each window, and it asks first")
+    with open(os.path.join(os.path.dirname(daemon.__file__), "panel.html"),
+              encoding="utf-8") as _fh:
+        _pan170 = _fh.read()
+
+    def _fn170(name):
+        i = _pan170.find("function %s(" % name)
+        if i < 0:
+            return ""
+        j = _pan170.find("\nfunction ", i + 1)
+        return _pan170[i:j if j > 0 else len(_pan170)]
+    _wb170 = _fn170("wireBilling")
+    check("(i) the button asks first - a confirm() that calls the key paid "
+          "and says the window leaves the Claude app - and only then posts "
+          "/config with billing_confirmed",
+          ("confirm(" in _wb170, "PAID" in _wb170,
+           "Remote Control needs the subscription" in _wb170,
+           -1 < _wb170.find("confirm(") < _wb170.find('post("/config"'),
+           "billing_confirmed:true" in _wb170), (True, True, True, True, True))
+    check("(i) a button on both launch cards and on each row of the "
+          "sessions list, each wired to it",
+          ('id="billExec"' in _pan170, 'id="billPlan"' in _pan170,
+           'wireBilling("#billExec")' in _fn170("renderLaunch"),
+           "billButton(" in _fn170("renderSessions")
+           and 'wireBilling("#sessTable")' in _fn170("renderSessions")),
+          (True, True, True, True))
+
+    print("   (j) the helper travels with the bridge: every module of")
+    print("   bridgecore/ is a file of the package, keyhelper.py among them -")
+    print("   a package without it starts a window on the key that cannot")
+    print("   run its helper")
+    _bc170 = os.path.dirname(os.path.abspath(daemon.__file__))
+    _vp170 = os.path.join(os.path.dirname(_bc170), "verify_package.py")
+    _vn170 = {"FILES": []}
+    if os.path.isfile(_vp170):
+        with open(_vp170, encoding="utf-8") as _fh:
+            exec(compile(_fh.read(), _vp170, "exec"), _vn170)
+    check("(j) keyhelper.py is on the package's list, and no module of "
+          "bridgecore/ is left off it",
+          ("source/bridgecore/keyhelper.py" in _vn170["FILES"],
+           sorted(m for m in os.listdir(_bc170) if m.endswith(".py")
+                  and "source/bridgecore/" + m not in _vn170["FILES"])),
+          (True, []))
+finally:
+    for _n in ("build_command", "tmux_command", "ensure_marks", "subprocess",
+               "KEY_FILE", "TOKEN_FILE_ON"):
+        setattr(sessions, _n, _saved170[_n])
+    for _n, _v in _envsaved170.items():
+        if _v is None:
+            os.environ.pop(_n, None)
+        else:
+            os.environ[_n] = _v
+    for _r in ("executor", "planner"):
+        getattr(sessions, "BILLED", {}).pop((_n170, _r), None)
+        sessions.PROCS.pop((_n170, _r), None)
+    getattr(sessions, "_KEY_SEEN", {}).clear()
+    if _srv170 is not None:
+        _srv170.shutdown()
+        _srv170.server_close()
+    daemon.CFG["projects"] = _cfgsaved170
+    store.save_config(daemon.CFG)
+    store.flush_project_writes(10.0)
 
 check("nothing this run did reached past this machine: the fence was up, "
       "and it refused nothing (netfence.py, 8.142)",

@@ -148,6 +148,11 @@ RULES = [
     ("telegram bot token", re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{30,}\b")),
     ("telegram chat id", re.compile(r"chat[_ ]?id\s*[:=]\s*[\"']?-?\d{6,}")),
     ("shared secret value", re.compile(r"bridge-secret\s*[:=]\s*[\"'][^\"']+")),
+    # a window on the API key reads it from a file outside every tree; one
+    # that reached a published file is refused, whoever put it there. A
+    # real key runs to a hundred characters; forty leaves the suites' short
+    # stand-ins alone, and the report never prints what it found (8.157)
+    ("anthropic api key", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{40,}")),
     ("session id", re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
                               r"[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)),
     ("claude session link", re.compile(r"claude\.ai/code/session_\w+", re.I)),
@@ -631,7 +636,13 @@ def scan_text(rel, text, found):
             m = next((m for m in pat.finditer(line)
                       if not placeholder(kind, m.group(0))), None)
             if m and not exempt(line, kind, rel):
-                found.append((rel, n, kind, m.group(0)[:70], line.strip()[:90]))
+                hit, said = m.group(0)[:70], line.strip()[:90]
+                if kind == "anthropic api key":
+                    # where it is and how long, never the key: this report
+                    # is written into a run's folder (8.157)
+                    hit = "sk-ant-(hidden, %d characters)" % len(m.group(0))
+                    said = pat.sub("sk-ant-(hidden)", line).strip()[:90]
+                found.append((rel, n, kind, hit, said))
         m = CYRILLIC.search(line)
         if m and not exempt(line, "cyrillic", rel):
             run = CYRILLIC.findall(line)
